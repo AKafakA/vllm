@@ -752,6 +752,15 @@ class LLMEngine:
         "inputs",
         additional_message="Please use the 'prompt' parameter instead.",
     )
+
+
+    def get_scheduler_trace(self):
+        scheduler_traces = {}
+        for i, scheduler in enumerate(self.scheduler):
+            scheduler_traces[i] = scheduler.get_scheduler_trace()
+        return scheduler_traces
+
+
     def add_request(
             self,
             request_id: str,

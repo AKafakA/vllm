@@ -37,6 +37,14 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
+@app.get("/schedule_trace")
+async def status() -> Response:
+    """Status check."""
+    assert engine is not None
+    scheduler_trace = engine.get_scheduler_trace()
+    return JSONResponse(scheduler_trace)
+
+
 @app.post("/generate")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.

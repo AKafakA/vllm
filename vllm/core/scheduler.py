@@ -28,6 +28,34 @@ ARTIFICIAL_PREEMPTION_PROB = 0.5
 ARTIFICIAL_PREEMPTION_MAX_CNT = 500
 
 
+def get_request_info(requests: List[SequenceGroup]) -> List[Dict]:
+    requests_info = []
+    for sequence_group in requests:
+        request_info = {}
+        seq_total_output_length = 0
+        seq_prompts_length = 0
+        n_blocks = 0
+        for sequence in sequence_group.seqs:
+            seq_total_output_length += sequence.get_output_len()
+            seq_prompts_length += sequence.get_prompt_len()
+            n_blocks += sequence.n_blocks
+        request_info["request_id"] = sequence_group.request_id
+        request_info["seq_total_output_length"] = seq_total_output_length
+        request_info["seq_prompts_length"] = seq_prompts_length
+        request_info["arrival_time"] = sequence_group.arrival_time
+        request_info["n_blocks"] = n_blocks
+        requests_info.append(request_info)
+    return requests_info
+
+
+class SchedulerRequestLengthTrace:
+    def __init__(self, running_request: List[SequenceGroup], waiting_request: List[SequenceGroup],
+                 swap_request: List[SequenceGroup]):
+        self.running_request_length = get_request_info(running_request)
+        self.waiting_request_length = get_request_info(waiting_request)
+        self.swap_request_length = get_request_info(swap_request)
+
+
 class PreemptionMode(enum.Enum):
     """Preemption modes.
 
@@ -422,6 +450,9 @@ class Scheduler:
     def num_decoding_tokens_per_seq(self) -> int:
         """The number of new tokens."""
         return 1
+
+    def get_scheduler_trace(self) -> SchedulerRequestLengthTrace:
+        return SchedulerRequestLengthTrace(list(self.running), list(self.waiting), list(self.swapped))
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
