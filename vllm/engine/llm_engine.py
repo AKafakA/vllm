@@ -753,14 +753,6 @@ class LLMEngine:
         additional_message="Please use the 'prompt' parameter instead.",
     )
 
-
-    def get_scheduler_trace(self):
-        scheduler_traces = {}
-        for i, scheduler in enumerate(self.scheduler):
-            scheduler_traces[i] = scheduler.get_scheduler_trace()
-        return scheduler_traces
-
-
     def add_request(
             self,
             request_id: str,
@@ -990,6 +982,13 @@ class LLMEngine:
     def get_scheduler_config(self) -> SchedulerConfig:
         """Gets the scheduler configuration."""
         return self.scheduler_config
+
+    def get_scheduler_trace(self):
+        scheduler_traces = {}
+        for i, scheduler in enumerate(self.scheduler):
+            scheduler_traces[i] = scheduler.get_scheduler_trace()
+        return scheduler_traces
+
 
     def get_lora_config(self) -> LoRAConfig:
         """Gets the LoRA configuration."""

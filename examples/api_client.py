@@ -26,7 +26,6 @@ def post_http_request(prompt: str,
     pload = {
         "prompt": prompt,
         "n": n,
-        "use_beam_search": True,
         "temperature": 0.0,
         "max_tokens": 16,
         "stream": stream,
@@ -35,6 +34,12 @@ def post_http_request(prompt: str,
                              headers=headers,
                              json=pload,
                              stream=stream)
+    return response
+
+
+def get_http_request(query_url: str) -> requests.Response:
+    headers = {"User-Agent": "Test Client"}
+    response = requests.get(query_url, headers=headers)
     return response
 
 
@@ -61,14 +66,20 @@ if __name__ == "__main__":
     parser.add_argument("--n", type=int, default=4)
     parser.add_argument("--prompt", type=str, default="San Francisco is a")
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--return_scheduler_trace", type=bool, default=False)
     args = parser.parse_args()
     prompt = args.prompt
     api_url = f"http://{args.host}:{args.port}/generate"
     n = args.n
     stream = args.stream
+    return_scheduler_trace = args.return_scheduler_trace
 
     print(f"Prompt: {prompt!r}\n", flush=True)
     response = post_http_request(prompt, api_url, n, stream)
+    if return_scheduler_trace:
+        api_url = f"http://{args.host}:{args.port}/schedule_trace"
+        response = get_http_request(api_url)
+        print(f"Scheduler trace: {response}", flush=True)
 
     if stream:
         num_printed_lines = 0
