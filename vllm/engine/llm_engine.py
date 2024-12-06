@@ -986,7 +986,11 @@ class LLMEngine:
     def get_scheduler_trace(self):
         scheduler_traces = {}
         for i, scheduler in enumerate(self.scheduler):
-            scheduler_traces[i] = scheduler.get_scheduler_trace()
+            scheduler_traces[i] = {}
+            trace = scheduler.get_scheduler_trace()
+            scheduler_traces[i]["swap"] = trace.swap_request_length
+            scheduler_traces[i]["running"] = trace.running_request_length
+            scheduler_traces[i]["waiting"] = trace.waiting_request_length
         return scheduler_traces
 
 
