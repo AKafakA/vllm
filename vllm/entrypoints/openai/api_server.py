@@ -343,6 +343,14 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
+
+@router.get("/scheduler_trace")
+async def scheduler_trace(raw_request: Request) -> Response:
+    trace = await engine_client(raw_request).get_scheduler_trace()
+    return JSONResponse(trace)
+
+
+
 @router.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
