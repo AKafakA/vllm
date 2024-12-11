@@ -145,11 +145,11 @@ async def generate_benchmark(request: Request) -> Response:
     }
     if final_output.metrics:
         if final_output.metrics.time_in_queue:
-            ret['waiting_latency'] = final_output.metrics.time_in_queue
+            ret['waiting_latency'] = final_output.metrics.time_in_queue * 1000
         if final_output.metrics.model_execute_time:
-            ret['inference_latency'] = final_output.metrics.model_execute_time
+            ret['inference_latency'] = final_output.metrics.model_execute_time * 1000
         if final_output.metrics.first_token_time:
-            ret['ttft'] = final_output.metrics.first_token_time - final_output.metrics.arrival_time
+            ret['ttft'] = (final_output.metrics.first_token_time - final_output.metrics.arrival_time) * 1000
 
     return JSONResponse(ret)
 
