@@ -57,7 +57,14 @@ def get_response(response: requests.Response):
     data = json.loads(response.content)
     output = data["generated_text"]
     token_latency = data["per_token_latency"]
-    return output, token_latency
+    metrics = {}
+    if 'ttft' in data:
+        metrics['ttft'] = data['ttft']
+    if 'waiting_latency' in data:
+        metrics['waiting_latency'] = data['waiting_latency']
+    if 'inference_latency' in data:
+        metrics['inference_latency'] = data['inference_latency']
+    return output, token_latency, metrics
 
 
 if __name__ == "__main__":
@@ -92,8 +99,9 @@ if __name__ == "__main__":
                 num_printed_lines += 1
                 print(f"Beam candidate {i}: {line!r}", flush=True)
     else:
-        output, token_latency = get_response(response)
+        output, token_latency, metrics = get_response(response)
         print(output)
         for i in range(len(token_latency)):
             print(f"latency of {i} token finished at {token_latency[i][0]} and taken {token_latency[i][1]} miliseconds")
+        print(metrics)
 

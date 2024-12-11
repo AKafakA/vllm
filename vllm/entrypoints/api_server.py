@@ -10,7 +10,7 @@ import json
 import ssl
 import time
 from argparse import Namespace
-from typing import Any, AsyncGenerator, Optional, Dict
+from typing import Any, AsyncGenerator, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -143,6 +143,14 @@ async def generate_benchmark(request: Request) -> Response:
         'num_output_tokens_cf': num_output_tokens,
         'per_token_latency': per_token_latency,
     }
+    if final_output.metrics:
+        if final_output.metrics.time_in_queue:
+            ret['waiting_latency'] = final_output.metrics.time_in_queue
+        if final_output.metrics.model_execute_time:
+            ret['inference_latency'] = final_output.metrics.model_execute_time
+        if final_output.metrics.first_token_time:
+            ret['ttft'] = final_output.metrics.first_token_time - final_output.metrics.arrival_time
+
     return JSONResponse(ret)
 
 

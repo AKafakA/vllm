@@ -179,7 +179,8 @@ def which_attn_to_use(head_size: int,
                       use_v1: bool = False) -> _Backend:
     """Returns which flash attention backend to use."""
     # Default case.
-    selected_backend = _Backend.FLASH_ATTN
+    # Changed to flash infer since flash attention have not been sampled
+    selected_backend = _Backend.FLASHINFER
 
     # If there are no attention layers (e.g. we are running Mamba),
     # use the placeholder NO_ATTENTION
