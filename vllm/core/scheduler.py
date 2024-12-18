@@ -36,7 +36,7 @@ def get_request_info(requests: List[SequenceGroup]) -> List[Dict]:
         seq_prompts_length = 0
         n_blocks = 0
         for sequence in sequence_group.seqs:
-            seq_total_output_length += sequence.get_output_len()
+            seq_total_output_length += sequence.get_len()
             seq_prompts_length += sequence.get_prompt_len()
             n_blocks += sequence.n_blocks
         request_info["request_id"] = sequence_group.request_id

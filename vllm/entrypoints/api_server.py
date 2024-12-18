@@ -108,8 +108,8 @@ async def generate_benchmark(request: Request) -> Response:
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
     _ = request_dict.pop("stream", False)
+    request_id = request_dict.pop("request_id")
     sampling_params = SamplingParams(**request_dict)
-    request_id = random_uuid()
 
     start = time.time()
 
