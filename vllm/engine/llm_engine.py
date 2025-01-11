@@ -997,6 +997,7 @@ class LLMEngine:
             scheduler_traces[i]["running"] = trace.running_request_length
             scheduler_traces[i]["waiting"] = trace.waiting_request_length
             scheduler_traces[i]["free_gpu_blocks"] = scheduler.block_manager.get_num_free_gpu_blocks()
+            scheduler_traces[i]["num_preempted"] = scheduler.num_preempted_requests
         return scheduler_traces
 
 

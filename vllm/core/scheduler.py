@@ -393,6 +393,7 @@ class Scheduler:
         # can and must be released after the current step.
         # This is used to evict the finished requests from the Mamba cache.
         self._finished_requests_ids: List[str] = list()
+        self.num_preempted_requests: int = 0
         # Time at previous scheduling step
         self.prev_time = 0.0
         # Did we schedule a prompt at previous step?
@@ -452,7 +453,8 @@ class Scheduler:
         return 1
 
     def get_scheduler_trace(self) -> SchedulerRequestLengthTrace:
-        return SchedulerRequestLengthTrace(list(self.running), list(self.waiting), list(self.swapped))
+        return SchedulerRequestLengthTrace(
+            list(self.running), list(self.waiting), list(self.swapped))
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
@@ -663,6 +665,7 @@ class Scheduler:
                         preempted.append(victim_seq_group)
                     else:
                         swapped_out.append(victim_seq_group)
+                    self.num_preempted_requests += 1
 
                 if not cont_loop:
                     break
