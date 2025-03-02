@@ -9,6 +9,7 @@ change `vllm/entrypoints/openai/api_server.py` instead.
 import asyncio
 import json
 import ssl
+import time
 from argparse import Namespace
 from collections.abc import AsyncGenerator
 from typing import Any, Optional
@@ -37,6 +38,14 @@ engine = None
 async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
+
+
+@app.get("/schedule_trace")
+async def status() -> Response:
+    """Status check."""
+    assert engine is not None
+    scheduler_trace = await engine.get_scheduler_trace()
+    return JSONResponse(scheduler_trace)
 
 
 @app.post("/generate")
@@ -89,6 +98,64 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
     assert prompt is not None
     text_outputs = [prompt + output.text for output in final_output.outputs]
     ret = {"text": text_outputs}
+    return JSONResponse(ret)
+
+@app.post("/generate_benchmark")
+async def generate_benchmark(request: Request) -> Response:
+    """Generate completion for the request.
+
+    The request should be a JSON object with the following fields:
+    - prompt: the prompt to use for the generation.
+    - stream: whether to stream the results or not.
+    - other fields: the sampling parameters (See `SamplingParams` for details).
+    """
+    # Add some benchmark-related codes comparing to the generate API.
+    request_dict = await request.json()
+    prompt = request_dict.pop("prompt")
+    _ = request_dict.pop("stream", False)
+    request_id = request_dict.pop("request_id")
+    sampling_params = SamplingParams(**request_dict)
+
+    start = time.time()
+
+    results_generator = engine.generate(prompt, sampling_params, request_id)
+    results_generator = iterate_with_cancellation(
+        results_generator, is_cancelled=request.is_disconnected)
+
+    # Non-streaming case
+    final_output = None
+    per_token_latency = []
+    async for request_output in results_generator:
+        if await request.is_disconnected():
+            # Abort the request if the client disconnects.
+            return Response(status_code=499)
+        now = time.time()
+        per_token_latency.append([now, (now - start)*1000])
+        start = now
+        final_output = request_output
+    assert final_output is not None
+
+    generation = final_output.outputs[0].text
+    num_output_tokens = len(final_output.outputs[0].token_ids)
+    num_input_tokens = len(final_output.prompt_token_ids)
+    expected_resp_len = request_dict['max_tokens']
+    if not max(expected_resp_len, 1) == max(num_output_tokens, 1):
+        "request_id={}, expected_resp_len={}, num_output_tokens={}, num_input_tokens={}".format(
+            request_id, expected_resp_len, num_output_tokens, num_input_tokens)
+    ret = {
+        'request_id': request_id,
+        'generated_text': generation,
+        'num_output_tokens_cf': num_output_tokens,
+        'per_token_latency': per_token_latency,
+    }
+    if final_output.metrics:
+        if final_output.metrics.time_in_queue:
+            ret['waiting_latency'] = final_output.metrics.time_in_queue * 1000
+        if final_output.metrics.model_execute_time:
+            ret['inference_latency'] = final_output.metrics.model_execute_time * 1000
+        if final_output.metrics.first_token_time:
+            ret['ttft'] = (final_output.metrics.first_token_time - final_output.metrics.arrival_time) * 1000
+
     return JSONResponse(ret)
 
 
