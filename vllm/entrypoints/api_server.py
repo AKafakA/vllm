@@ -118,9 +118,8 @@ async def generate_benchmark(request: Request) -> Response:
 
     start = time.time()
 
+    assert engine is not None
     results_generator = engine.generate(prompt, sampling_params, request_id)
-    results_generator = iterate_with_cancellation(
-        results_generator, is_cancelled=request.is_disconnected)
 
     # Non-streaming case
     final_output = None
