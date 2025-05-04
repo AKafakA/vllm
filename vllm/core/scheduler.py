@@ -37,16 +37,20 @@ def get_request_info(requests: List[SequenceGroup]) -> List[Dict]:
         request_info = {}
         seq_total_output_length = 0
         seq_prompts_length = 0
+        seq_computed_length = 0
         n_blocks = 0
         for sequence in sequence_group.seqs:
             seq_total_output_length += sequence.get_len()
             seq_prompts_length += sequence.get_prompt_len()
+            seq_computed_length += sequence.get_num_computed_tokens()
             n_blocks += sequence.n_blocks
         request_info["request_id"] = sequence_group.request_id
         request_info["seq_total_output_length"] = seq_total_output_length
         request_info["seq_prompts_length"] = seq_prompts_length
+        request_info["seq_computed_length"] = seq_computed_length
         request_info["arrival_time"] = sequence_group.arrival_time
         request_info["n_blocks"] = n_blocks
+        request_info["is_prefill"] = sequence_group.is_prefill()
         requests_info.append(request_info)
     return requests_info
 
