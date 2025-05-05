@@ -204,6 +204,7 @@ async def run_server(args: Namespace,
         ssl_certfile=args.ssl_certfile,
         ssl_ca_certs=args.ssl_ca_certs,
         ssl_cert_reqs=args.ssl_cert_reqs,
+        workers=args.workers,
         **uvicorn_kwargs,
     )
 
@@ -220,6 +221,7 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="The CA certificates file")
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument(
         "--enable-ssl-refresh",
         action="store_true",
