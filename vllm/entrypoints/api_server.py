@@ -241,5 +241,6 @@ if __name__ == "__main__":
     parser.add_argument("--log-level", type=str, default="debug")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+    logger.info("Starting server with args: %s", str(args))
 
     asyncio.run(run_server(args))
