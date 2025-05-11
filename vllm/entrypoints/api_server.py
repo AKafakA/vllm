@@ -32,6 +32,7 @@ logger = init_logger("vllm.entrypoints.api_server")
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
 engine = None
+request_decode_length_map = {}
 
 
 @app.get("/health")
@@ -44,7 +45,15 @@ async def health() -> Response:
 async def status() -> Response:
     """Status check."""
     assert engine is not None
-    scheduler_trace = await engine.get_scheduler_trace()
+    scheduler_trace = engine.get_scheduler_trace()
+    for i in scheduler_trace.keys():
+        for key in scheduler_trace[i].keys():
+            for request_info in scheduler_trace[i][key]:
+                request_id = request_info['request_id']
+                if request_id in request_decode_length_map:
+                    request_info['num_predicted_tokens'] = request_decode_length_map[request_id]
+                else:
+                    request_info['num_predicted_tokens'] = 0
     return JSONResponse(scheduler_trace)
 
 
@@ -114,6 +123,7 @@ async def generate_benchmark(request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     _ = request_dict.pop("stream", False)
     request_id = request_dict.pop("request_id")
+    request_decode_length_map[request_id] = request_dict['num_predicted_tokens']
     sampling_params = SamplingParams(**request_dict)
 
     start = time.time()

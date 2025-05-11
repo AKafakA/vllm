@@ -1184,7 +1184,7 @@ class AsyncLLMEngine(EngineClient):
         """Get the lora configuration of the vLLM engine."""
         return self.engine.get_lora_config()
 
-    async def get_scheduler_trace(self):
+    def get_scheduler_trace(self):
         return self.engine.get_scheduler_trace()
 
     async def do_log_stats(
