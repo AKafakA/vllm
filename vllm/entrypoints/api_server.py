@@ -48,6 +48,8 @@ async def status() -> Response:
     scheduler_trace = engine.get_scheduler_trace()
     for i in scheduler_trace.keys():
         for key in scheduler_trace[i].keys():
+            if key == "free_gpu_blocks" or key == "num_preempted":
+                continue
             for request_info in scheduler_trace[i][key]:
                 request_id = request_info['request_id']
                 if request_id in request_decode_length_map:
