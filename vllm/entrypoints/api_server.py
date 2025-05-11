@@ -51,9 +51,9 @@ async def status() -> Response:
             for request_info in scheduler_trace[i][key]:
                 request_id = request_info['request_id']
                 if request_id in request_decode_length_map:
-                    request_info['num_predicted_tokens'] = request_decode_length_map[request_id]
+                    request_info['seq_expected_decoded_length'] = request_decode_length_map[request_id]
                 else:
-                    request_info['num_predicted_tokens'] = 0
+                    request_info['seq_expected_decoded_length'] = 0
     return JSONResponse(scheduler_trace)
 
 
