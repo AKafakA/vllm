@@ -125,7 +125,7 @@ async def generate_benchmark(request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     _ = request_dict.pop("stream", False)
     request_id = request_dict.pop("request_id")
-    request_decode_length_map[request_id] = request_dict['num_predicted_tokens']
+    request_decode_length_map[request_id] = request_dict.pop['num_predicted_tokens']
     sampling_params = SamplingParams(**request_dict)
 
     start = time.time()
