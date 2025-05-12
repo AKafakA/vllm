@@ -118,7 +118,7 @@ async def generate_benchmark(request: Request) -> Response:
     return await _generate(request_dict)
 
 
-async def __generate_benchmark(request_dict) -> Response:
+async def _generate_benchmark(request_dict) -> Response:
     """Generate completion for the request.
 
     The request should be a JSON object with the following fields:
