@@ -111,8 +111,14 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
     ret = {"text": text_outputs}
     return JSONResponse(ret)
 
+
 @app.post("/generate_benchmark")
 async def generate_benchmark(request: Request) -> Response:
+    request_dict = await request.json()
+    return await _generate(request_dict)
+
+
+async def __generate_benchmark(request_dict) -> Response:
     """Generate completion for the request.
 
     The request should be a JSON object with the following fields:
@@ -121,7 +127,6 @@ async def generate_benchmark(request: Request) -> Response:
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
     # Add some benchmark-related codes comparing to the generate API.
-    request_dict = await request.json()
     prompt = request_dict.pop("prompt")
     _ = request_dict.pop("stream", False)
     request_id = request_dict.pop("request_id")
