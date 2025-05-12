@@ -42,7 +42,7 @@ async def health() -> Response:
 
 
 @app.get("/schedule_trace")
-async def status() -> Response:
+def status() -> Response:
     """Status check."""
     assert engine is not None
     scheduler_trace = engine.get_scheduler_trace()
@@ -137,9 +137,6 @@ async def generate_benchmark(request: Request) -> Response:
     final_output = None
     per_token_latency = []
     async for request_output in results_generator:
-        if await request.is_disconnected():
-            # Abort the request if the client disconnects.
-            return Response(status_code=499)
         now = time.time()
         per_token_latency.append([now, (now - start)*1000])
         start = now
