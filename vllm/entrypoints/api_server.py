@@ -115,7 +115,7 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
 @app.post("/generate_benchmark")
 async def generate_benchmark(request: Request) -> Response:
     request_dict = await request.json()
-    return await _generate(request_dict)
+    return await _generate_benchmark(request_dict)
 
 
 async def _generate_benchmark(request_dict) -> Response:
