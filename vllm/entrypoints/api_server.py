@@ -44,25 +44,18 @@ async def health() -> Response:
 @app.get("/schedule_trace")
 def status() -> Response:
     """Status check."""
-    # assert engine is not None
-    # scheduler_trace = engine.get_scheduler_trace()
-    # for i in scheduler_trace.keys():
-    #     for key in scheduler_trace[i].keys():
-    #         if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
-    #             continue
-    #         for request_info in scheduler_trace[i][key]:
-    #             request_id = request_info['request_id']
-    #             if request_id in request_decode_length_map:
-    #                 request_info['seq_expected_decoded_length'] = request_decode_length_map[request_id]
-    #             else:
-    #                 request_info['seq_expected_decoded_length'] = 0
-
-    scheduler_trace = {"1": {
-        "free_gpu_blocks":0,
-        "num_preempted":0,
-        "swap":[],
-        "running":[],
-        "waiting":[]}}
+    assert engine is not None
+    scheduler_trace = engine.get_scheduler_trace()
+    for i in scheduler_trace.keys():
+        for key in scheduler_trace[i].keys():
+            if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
+                continue
+            for request_info in scheduler_trace[i][key]:
+                request_id = request_info['request_id']
+                if request_id in request_decode_length_map:
+                    request_info['seq_expected_decoded_length'] = request_decode_length_map[request_id]
+                else:
+                    request_info['seq_expected_decoded_length'] = 0
     return JSONResponse(scheduler_trace)
 
 
@@ -117,7 +110,6 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
     text_outputs = [prompt + output.text for output in final_output.outputs]
     ret = {"text": text_outputs}
     return JSONResponse(ret)
-
 
 @app.post("/generate_benchmark")
 async def generate_benchmark(request: Request) -> Response:
