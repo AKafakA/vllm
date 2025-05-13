@@ -143,14 +143,12 @@ async def _generate_benchmark(request_dict, request: Request) -> Response:
     per_token_latency = []
     try:
         async for request_output in results_generator:
-            if request.is_disconnected():
-                raise asyncio.CancelledError()
             now = time.time()
             per_token_latency.append([now, (now - start)*1000])
             start = now
             final_output = request_output
     except asyncio.CancelledError:
-        print("CancelledError")
+        print("Cancelled request for request_id: {}".format(request_id))
         return Response(status_code=499)
 
     generation = final_output.outputs[0].text
