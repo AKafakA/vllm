@@ -115,10 +115,10 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
 @app.post("/generate_benchmark")
 async def generate_benchmark(request: Request) -> Response:
     request_dict = await request.json()
-    return await _generate_benchmark(request_dict)
+    return await _generate_benchmark(request_dict, request)
 
-
-async def _generate_benchmark(request_dict) -> Response:
+@with_cancellation
+async def _generate_benchmark(request_dict, request: Request) -> Response:
     """Generate completion for the request.
 
     The request should be a JSON object with the following fields:
@@ -141,12 +141,17 @@ async def _generate_benchmark(request_dict) -> Response:
     # Non-streaming case
     final_output = None
     per_token_latency = []
-    async for request_output in results_generator:
-        now = time.time()
-        per_token_latency.append([now, (now - start)*1000])
-        start = now
-        final_output = request_output
-    assert final_output is not None
+    try:
+        async for request_output in results_generator:
+            if request.is_disconnected():
+                raise asyncio.CancelledError()
+            now = time.time()
+            per_token_latency.append([now, (now - start)*1000])
+            start = now
+            final_output = request_output
+    except asyncio.CancelledError:
+        print("CancelledError")
+        return Response(status_code=499)
 
     generation = final_output.outputs[0].text
     num_output_tokens = len(final_output.outputs[0].token_ids)
