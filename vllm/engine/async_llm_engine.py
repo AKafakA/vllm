@@ -776,6 +776,7 @@ class AsyncLLMEngine(EngineClient):
         if aborted_requests:
             await self._engine_abort(aborted_requests)
 
+        await asyncio.sleep(0)
         request_outputs = await self.engine.step_async(virtual_engine)
 
         # Put the outputs into the corresponding streams.
