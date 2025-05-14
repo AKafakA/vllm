@@ -42,10 +42,10 @@ async def health() -> Response:
 
 
 @app.get("/schedule_trace")
-def status() -> Response:
+async def status() -> Response:
     """Status check."""
     assert engine is not None
-    scheduler_trace = engine.get_scheduler_trace()
+    scheduler_trace = await engine.get_scheduler_trace()
     for i in scheduler_trace.keys():
         for key in scheduler_trace[i].keys():
             if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
@@ -143,6 +143,7 @@ async def _generate_benchmark(request_dict, request: Request) -> Response:
     per_token_latency = []
     try:
         async for request_output in results_generator:
+            await asyncio.sleep(0)
             now = time.time()
             per_token_latency.append([now, (now - start)*1000])
             start = now
