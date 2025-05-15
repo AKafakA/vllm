@@ -253,7 +253,7 @@ if __name__ == "__main__":
         default=None,
         help="FastAPI root_path when app is behind a path based routing proxy")
     parser.add_argument("--log-level", type=str, default="debug")
-    parser.add_argument("--disable_frontend_multiprocessing", action="store_true")
+    parser.add_argument("--disable-frontend-multiprocessing", action="store_true")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     logger.info("Starting server with args: %s", str(args))
