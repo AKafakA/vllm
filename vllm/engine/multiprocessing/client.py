@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import pickle
+import uuid
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
                     Optional, Union, cast, overload)
@@ -34,7 +35,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
-                                         RPCUProfileRequest, RPCWakeUpRequest)
+                                         RPCUProfileRequest, RPCWakeUpRequest, RPCSchedulerTracingRequest,
+                                         RPCSchedulerTracingResponse)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
@@ -740,3 +742,17 @@ class MQLLMEngineClient(EngineClient):
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
             raise request_output
+
+    async def get_scheduler_trace(self):
+        request = RPCSchedulerTracingRequest()
+        queue: asyncio.Queue[Union[BaseException,
+                                   RPCSchedulerTracingResponse]] = asyncio.Queue()
+        self.output_queues[request.request_id] = queue
+        request_bytes = pickle.dumps(request)
+        await self.input_socket.send_multipart((request_bytes, ), copy=False)
+        request_output = await queue.get()
+        self.output_queues.pop(request.request_id)
+        if isinstance(request_output, BaseException):
+            raise request_output
+        return request_output.scheduler_tracing
+

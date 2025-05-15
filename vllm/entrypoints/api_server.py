@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-
+from vllm.entrypoints.openai.api_server import build_async_engine_client
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.launcher import serve_http
@@ -117,6 +117,7 @@ async def generate_benchmark(request: Request) -> Response:
     request_dict = await request.json()
     return await _generate_benchmark(request_dict, request)
 
+
 @with_cancellation
 async def _generate_benchmark(request_dict, request: Request) -> Response:
     """Generate completion for the request.
@@ -143,9 +144,8 @@ async def _generate_benchmark(request_dict, request: Request) -> Response:
     per_token_latency = []
     try:
         async for request_output in results_generator:
-            await asyncio.sleep(0)
             now = time.time()
-            per_token_latency.append([now, (now - start)*1000])
+            per_token_latency.append([now, (now - start) * 1000])
             start = now
             final_output = request_output
     except asyncio.CancelledError:
@@ -184,30 +184,26 @@ def build_app(args: Namespace) -> FastAPI:
 
 
 async def init_app(
-    args: Namespace,
-    llm_engine: Optional[AsyncLLMEngine] = None,
+        args: Namespace
 ) -> FastAPI:
-    app = build_app(args)
-
     global engine
-
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = (llm_engine
-              if llm_engine is not None else AsyncLLMEngine.from_engine_args(
-                  engine_args, usage_context=UsageContext.API_SERVER))
-
+    if args.disable_frontend_multiprocessing:
+        engine_args = AsyncEngineArgs.from_cli_args(args)
+        engine = AsyncLLMEngine.from_engine_args(engine_args, usage_context=UsageContext.API_SERVER)
+    else:
+        async with build_async_engine_client(args, False) as engine_client:
+            engine = engine_client
     return app
 
 
-async def run_server(args: Namespace,
-                     llm_engine: Optional[AsyncLLMEngine] = None,
+async def run_server(args: Namespace = None,
                      **uvicorn_kwargs: Any) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
     set_ulimit()
 
-    app = await init_app(args, llm_engine)
+    app = await init_app(args)
     assert engine is not None
 
     shutdown_task = await serve_http(
@@ -257,6 +253,7 @@ if __name__ == "__main__":
         default=None,
         help="FastAPI root_path when app is behind a path based routing proxy")
     parser.add_argument("--log-level", type=str, default="debug")
+    parser.add_argument("--disable_frontend_multiprocessing", action="store_true")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     logger.info("Starting server with args: %s", str(args))
