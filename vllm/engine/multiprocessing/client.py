@@ -252,7 +252,7 @@ class MQLLMEngineClient(EngineClient):
                 # Put each output into the appropriate queue.
                 elif isinstance(
                         request_outputs,
-                    (RPCAdapterLoadedResponse, RPCIsSleepingResponse)):
+                    (RPCAdapterLoadedResponse, RPCIsSleepingResponse, RPCSchedulerTracingResponse)):
                     self._add_output(request_outputs)
                 else:
                     for request_output in request_outputs:
@@ -263,7 +263,7 @@ class MQLLMEngineClient(EngineClient):
 
     def _add_output(self, request_output: Union[RequestOutput,
                                                 RPCAdapterLoadedResponse,
-                                                RPCIsSleepingResponse]):
+                                                RPCIsSleepingResponse, RPCSchedulerTracingResponse]):
         queue = self.output_queues.get(request_output.request_id)
         if queue is not None:
             queue.put_nowait(request_output)
@@ -744,7 +744,6 @@ class MQLLMEngineClient(EngineClient):
             raise request_output
 
     async def get_scheduler_trace(self):
-        print("get_scheduler_trace")
         tracing_request = RPCSchedulerTracingRequest()
         queue: asyncio.Queue[Union[BaseException,
                                    RPCSchedulerTracingResponse]] = asyncio.Queue()
