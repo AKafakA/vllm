@@ -65,6 +65,7 @@ async def status() -> Response:
                     request_info['seq_expected_decoded_length'] = 0
     end = time.time()
     print("finally Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
+    scheduler_trace = {}
     return JSONResponse(scheduler_trace)
 
 
