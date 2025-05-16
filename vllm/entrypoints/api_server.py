@@ -45,6 +45,8 @@ async def health() -> Response:
 async def status() -> Response:
     """Status check."""
     assert engine is not None
+    is_sleeping = await engine.is_sleeping()
+    print("Engine is sleeping: {}".format(is_sleeping))
     scheduler_trace = await engine.get_scheduler_trace()
     for i in scheduler_trace.keys():
         for key in scheduler_trace[i].keys():
