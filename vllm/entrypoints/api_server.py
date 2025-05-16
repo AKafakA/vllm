@@ -38,7 +38,6 @@ backend_process = None
 request_decode_length_map = {}
 
 
-
 @app.get("/health")
 async def health() -> Response:
     """Health check."""
@@ -50,9 +49,10 @@ async def status() -> Response:
     """Status check."""
     assert engine is not None
     start = time.time()
-    scheduler_trace = await engine.get_scheduler_trace()
+    scheduler_trace = await engine.is_sleeping()
     end = time.time()
     print("Scheduler trace took {} seconds".format(end - start))
+    scheduler_trace = {}
     for i in scheduler_trace.keys():
         for key in scheduler_trace[i].keys():
             if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
