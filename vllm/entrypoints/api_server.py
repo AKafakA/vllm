@@ -193,6 +193,8 @@ async def init_app(
     else:
         async with build_async_engine_client(args, False) as engine_client:
             engine = engine_client
+            is_sleeping = await engine_client.is_sleeping()
+            print("Engine is sleeping: {}".format(is_sleeping))
     return app
 
 
