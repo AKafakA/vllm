@@ -12,10 +12,11 @@ import ssl
 import time
 from argparse import Namespace
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 import uvloop
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, APIRouter
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from vllm.entrypoints.openai.api_server import build_async_engine_client, create_server_socket
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -25,7 +26,7 @@ from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit
+from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit, is_valid_ipv6_address
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
@@ -33,7 +34,9 @@ logger = init_logger("vllm.entrypoints.api_server")
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
 engine = None
+backend_process = None
 request_decode_length_map = {}
+
 
 
 @app.get("/health")
@@ -46,9 +49,10 @@ async def health() -> Response:
 async def status() -> Response:
     """Status check."""
     assert engine is not None
-    is_sleeping = await engine.is_sleeping()
-    print("Engine is sleeping: {}".format(is_sleeping))
+    start = time.time()
     scheduler_trace = await engine.get_scheduler_trace()
+    end = time.time()
+    print("Scheduler trace took {} seconds".format(end - start))
     for i in scheduler_trace.keys():
         for key in scheduler_trace[i].keys():
             if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
@@ -186,19 +190,17 @@ def build_app(args: Namespace) -> FastAPI:
     return app
 
 
-async def init_app(
-        args: Namespace
-) -> FastAPI:
-    global engine
+@asynccontextmanager
+async def get_engine_client(args: Namespace) -> AsyncLLMEngine:
     if args.disable_frontend_multiprocessing:
         engine_args = AsyncEngineArgs.from_cli_args(args)
-        engine = AsyncLLMEngine.from_engine_args(engine_args, usage_context=UsageContext.API_SERVER)
+        engine_client = AsyncLLMEngine.from_engine_args(engine_args, usage_context=UsageContext.API_SERVER)
+        yield engine_client
     else:
         async with build_async_engine_client(args, False) as engine_client:
-            engine = engine_client
             is_sleeping = await engine_client.is_sleeping()
             print("Engine is sleeping: {}".format(is_sleeping))
-    return app
+            yield engine_client
 
 
 async def run_server(args: Namespace = None,
@@ -207,35 +209,46 @@ async def run_server(args: Namespace = None,
     logger.info("args: %s", args)
 
     set_ulimit()
+    app = build_app(args)
+    async with get_engine_client(args) as engine_client:
+        global engine
+        engine = engine_client
 
-    app = await init_app(args)
-    assert engine is not None
+        if not args.disable_frontend_multiprocessing:
+            sock_addr = (args.host or "", args.port)
+            sock = create_server_socket(sock_addr)
 
-    if not args.disable_frontend_multiprocessing:
-        sock_addr = (args.host or "", args.port)
-        sock = create_server_socket(sock_addr)
-    else:
-        sock = None
+            def _listen_addr(a: str) -> str:
+                if is_valid_ipv6_address(a):
+                    return '[' + a + ']'
+                return a or "0.0.0.0"
 
-    shutdown_task = await serve_http(
-        app,
-        sock=sock,
-        enable_ssl_refresh=args.enable_ssl_refresh,
-        host=args.host,
-        port=args.port,
-        log_level=args.log_level,
-        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
-        ssl_keyfile=args.ssl_keyfile,
-        ssl_certfile=args.ssl_certfile,
-        ssl_ca_certs=args.ssl_ca_certs,
-        ssl_cert_reqs=args.ssl_cert_reqs,
-        workers=args.workers,
-        **uvicorn_kwargs,
-    )
+            is_ssl = args.ssl_keyfile and args.ssl_certfile
+            logger.info("Starting vLLM API server on http%s://%s:%d",
+                        "s" if is_ssl else "", _listen_addr(sock_addr[0]),
+                        sock_addr[1])
+        else:
+            sock = None
 
-    await shutdown_task
-    if sock:
-        sock.close()
+        shutdown_task = await serve_http(
+            app,
+            sock=sock,
+            enable_ssl_refresh=args.enable_ssl_refresh,
+            host=args.host,
+            port=args.port,
+            log_level=args.log_level,
+            timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+            ssl_keyfile=args.ssl_keyfile,
+            ssl_certfile=args.ssl_certfile,
+            ssl_ca_certs=args.ssl_ca_certs,
+            ssl_cert_reqs=args.ssl_cert_reqs,
+            workers=args.workers,
+            **uvicorn_kwargs,
+        )
+
+        await shutdown_task
+        if sock:
+            sock.close()
 
 
 if __name__ == "__main__":
