@@ -14,9 +14,10 @@ from argparse import Namespace
 from collections.abc import AsyncGenerator
 from typing import Any, Optional
 
+import uvloop
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from vllm.entrypoints.openai.api_server import build_async_engine_client
+from vllm.entrypoints.openai.api_server import build_async_engine_client, create_server_socket
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.launcher import serve_http
@@ -47,18 +48,17 @@ async def status() -> Response:
     assert engine is not None
     is_sleeping = await engine.is_sleeping()
     print("Engine is sleeping: {}".format(is_sleeping))
-    # scheduler_trace = await engine.get_scheduler_trace()
-    # for i in scheduler_trace.keys():
-    #     for key in scheduler_trace[i].keys():
-    #         if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
-    #             continue
-    #         for request_info in scheduler_trace[i][key]:
-    #             request_id = request_info['request_id']
-    #             if request_id in request_decode_length_map:
-    #                 request_info['seq_expected_decoded_length'] = request_decode_length_map[request_id]
-    #             else:
-    #                 request_info['seq_expected_decoded_length'] = 0
-    scheduler_trace = {}
+    scheduler_trace = await engine.get_scheduler_trace()
+    for i in scheduler_trace.keys():
+        for key in scheduler_trace[i].keys():
+            if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
+                continue
+            for request_info in scheduler_trace[i][key]:
+                request_id = request_info['request_id']
+                if request_id in request_decode_length_map:
+                    request_info['seq_expected_decoded_length'] = request_decode_length_map[request_id]
+                else:
+                    request_info['seq_expected_decoded_length'] = 0
     return JSONResponse(scheduler_trace)
 
 
@@ -211,9 +211,15 @@ async def run_server(args: Namespace = None,
     app = await init_app(args)
     assert engine is not None
 
+    if not args.disable_frontend_multiprocessing:
+        sock_addr = (args.host or "", args.port)
+        sock = create_server_socket(sock_addr)
+    else:
+        sock = None
+
     shutdown_task = await serve_http(
         app,
-        sock=None,
+        sock=sock,
         enable_ssl_refresh=args.enable_ssl_refresh,
         host=args.host,
         port=args.port,
@@ -228,6 +234,8 @@ async def run_server(args: Namespace = None,
     )
 
     await shutdown_task
+    if sock:
+        sock.close()
 
 
 if __name__ == "__main__":
@@ -262,5 +270,4 @@ if __name__ == "__main__":
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     logger.info("Starting server with args: %s", str(args))
-
-    asyncio.run(run_server(args))
+    uvloop.run(run_server(args))
