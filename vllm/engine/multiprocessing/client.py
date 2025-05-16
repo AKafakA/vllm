@@ -744,14 +744,15 @@ class MQLLMEngineClient(EngineClient):
             raise request_output
 
     async def get_scheduler_trace(self):
-        request = RPCSchedulerTracingRequest()
+        print("get_scheduler_trace")
+        tracing_request = RPCSchedulerTracingRequest()
         queue: asyncio.Queue[Union[BaseException,
                                    RPCSchedulerTracingResponse]] = asyncio.Queue()
-        self.output_queues[request.request_id] = queue
-        request_bytes = pickle.dumps(request)
+        self.output_queues[tracing_request.request_id] = queue
+        request_bytes = pickle.dumps(tracing_request)
         await self.input_socket.send_multipart((request_bytes, ), copy=False)
         request_output = await queue.get()
-        self.output_queues.pop(request.request_id)
+        self.output_queues.pop(tracing_request.request_id)
         if isinstance(request_output, BaseException):
             raise request_output
         return request_output.scheduler_tracing

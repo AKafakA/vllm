@@ -157,7 +157,7 @@ class RPCSchedulerTracingRequest:
 @dataclass
 class RPCSchedulerTracingResponse:
     request_id: str
-    scheduler_tracing: dict
+    scheduler_tracing: Dict
 
 
 @dataclass

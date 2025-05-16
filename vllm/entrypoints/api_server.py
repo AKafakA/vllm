@@ -49,10 +49,9 @@ async def status() -> Response:
     """Status check."""
     assert engine is not None
     start = time.time()
-    scheduler_trace = await engine.is_sleeping()
+    scheduler_trace = await engine.get_scheduler_trace()
     end = time.time()
     print("Scheduler trace took {} seconds".format(end - start))
-    scheduler_trace = {}
     for i in scheduler_trace.keys():
         for key in scheduler_trace[i].keys():
             if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
@@ -200,6 +199,8 @@ async def get_engine_client(args: Namespace) -> AsyncLLMEngine:
         async with build_async_engine_client(args, False) as engine_client:
             is_sleeping = await engine_client.is_sleeping()
             print("Engine is sleeping: {}".format(is_sleeping))
+            get_scheduler_trace = await engine_client.get_scheduler_trace()
+            print("Scheduler trace: {}".format(get_scheduler_trace))
             yield engine_client
 
 
