@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 import uvloop
 from fastapi import FastAPI, Request, APIRouter
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse, ujson
 from vllm.entrypoints.openai.api_server import build_async_engine_client, create_server_socket
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -65,8 +65,9 @@ async def status() -> Response:
                     request_info['seq_expected_decoded_length'] = 0
     end = time.time()
     print("finally Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
-    scheduler_trace = {}
-    return JSONResponse(scheduler_trace)
+    return Response(
+        content=ujson.dumps(scheduler_trace)
+    )
 
 
 @app.post("/generate")
