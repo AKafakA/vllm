@@ -48,10 +48,11 @@ async def health() -> Response:
 async def status() -> Response:
     """Status check."""
     assert engine is not None
+    request_id = random_uuid()
     start = time.time()
     scheduler_trace = await engine.get_scheduler_trace()
     end = time.time()
-    print("Scheduler trace took {} seconds".format(end - start))
+    print("Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
     for i in scheduler_trace.keys():
         for key in scheduler_trace[i].keys():
             if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
@@ -63,7 +64,7 @@ async def status() -> Response:
                 else:
                     request_info['seq_expected_decoded_length'] = 0
     end = time.time()
-    print("Scheduler trace took {} seconds".format(end - start))
+    print("finally Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
     return JSONResponse(scheduler_trace)
 
 
