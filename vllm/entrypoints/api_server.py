@@ -199,8 +199,8 @@ async def get_engine_client(args: Namespace) -> AsyncLLMEngine:
         async with build_async_engine_client(args, False) as engine_client:
             is_sleeping = await engine_client.is_sleeping()
             print("Engine is sleeping: {}".format(is_sleeping))
-            get_scheduler_trace = await engine_client.get_scheduler_trace()
-            print("Scheduler trace: {}".format(get_scheduler_trace))
+            # get_scheduler_trace = await engine_client.get_scheduler_trace()
+            # print("Scheduler trace: {}".format(get_scheduler_trace))
             yield engine_client
 
 
