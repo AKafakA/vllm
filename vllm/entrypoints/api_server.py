@@ -65,7 +65,9 @@ async def status() -> Response:
                     request_info['seq_expected_decoded_length'] = 0
     end = time.time()
     print("finally Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
-    return ORJSONResponse(scheduler_trace)
+    rep = ORJSONResponse(scheduler_trace)
+    print("finally Scheduler trace took {} seconds after seralization".format(end - start) + " id: {}".format(request_id))
+    return rep
 
 
 @app.post("/generate")
