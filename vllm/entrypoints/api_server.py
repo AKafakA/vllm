@@ -47,17 +47,18 @@ async def status() -> Response:
     assert engine is not None
     is_sleeping = await engine.is_sleeping()
     print("Engine is sleeping: {}".format(is_sleeping))
-    scheduler_trace = await engine.get_scheduler_trace()
-    for i in scheduler_trace.keys():
-        for key in scheduler_trace[i].keys():
-            if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
-                continue
-            for request_info in scheduler_trace[i][key]:
-                request_id = request_info['request_id']
-                if request_id in request_decode_length_map:
-                    request_info['seq_expected_decoded_length'] = request_decode_length_map[request_id]
-                else:
-                    request_info['seq_expected_decoded_length'] = 0
+    # scheduler_trace = await engine.get_scheduler_trace()
+    # for i in scheduler_trace.keys():
+    #     for key in scheduler_trace[i].keys():
+    #         if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
+    #             continue
+    #         for request_info in scheduler_trace[i][key]:
+    #             request_id = request_info['request_id']
+    #             if request_id in request_decode_length_map:
+    #                 request_info['seq_expected_decoded_length'] = request_decode_length_map[request_id]
+    #             else:
+    #                 request_info['seq_expected_decoded_length'] = 0
+    scheduler_trace = {}
     return JSONResponse(scheduler_trace)
 
 
