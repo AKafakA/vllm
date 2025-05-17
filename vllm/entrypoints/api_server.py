@@ -55,8 +55,13 @@ async def status() -> Response:
     end = time.time()
     print("Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
     scheduler_trace_count = 0
+    scheduler_trace_flattened = {}
     for i in scheduler_trace.keys():
         for key in scheduler_trace[i].keys():
+            if key in scheduler_trace_flattened:
+                scheduler_trace_flattened[key].append(scheduler_trace[i][key])
+            else:
+                scheduler_trace_flattened[key] = [scheduler_trace[i][key]]
             if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
                 continue
             for request_info in scheduler_trace[i][key]:
