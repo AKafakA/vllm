@@ -72,11 +72,11 @@ async def status() -> Response:
                     request_info['seq_expected_decoded_length'] = 0
                 scheduler_trace_count += 1
     end = time.time()
-    print("finally Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
-    json_dict = orjson.dumps(scheduler_trace)
-    print("finally Scheduler trace took {} seconds after seralization".format(end - start) + " id: {}".format(request_id))
     print("Scheduler trace count: {}".format(scheduler_trace_count))
-    print("Scheduler trace: {}".format(json_dict))
+    print("Scheduler trace: {}".format(scheduler_trace_flattened))
+    print("finally Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
+    json_dict = orjson.dumps(scheduler_trace_flattened)
+    print("finally Scheduler trace took {} seconds after seralization".format(end - start) + " id: {}".format(request_id))
     return Response(content=json_dict, media_type="application/json")
 
 
