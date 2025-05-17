@@ -75,9 +75,8 @@ async def status() -> Response:
     print("Scheduler trace count: {}".format(scheduler_trace_count))
     print("Scheduler trace: {}".format(scheduler_trace_flattened))
     print("finally Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
-    json_dict = orjson.dumps(scheduler_trace_flattened)
     print("finally Scheduler trace took {} seconds after seralization".format(end - start) + " id: {}".format(request_id))
-    return Response(content=json_dict, media_type="application/json")
+    return Response(content={}, media_type="application/json")
 
 
 @app.post("/generate")
