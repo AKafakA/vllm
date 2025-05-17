@@ -54,6 +54,7 @@ async def status() -> Response:
     scheduler_trace = await engine.get_scheduler_trace()
     end = time.time()
     print("Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
+    scheduler_trace_count = 0
     for i in scheduler_trace.keys():
         for key in scheduler_trace[i].keys():
             if key == "free_gpu_blocks" or key == "num_preempted" or not scheduler_trace[i][key]:
@@ -64,10 +65,13 @@ async def status() -> Response:
                     request_info['seq_expected_decoded_length'] = request_decode_length_map[request_id]
                 else:
                     request_info['seq_expected_decoded_length'] = 0
+                scheduler_trace_count += 1
     end = time.time()
     print("finally Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
     json_dict = orjson.dumps(scheduler_trace)
     print("finally Scheduler trace took {} seconds after seralization".format(end - start) + " id: {}".format(request_id))
+    print("Scheduler trace count: {}".format(scheduler_trace_count))
+    print("Scheduler trace: {}".format(json_dict))
     return Response(content=json_dict, media_type="application/json")
 
 
