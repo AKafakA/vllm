@@ -46,7 +46,7 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
-@app.get("/schedule_trace")
+@app.post("/schedule_trace")
 async def status() -> Response:
     """Status check."""
     assert engine is not None
