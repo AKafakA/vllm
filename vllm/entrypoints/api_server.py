@@ -63,7 +63,7 @@ async def status() -> Response:
             else:
                 scheduler_trace_flattened[key] = []
                 for request_info in scheduler_trace[i][key]:
-                    request_id = request_info['request_id']
+                    request_id = int(request_info['request_id'])
                     arrival_time = request_info['arrival_time'] - start_time
                     total_output_length = request_info["seq_total_output_length"]
                     prompt_length = request_info["seq_prompts_length"]
