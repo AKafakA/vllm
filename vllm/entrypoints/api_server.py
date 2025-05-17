@@ -46,7 +46,7 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
-@app.post("/schedule_trace")
+@app.get("/schedule_trace")
 async def status() -> Response:
     """Status check."""
     assert engine is not None
@@ -82,10 +82,9 @@ async def status() -> Response:
     encoded_scheduler_trace = orjson.dumps(scheduler_trace_flattened)
     final_time = time.time()
     print("time ms elapsed: {} to encoding and finally take {}".format((final_time - current_time) * 1000,
-          (final_time - start_time) * 1000))
+                                                                       (final_time - start_time) * 1000))
     return Response(content=encoded_scheduler_trace,
                     media_type="application/json")
-
 
 
 @app.post("/generate")
