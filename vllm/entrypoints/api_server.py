@@ -50,6 +50,7 @@ async def health() -> Response:
 async def status() -> Response:
     """Status check."""
     assert engine is not None
+    start_time = time.time()
     scheduler_trace = await engine.get_scheduler_trace()
     scheduler_trace_count = 0
     scheduler_trace_flattened = {}
@@ -76,7 +77,12 @@ async def status() -> Response:
                                                            total_output_length, prompt_length,
                                                            computed_length, expected_length, is_prefill])
                     scheduler_trace_count += 1
+    current_time = time.time()
+    print("time ms elapsed: {} to get and flatten scheduler".format((current_time - start_time) * 1000))
     encoded_scheduler_trace = orjson.dumps(scheduler_trace_flattened)
+    final_time = time.time()
+    print("time ms elapsed: {} to encoding and finally take {}".format((final_time - current_time) * 1000,
+          (final_time - start_time) * 1000))
     return Response(content=encoded_scheduler_trace,
                     media_type="application/json")
 
