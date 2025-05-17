@@ -15,6 +15,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
+import orjson
 import uvloop
 from fastapi import FastAPI, Request, APIRouter
 from fastapi.responses import JSONResponse, Response, StreamingResponse, ORJSONResponse
@@ -65,9 +66,9 @@ async def status() -> Response:
                     request_info['seq_expected_decoded_length'] = 0
     end = time.time()
     print("finally Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
-    rep = ORJSONResponse(scheduler_trace)
+    json_dict = orjson.dumps(scheduler_trace)
     print("finally Scheduler trace took {} seconds after seralization".format(end - start) + " id: {}".format(request_id))
-    return rep
+    return Response(content=json_dict, media_type="application/json")
 
 
 @app.post("/generate")
