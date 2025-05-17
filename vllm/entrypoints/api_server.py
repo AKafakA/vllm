@@ -85,7 +85,7 @@ async def status() -> Response:
                         expected_length = request_decode_length_map[request_id]
                     else:
                         expected_length = 0
-                    scheduler_trace_flattened[key].append([request_id, arrival_time,
+                    scheduler_trace_flattened[key].extend([request_id, arrival_time,
                                                            total_output_length, prompt_length,
                                                            computed_length, expected_length, is_prefill])
                     scheduler_trace_count += 1
