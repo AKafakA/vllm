@@ -75,7 +75,7 @@ async def status() -> Response:
                         expected_length = 0
                     scheduler_trace_flattened[key].extend([request_id, arrival_time,
                                                            total_output_length, prompt_length,
-                                                           computed_length, expected_length, is_prefill])
+                                                           computed_length, is_prefill, expected_length])
                     scheduler_trace_count += 1
     current_time = time.time()
     print("time ms elapsed: {} to get and flatten scheduler".format((current_time - start_time) * 1000))
