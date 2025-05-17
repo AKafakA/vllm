@@ -50,15 +50,9 @@ async def health() -> Response:
 async def status() -> Response:
     """Status check."""
     assert engine is not None
-    request_id = random_uuid()
-    start = time.time()
     scheduler_trace = await engine.get_scheduler_trace()
-    end = time.time()
-    print("Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
     scheduler_trace_count = 0
     scheduler_trace_flattened = {}
-    num_preempted = 0
-    num_free_gpu_blocks = 0
     for i in scheduler_trace.keys():
         for key in scheduler_trace[i].keys():
             if key == "free_gpu_blocks":
@@ -68,13 +62,6 @@ async def status() -> Response:
             else:
                 scheduler_trace_flattened[key] = []
                 for request_info in scheduler_trace[i][key]:
-                    # request_info["request_id"] = sequence_group.request_id
-                    # request_info["seq_total_output_length"] = seq_total_output_length
-                    # request_info["seq_prompts_length"] = seq_prompts_length
-                    # request_info["seq_computed_length"] = seq_computed_length
-                    # request_info["arrival_time"] = sequence_group.arrival_time
-                    # request_info["n_blocks"] = n_blocks
-                    # request_info["is_prefill"] = sequence_group.is_prefill()
                     request_id = request_info['request_id']
                     arrival_time = request_info['arrival_time'] - start_time
                     total_output_length = request_info["seq_total_output_length"]
@@ -89,13 +76,7 @@ async def status() -> Response:
                                                            total_output_length, prompt_length,
                                                            computed_length, expected_length, is_prefill])
                     scheduler_trace_count += 1
-    end = time.time()
-    print("Scheduler trace count: {}".format(scheduler_trace_count))
-    print("scheduler trace {}".format(scheduler_trace_flattened))
     encoded_scheduler_trace = orjson.dumps(scheduler_trace_flattened)
-    scheduler_trace_count = len(encoded_scheduler_trace)
-    print("finally Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id) + " count: {}"
-          .format(scheduler_trace_count))
     return Response(content=encoded_scheduler_trace,
                     media_type="application/json")
 
