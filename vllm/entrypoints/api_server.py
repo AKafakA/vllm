@@ -76,7 +76,8 @@ async def status() -> Response:
     print("Scheduler trace: {}".format(scheduler_trace_flattened))
     print("finally Scheduler trace took {} seconds".format(end - start) + " id: {}".format(request_id))
     print("finally Scheduler trace took {} seconds after seralization".format(end - start) + " id: {}".format(request_id))
-    return Response(content={}, media_type="application/json")
+    empty_response = {}
+    return JSONResponse(empty_response)
 
 
 @app.post("/generate")
