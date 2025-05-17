@@ -77,10 +77,10 @@ async def status() -> Response:
                     # request_info["is_prefill"] = sequence_group.is_prefill()
                     request_id = request_info['request_id']
                     arrival_time = request_info['arrival_time'] - start_time
-                    total_output_length = request_info['total_output_length']
-                    prompt_length = request_info['prompt_length']
-                    computed_length = request_info['computed_length']
-                    is_prefill = 1 if request_info['is_prefill'] else 0
+                    total_output_length = request_info["seq_total_output_length"]
+                    prompt_length = request_info["seq_prompts_length"]
+                    computed_length = request_info["seq_computed_length"]
+                    is_prefill = 1 if request_info["is_prefill"] else 0
                     if request_id in request_decode_length_map:
                         expected_length = request_decode_length_map[request_id]
                     else:
