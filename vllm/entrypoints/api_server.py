@@ -46,20 +46,45 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
+@app.get("/simple_schedule_trace")
+async def simple_status() -> Response:
+    """simpel status check with metrics collection only"""
+    assert engine is not None
+    scheduler_trace = await engine.get_scheduler_trace()
+    scheduler_trace_flattened = {}
+    total_requests_count = 0
+    free_gpu_blocks = 0
+    num_preempted = 0
+    for i in scheduler_trace.keys():
+        for key in scheduler_trace[i].keys():
+            if key == "free_gpu_blocks":
+                free_gpu_blocks += scheduler_trace[i][key]
+            elif key == "num_preempted":
+                num_preempted += scheduler_trace[i][key]
+            else:
+                total_requests_count += len(scheduler_trace[i][key])
+    scheduler_trace_flattened["total_requests_count"] = total_requests_count
+    scheduler_trace_flattened["free_gpu_blocks"] = free_gpu_blocks
+    scheduler_trace_flattened["num_preempted"] = num_preempted
+    return Response(content=orjson.dumps(scheduler_trace_flattened),
+                    media_type="application/json")
+
+
 @app.get("/schedule_trace")
 async def status() -> Response:
     """Status check."""
     assert engine is not None
-    start_time = time.time()
     scheduler_trace = await engine.get_scheduler_trace()
     scheduler_trace_count = 0
     scheduler_trace_flattened = {}
+    free_gpu_blocks = 0
+    num_preempted = 0
     for i in scheduler_trace.keys():
         for key in scheduler_trace[i].keys():
             if key == "free_gpu_blocks":
-                scheduler_trace_flattened[key] = scheduler_trace[i][key]
+                free_gpu_blocks += scheduler_trace[i][key]
             elif key == "num_preempted":
-                scheduler_trace_flattened[key] = scheduler_trace[i][key]
+                num_preempted += scheduler_trace[i][key]
             else:
                 scheduler_trace_flattened[key] = []
                 for request_info in scheduler_trace[i][key]:
@@ -77,12 +102,9 @@ async def status() -> Response:
                                                            total_output_length, prompt_length,
                                                            computed_length, is_prefill, expected_length])
                     scheduler_trace_count += 1
-    current_time = time.time()
-    print("time ms elapsed: {} to get and flatten scheduler".format((current_time - start_time) * 1000))
+    scheduler_trace_flattened["free_gpu_blocks"] = free_gpu_blocks
+    scheduler_trace_flattened["num_preempted"] = num_preempted
     encoded_scheduler_trace = orjson.dumps(scheduler_trace_flattened)
-    final_time = time.time()
-    print("time ms elapsed: {} to encoding and finally take {}".format((final_time - current_time) * 1000,
-                                                                       (final_time - start_time) * 1000))
     return Response(content=encoded_scheduler_trace,
                     media_type="application/json")
 
@@ -142,12 +164,13 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
 
 @app.post("/generate_benchmark")
 async def generate_benchmark(request: Request) -> Response:
+    request_start_time = time.time()
     request_dict = await request.json()
-    return await _generate_benchmark(request_dict, request)
+    return await _generate_benchmark(request_dict, request, request_start_time)
 
 
 @with_cancellation
-async def _generate_benchmark(request_dict, request: Request) -> Response:
+async def _generate_benchmark(request_dict, request: Request, request_start_time) -> Response:
     """Generate completion for the request.
 
     The request should be a JSON object with the following fields:
@@ -161,8 +184,6 @@ async def _generate_benchmark(request_dict, request: Request) -> Response:
     request_id = request_dict.pop("request_id")
     request_decode_length_map[int(request_id)] = request_dict.pop('num_predicted_tokens')
     sampling_params = SamplingParams(**request_dict)
-
-    start = time.time()
 
     assert engine is not None
     results_generator = engine.generate(prompt, sampling_params, request_id)
@@ -200,6 +221,8 @@ async def _generate_benchmark(request_dict, request: Request) -> Response:
             ret['inference_latency'] = final_output.metrics.model_execute_time * 1000
         if final_output.metrics.first_token_time:
             ret['ttft'] = (final_output.metrics.first_token_time - final_output.metrics.arrival_time) * 1000
+    end_time = time.time()
+    ret["time_on_backend"] = (end_time - request_start_time) * 1000
 
     return JSONResponse(ret)
 
