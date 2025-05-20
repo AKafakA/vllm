@@ -191,6 +191,7 @@ async def _generate_benchmark(request_dict, request: Request, request_start_time
     # Non-streaming case
     final_output = None
     per_token_latency = []
+    start = time.time()
     try:
         async for request_output in results_generator:
             now = time.time()
