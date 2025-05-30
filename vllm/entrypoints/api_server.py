@@ -38,7 +38,6 @@ engine = None
 backend_process = None
 request_decode_length_map = {}
 start_time = time.time()
-engine_block_size = 0
 
 
 @app.get("/health")
@@ -70,7 +69,7 @@ async def simple_status() -> Response:
                     total_running_requests_count += len(scheduler_trace[i][key])
                 elif key == "waiting":
                     for request_info in scheduler_trace[i][key]:
-                        total_required_waiting_blocks += request_info["seq_prompts_length"] / engine_block_size
+                        total_required_waiting_blocks += request_info["required_prompted_blocks"]
     scheduler_trace_flattened["total_requests_count"] = total_requests_count
     scheduler_trace_flattened["free_gpu_blocks"] = free_gpu_blocks
     scheduler_trace_flattened["num_preempted"] = num_preempted
@@ -249,9 +248,6 @@ def build_app(args: Namespace) -> FastAPI:
 @asynccontextmanager
 async def get_engine_client(args: Namespace) -> AsyncLLMEngine:
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    global engine_block_size
-    engine_block_size = engine_args.block_size
-    print("Engine block size: {}".format(engine_block_size))
     if args.disable_frontend_multiprocessing:
         engine_client = AsyncLLMEngine.from_engine_args(engine_args, usage_context=UsageContext.API_SERVER)
         yield engine_client

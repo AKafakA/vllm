@@ -447,6 +447,11 @@ class Sequence:
         return (self.get_len() + self.block_size - 1) // self.block_size
 
     @property
+    def required_prompt_block_size(self) -> float:
+        """The required prompt block size for this sequence."""
+        return self.get_prompt_len() / self.block_size
+
+    @property
     def prompt(self) -> Optional[str]:
         return self.inputs.prompt
 
