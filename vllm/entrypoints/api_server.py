@@ -38,6 +38,7 @@ engine = None
 backend_process = None
 request_decode_length_map = {}
 start_time = time.time()
+engine_block_size = 0
 
 
 @app.get("/health")
@@ -53,6 +54,8 @@ async def simple_status() -> Response:
     scheduler_trace = await engine.get_scheduler_trace()
     scheduler_trace_flattened = {}
     total_requests_count = 0
+    total_running_requests_count = 0
+    total_required_waiting_blocks = 0
     free_gpu_blocks = 0
     num_preempted = 0
     for i in scheduler_trace.keys():
@@ -63,9 +66,16 @@ async def simple_status() -> Response:
                 num_preempted += scheduler_trace[i][key]
             else:
                 total_requests_count += len(scheduler_trace[i][key])
+                if key == "running":
+                    total_running_requests_count += len(scheduler_trace[i][key])
+                elif key == "waiting":
+                    for request_info in scheduler_trace[i][key]:
+                        total_required_waiting_blocks += request_info["seq_prompts_length"] / engine_block_size
     scheduler_trace_flattened["total_requests_count"] = total_requests_count
     scheduler_trace_flattened["free_gpu_blocks"] = free_gpu_blocks
     scheduler_trace_flattened["num_preempted"] = num_preempted
+    scheduler_trace_flattened["current_running_requests_count"] = total_running_requests_count
+    scheduler_trace_flattened["adjusted_free_gpu_blocks"] = free_gpu_blocks - total_required_waiting_blocks
     return Response(content=orjson.dumps(scheduler_trace_flattened),
                     media_type="application/json")
 
@@ -238,12 +248,15 @@ def build_app(args: Namespace) -> FastAPI:
 
 @asynccontextmanager
 async def get_engine_client(args: Namespace) -> AsyncLLMEngine:
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    global engine_block_size
+    engine_block_size = engine_args.block_size
+    print("Engine block size: {}".format(engine_block_size))
     if args.disable_frontend_multiprocessing:
-        engine_args = AsyncEngineArgs.from_cli_args(args)
         engine_client = AsyncLLMEngine.from_engine_args(engine_args, usage_context=UsageContext.API_SERVER)
         yield engine_client
     else:
-        async with build_async_engine_client(args, False) as engine_client:
+        async with build_async_engine_client(args, False, engine_args) as engine_client:
             is_sleeping = await engine_client.is_sleeping()
             print("Engine is sleeping: {}".format(is_sleeping))
             get_scheduler_trace = await engine_client.get_scheduler_trace()
