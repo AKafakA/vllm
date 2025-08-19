@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional, Union
 
+from vllm.core.scheduler import SchedulerRequestLengthTrace
+
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -148,3 +150,8 @@ class SchedulerInterface(ABC):
 
     def get_kv_connector(self) -> Optional["KVConnectorBase_V1"]:
         return None
+
+    @abstractmethod
+    def get_scheduler_trace(self) -> SchedulerRequestLengthTrace:
+        """Get the scheduler trace for debugging purposes."""
+        raise NotImplementedError

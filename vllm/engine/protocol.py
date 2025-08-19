@@ -48,23 +48,23 @@ class EngineClient(ABC):
 
     @abstractmethod
     def generate(
-        self,
-        prompt: PromptType,
-        sampling_params: SamplingParams,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        priority: int = 0,
+            self,
+            prompt: PromptType,
+            sampling_params: SamplingParams,
+            request_id: str,
+            lora_request: Optional[LoRARequest] = None,
+            trace_headers: Optional[Mapping[str, str]] = None,
+            priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
 
     async def beam_search(
-        self,
-        prompt: PromptType,
-        request_id: str,
-        params: BeamSearchParams,
-        lora_request: Optional[LoRARequest] = None,
+            self,
+            prompt: PromptType,
+            request_id: str,
+            params: BeamSearchParams,
+            lora_request: Optional[LoRARequest] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
 
         beam_width = params.beam_width
@@ -171,7 +171,7 @@ class EngineClient(ABC):
                                 BeamSearchSequence(
                                     tokens=current_beam.tokens + [token_id],
                                     logprobs=current_beam.logprobs +
-                                    [logprobs],
+                                             [logprobs],
                                     lora_request=current_beam.lora_request,
                                     cum_logprob=current_beam.cum_logprob +
                                                 logprob_obj.logprob,
@@ -272,9 +272,9 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def do_log_stats(
-        self,
-        scheduler_outputs: Optional[SchedulerOutputs] = None,
-        model_output: Optional[list[SamplerOutput]] = None,
+            self,
+            scheduler_outputs: Optional[SchedulerOutputs] = None,
+            model_output: Optional[list[SamplerOutput]] = None,
     ) -> None:
         ...
 
@@ -323,7 +323,6 @@ class EngineClient(ABC):
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
         ...
-
 
     @abstractmethod
     async def get_scheduler_trace(self) -> Optional[Mapping[str, str]]:

@@ -11,7 +11,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union, List
 
 import msgspec
 import zmq
@@ -272,6 +272,13 @@ class EngineCore:
             dump_engine_exception(self.vllm_config, scheduler_output,
                                   self.scheduler.make_stats())
             raise err
+
+    def get_scheduler_trace(self) -> dict[str, List[dict]]:
+        scheduler_traces = {}
+        trace = self.scheduler.get_scheduler_trace()
+        scheduler_traces["running"] = trace.running_request_length
+        scheduler_traces["waiting"] = trace.waiting_request_length
+        return scheduler_traces
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.

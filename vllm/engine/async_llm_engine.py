@@ -707,6 +707,9 @@ class AsyncLLMEngine(EngineClient):
     async def _engine_abort(self, request_ids: Iterable[str]):
         self.engine.abort_request(request_ids)
 
+    async def get_scheduler_trace(self):
+        return self.engine.get_scheduler_trace()
+
     @staticmethod
     async def run_engine_loop(engine_ref: ReferenceType):
         """We use a weakref to the engine so that the running loop

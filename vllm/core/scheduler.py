@@ -11,6 +11,8 @@ from typing import Callable, Deque, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Union
 
+from vllm.v1.request import Request
+
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
@@ -50,20 +52,57 @@ def get_request_info(requests: List[SequenceGroup]) -> List[Dict]:
         request_info["seq_total_output_length"] = seq_total_output_length
         request_info["seq_prompts_length"] = seq_prompts_length
         request_info["seq_computed_length"] = seq_computed_length
-        request_info["arrival_time"] = sequence_group.arrival_time
-        request_info["n_blocks"] = n_blocks
-        request_info["is_prefill"] = sequence_group.is_prefill()
-        request_info["required_prompted_blocks"] = required_prompted_blocks
+        # Commented out to align with the new v1 Scheduler interface.
+        # request_info["arrival_time"] = sequence_group.arrival_time
+        # request_info["n_blocks"] = n_blocks
+        # request_info["is_prefill"] = sequence_group.is_prefill()
+        # request_info["required_prompted_blocks"] = required_prompted_blocks
+        requests_info.append(request_info)
+    return requests_info
+
+
+def get_request_info_for_v1(requests: List[Request]) -> List[Dict]:
+    requests_info = []
+    for request in requests:
+        request_info = {
+            "request_id": request.request_id,
+            "seq_computed_length": request.num_computed_tokens,
+            "seq_prompt_length": request.num_prompt_tokens,
+            "seq_total_output_length": request.num_all_tokens,
+        }
         requests_info.append(request_info)
     return requests_info
 
 
 class SchedulerRequestLengthTrace:
-    def __init__(self, running_request: List[SequenceGroup], waiting_request: List[SequenceGroup],
-                 swap_request: List[SequenceGroup]):
-        self.running_request_length = get_request_info(running_request)
-        self.waiting_request_length = get_request_info(waiting_request)
-        self.swap_request_length = get_request_info(swap_request)
+    def __init__(self, running_request: List[Dict], waiting_request: List[Dict],
+                 swap_request: List[Dict]) -> None:
+        self.running_request_length = running_request
+        self.waiting_request_length = waiting_request
+        self.swap_request_length = swap_request
+
+    @classmethod
+    def from_v0(cls, running: List[SequenceGroup], waiting: List[SequenceGroup],
+                swapped: List[SequenceGroup]) -> "SchedulerRequestLengthTrace":
+        """Create a SchedulerRequestLengthTrace from v0 scheduler queues."""
+        return cls(
+            running_request=get_request_info(running),
+            waiting_request=get_request_info(waiting),
+            swap_request=get_request_info(swapped),
+        )
+
+    @classmethod
+    def from_v1(
+            cls,
+            running: List[Request],
+            waiting: List[Request],
+    ) -> "SchedulerRequestLengthTrace":
+        """Create a SchedulerRequestLengthTrace from v1 scheduler queues."""
+        return cls(
+            running_request=get_request_info_for_v1(running),
+            waiting_request=get_request_info_for_v1(waiting),
+            swap_request=[], # No swap queue in v1 scheduler, so empty list is used.
+        )
 
 
 class PreemptionMode(enum.Enum):
@@ -397,10 +436,10 @@ class PartialPrefillMetadata:
 
     @classmethod
     def from_queues(
-        cls,
-        running: Deque[SequenceGroup],
-        waiting: Deque[SequenceGroup],
-        scheduler_config: SchedulerConfig,
+            cls,
+            running: Deque[SequenceGroup],
+            waiting: Deque[SequenceGroup],
+            scheduler_config: SchedulerConfig,
     ) -> "PartialPrefillMetadata":
         """Create a PartialPrefillMetadata object from the current state of
         the scheduler's queues.
@@ -450,12 +489,12 @@ class PartialPrefillMetadata:
 class Scheduler:
 
     def __init__(
-        self,
-        scheduler_config: SchedulerConfig,
-        cache_config: CacheConfig,
-        lora_config: Optional[LoRAConfig],
-        pipeline_parallel_size: int = 1,
-        output_proc_callback: Optional[Callable] = None,
+            self,
+            scheduler_config: SchedulerConfig,
+            cache_config: CacheConfig,
+            lora_config: Optional[LoRAConfig],
+            pipeline_parallel_size: int = 1,
+            output_proc_callback: Optional[Callable] = None,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -554,12 +593,12 @@ class Scheduler:
         # running an integer division every time a prefill is scheduled.
         # This splits the budget evenly among all prefills.
         self.partial_prefill_budget_lookup_list = [0] * (
-            self.scheduler_config.max_num_partial_prefills + 1)
+                self.scheduler_config.max_num_partial_prefills + 1)
         self.partial_prefill_budget_lookup_list[0] = (
             scheduler_config.max_num_batched_tokens)
         for i in range(1, self.scheduler_config.max_num_partial_prefills + 1):
             self.partial_prefill_budget_lookup_list[i] = (
-                scheduler_config.max_num_batched_tokens // i)
+                    scheduler_config.max_num_batched_tokens // i)
 
     @property
     def next_cache_id(self):
@@ -575,8 +614,11 @@ class Scheduler:
         return 1
 
     def get_scheduler_trace(self) -> SchedulerRequestLengthTrace:
-        return SchedulerRequestLengthTrace(
-            list(self.running), list(self.waiting), list(self.swapped))
+        return SchedulerRequestLengthTrace.from_v0(
+            running=list(self.running),
+            waiting=list(self.waiting),
+            swapped=list(self.swapped),
+        )
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
@@ -593,9 +635,9 @@ class Scheduler:
         self.swapped.append(seq_group)
 
     def abort_seq_group(
-        self,
-        request_id: Union[str, Iterable[str]],
-        seq_id_to_seq_group: Optional[Dict[str, SequenceGroupBase]] = None,
+            self,
+            request_id: Union[str, Iterable[str]],
+            seq_id_to_seq_group: Optional[Dict[str, SequenceGroupBase]] = None,
     ) -> None:
         """Aborts a sequence group with the given ID.
 
@@ -611,7 +653,7 @@ class Scheduler:
             seq_id_to_seq_group: helper for groups with n>1
         """
         if isinstance(request_id, str):
-            request_id = (request_id, )
+            request_id = (request_id,)
         request_ids = set(request_id)
         seq_id_to_seq_group = seq_id_to_seq_group or {}
         for state_queue in [self.waiting, self.running, self.swapped]:
@@ -647,8 +689,8 @@ class Scheduler:
                 self._free_seq_group_cross_attn_blocks(aborted_group)
 
     def _free_seq_group_cross_attn_blocks(
-        self,
-        seq_group: SequenceGroup,
+            self,
+            seq_group: SequenceGroup,
     ) -> None:
         """
         Free a sequence group from a cross-attention block table.
@@ -677,11 +719,11 @@ class Scheduler:
         return finished_requests_ids
 
     def _schedule_running(
-        self,
-        budget: SchedulingBudget,
-        curr_loras: Optional[Set[int]],
-        enable_chunking: bool = False,
-        partial_prefill_metadata: Optional[PartialPrefillMetadata] = None,
+            self,
+            budget: SchedulingBudget,
+            curr_loras: Optional[Set[int]],
+            enable_chunking: bool = False,
+            partial_prefill_metadata: Optional[PartialPrefillMetadata] = None,
     ) -> SchedulerRunningOutputs:
         """Schedule sequence groups that are running.
 
@@ -740,12 +782,12 @@ class Scheduler:
             #      irrelevant.
             num_uncached_new_tokens, _ = \
                 self._get_num_new_uncached_and_cached_tokens(
-                seq_group,
-                SequenceStatus.RUNNING,
-                enable_chunking,
-                budget,
-                partial_prefill_metadata,
-            )
+                    seq_group,
+                    SequenceStatus.RUNNING,
+                    enable_chunking,
+                    budget,
+                    partial_prefill_metadata,
+                )
 
             num_running_tokens = num_uncached_new_tokens
             if num_running_tokens == 0:
@@ -850,10 +892,10 @@ class Scheduler:
         return ret
 
     def _schedule_swapped(
-        self,
-        budget: SchedulingBudget,
-        curr_loras: Optional[Set[int]],
-        enable_chunking: bool = False,
+            self,
+            budget: SchedulingBudget,
+            curr_loras: Optional[Set[int]],
+            enable_chunking: bool = False,
     ) -> SchedulerSwappedInOutputs:
         """Schedule sequence groups that are swapped out.
 
@@ -945,7 +987,7 @@ class Scheduler:
                     ScheduledSequenceGroup(
                         seq_group,
                         token_chunk_size=num_new_tokens_uncached +
-                        num_new_tokens_cached,
+                                         num_new_tokens_cached,
                     ))
             else:
                 decode_seq_groups.append(
@@ -997,8 +1039,8 @@ class Scheduler:
         return seq_group.priority, seq_group.arrival_time
 
     def _schedule_priority_preemption(
-        self,
-        budget: SchedulingBudget,
+            self,
+            budget: SchedulingBudget,
     ) -> int:
         """Sorts waiting and running queue. Also, force preempt requests
         from the running queue if their priority is lower.
@@ -1022,7 +1064,7 @@ class Scheduler:
             num_new_seqs = seq_group.get_max_num_running_seqs()
             num_new_tokens_uncached, _ = \
                 self._get_num_new_uncached_and_cached_tokens(
-                seq_group, SequenceStatus.WAITING, False, budget)
+                    seq_group, SequenceStatus.WAITING, False, budget)
 
             # Only preempt if priority inversion exists
             while running_queue and self._get_priority(
@@ -1065,11 +1107,11 @@ class Scheduler:
         return force_preemption_count
 
     def _schedule_prefills(
-        self,
-        budget: SchedulingBudget,
-        curr_loras: Optional[Set[int]],
-        enable_chunking: bool = False,
-        partial_prefill_metadata: Optional[PartialPrefillMetadata] = None,
+            self,
+            budget: SchedulingBudget,
+            curr_loras: Optional[Set[int]],
+            enable_chunking: bool = False,
+            partial_prefill_metadata: Optional[PartialPrefillMetadata] = None,
     ) -> SchedulerPrefillOutputs:
         """Schedule sequence groups that are in prefill stage.
 
@@ -1346,8 +1388,8 @@ class Scheduler:
                 ignored_seq_groups_for_embeds.clear()
                 indices_ignored = list[int]()
                 for i, schedule_seq_group in enumerate(scheduled_seq_groups):
-                    if using_prompt_embeds !=\
-                        schedule_seq_group.seq_group.uses_prompt_embeds():
+                    if using_prompt_embeds != \
+                            schedule_seq_group.seq_group.uses_prompt_embeds():
                         ignored_seq_groups_for_embeds.append(
                             schedule_seq_group.seq_group)
                         indices_ignored.append(i)
@@ -1372,7 +1414,7 @@ class Scheduler:
             scheduled_seq_groups=scheduled_seq_groups,
             num_prefill_groups=num_prefill_groups,
             num_batched_tokens=budget.num_batched_tokens +
-            budget.num_cached_tokens,
+                               budget.num_cached_tokens,
             blocks_to_swap_in=swapped_in.blocks_to_swap_in,
             blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
@@ -1476,13 +1518,13 @@ class Scheduler:
             scheduled_seq_groups=scheduled_seq_groups,
             num_prefill_groups=num_prefill_groups,
             num_batched_tokens=budget.num_batched_tokens +
-            budget.num_cached_tokens,
+                               budget.num_cached_tokens,
             blocks_to_swap_in=swapped_in.blocks_to_swap_in,
             blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
             blocks_to_copy=running_scheduled.blocks_to_copy +
-            swapped_in.blocks_to_copy,
+                           swapped_in.blocks_to_copy,
             ignored_seq_groups=prefills.ignored_seq_groups +
-            swapped_in.infeasible_seq_groups,
+                               swapped_in.infeasible_seq_groups,
             num_lookahead_slots=0,
             running_queue_size=len(self.running),
             preempted=(len(running_scheduled.preempted) +
@@ -1490,7 +1532,7 @@ class Scheduler:
         )
 
     def _order_finishing_prefills_first(
-        self, scheduled_prefill_seqs: List[ScheduledSequenceGroup]
+            self, scheduled_prefill_seqs: List[ScheduledSequenceGroup]
     ) -> List[SequenceGroup]:
         """Returns a list of prefilling SequenceGroups where sequences that are
         scheduled to finish prefilling are listed first"""
@@ -1534,7 +1576,7 @@ class Scheduler:
         # async_output_proc is allowed only when we have a single sequence
         # in the sequence group
         no_single_seq = seq_group.sampling_params is None or (
-            seq_group.sampling_params.n == 1)
+                seq_group.sampling_params.n == 1)
         return no_single_seq
 
     def schedule(
@@ -1639,7 +1681,7 @@ class Scheduler:
                     # `multi_modal_data` will be None.
                     multi_modal_data=(seq_group.multi_modal_data
                                       if scheduler_outputs.num_prefill_groups
-                                      > 0 else None),
+                                         > 0 else None),
                     multi_modal_placeholders=(
                         seq_group.multi_modal_placeholders
                         if scheduler_outputs.num_prefill_groups > 0 else None),
@@ -1761,10 +1803,10 @@ class Scheduler:
             seq.status = SequenceStatus.RUNNING
 
     def _append_slots(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_copy: List[Tuple[int, int]],
-        enable_chunking: bool = False,
+            self,
+            seq_group: SequenceGroup,
+            blocks_to_copy: List[Tuple[int, int]],
+            enable_chunking: bool = False,
     ) -> None:
         """Appends new slots to the sequences in the given sequence group.
 
@@ -1834,8 +1876,8 @@ class Scheduler:
         return preemption_mode
 
     def _preempt_by_recompute(
-        self,
-        seq_group: SequenceGroup,
+            self,
+            seq_group: SequenceGroup,
     ) -> None:
         seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         assert len(seqs) == 1
@@ -1846,16 +1888,16 @@ class Scheduler:
         self._free_seq_group_cross_attn_blocks(seq_group)
 
     def _preempt_by_swap(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
+            self,
+            seq_group: SequenceGroup,
+            blocks_to_swap_out: List[Tuple[int, int]],
     ) -> None:
         self._swap_out(seq_group, blocks_to_swap_out)
 
     def _swap_in(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_swap_in: List[Tuple[int, int]],
+            self,
+            seq_group: SequenceGroup,
+            blocks_to_swap_in: List[Tuple[int, int]],
     ) -> None:
         mapping = self.block_manager.swap_in(seq_group)
         blocks_to_swap_in.extend(mapping)
@@ -1863,9 +1905,9 @@ class Scheduler:
             seq.status = SequenceStatus.RUNNING
 
     def _swap_out(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
+            self,
+            seq_group: SequenceGroup,
+            blocks_to_swap_out: List[Tuple[int, int]],
     ) -> None:
         if not self.block_manager.can_swap_out(seq_group):
             # FIXME(woosuk): Abort the sequence group instead of aborting the
@@ -1902,12 +1944,12 @@ class Scheduler:
         return 0
 
     def _get_num_new_uncached_and_cached_tokens(
-        self,
-        seq_group: SequenceGroup,
-        status: SequenceStatus,
-        enable_chunking: bool,
-        budget: SchedulingBudget,
-        partial_prefill_metadata: Optional[PartialPrefillMetadata] = None,
+            self,
+            seq_group: SequenceGroup,
+            status: SequenceStatus,
+            enable_chunking: bool,
+            budget: SchedulingBudget,
+            partial_prefill_metadata: Optional[PartialPrefillMetadata] = None,
     ) -> Tuple[int, int]:
         """
         Returns the number of new uncached and cached tokens to schedule for a
@@ -1977,8 +2019,8 @@ class Scheduler:
                 # count could be less than the number of computed tokens.
                 # See comments on `ComputedBlocksTracker` for more details.
                 assert (
-                    seq.is_prefill() and seq.status == SequenceStatus.RUNNING
-                    and self.scheduler_config.chunked_prefill_enabled
+                        seq.is_prefill() and seq.status == SequenceStatus.RUNNING
+                        and self.scheduler_config.chunked_prefill_enabled
                 ), ("Number of cached tokens should not be less than the "
                     "number of computed tokens for a sequence that's still "
                     f"in prefill. But there are {num_cached_tokens_seq} cached "
@@ -2018,13 +2060,13 @@ class Scheduler:
 
     @staticmethod
     def _chunk_new_tokens_to_schedule(
-        scheduler_config: SchedulerConfig,
-        cache_config: CacheConfig,
-        budget: SchedulingBudget,
-        prompt_limit: int,
-        num_new_tokens: int,
-        partial_prefill_budget_lookup_list: List[int],
-        partial_prefill_metadata: Optional[PartialPrefillMetadata] = None,
+            scheduler_config: SchedulerConfig,
+            cache_config: CacheConfig,
+            budget: SchedulingBudget,
+            prompt_limit: int,
+            num_new_tokens: int,
+            partial_prefill_budget_lookup_list: List[int],
+            partial_prefill_metadata: Optional[PartialPrefillMetadata] = None,
     ) -> int:
         """
         Chunks the number of new tokens to schedule based on the budget when
@@ -2057,8 +2099,8 @@ class Scheduler:
             # Take min of those and get the next lowest multiple of the
             # block size:
             remaining_token_budget = (
-                min(remaining_token_budget, prefill_slot_budget) //
-                block_size) * block_size
+                                             min(remaining_token_budget, prefill_slot_budget) //
+                                             block_size) * block_size
             # NB: In the case where num_new_tokens < budget, we are
             # finishing prefill for this sequence, so we do not need to
             # allocate a full block.

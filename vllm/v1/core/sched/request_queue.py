@@ -58,6 +58,11 @@ class RequestQueue(ABC):
         pass
 
     @abstractmethod
+    def get_request_list(self) -> list[Request]:
+        """Get a list of requests in the queue."""
+        pass
+
+    @abstractmethod
     def __bool__(self) -> bool:
         """Check if queue has any requests."""
         pass
@@ -118,6 +123,10 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
         # and extend
         self.clear()
         self.extend(filtered_requests)
+
+    def get_request_list(self) -> list[Request]:
+        """Get a list of requests in the queue."""
+        return list(self)
 
     def __bool__(self) -> bool:
         """Check if queue has any requests."""
@@ -193,6 +202,10 @@ class PriorityRequestQueue(RequestQueue):
         self._heap = [(p, t, r) for p, t, r in self._heap
                       if r not in requests_to_remove]
         heapq.heapify(self._heap)
+
+    def get_request_list(self) -> list[Request]:
+        """Get a list of requests in the queue."""
+        return [request for _, _, request in self._heap]
 
     def __bool__(self) -> bool:
         """Check if queue has any requests."""

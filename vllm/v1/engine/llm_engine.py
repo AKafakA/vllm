@@ -186,6 +186,10 @@ class LLMEngine:
         request_ids = self.output_processor.abort_requests(request_ids)
         self.engine_core.abort_requests(request_ids)
 
+    def get_scheduler_trace(self) -> dict[str, Any]:
+        """Get the scheduler trace for the current step."""
+        return self.engine_core.get_scheduler_trace()
+
     def add_request(
         self,
         request_id: str,

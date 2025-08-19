@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union, Dict, List
 
 import msgspec.msgpack
 import zmq
@@ -109,6 +109,10 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        raise NotImplementedError
+
+    def get_scheduler_trace(self) -> Dict[str, List[dict]]:
+        """Get the scheduler trace from the EngineCore."""
         raise NotImplementedError
 
     def add_request(self, request: EngineCoreRequest) -> None:
@@ -250,6 +254,10 @@ class InprocClient(EngineCoreClient):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
+
+    def get_scheduler_trace(self) -> Dict[str, List[dict]]:
+        """Get the scheduler trace from the EngineCore."""
+        return self.engine_core.get_scheduler_trace()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         req, request_wave = self.engine_core.preprocess_add_request(request)
@@ -696,6 +704,10 @@ class SyncMPClient(MPClient):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.call_utility("get_supported_tasks")
+
+    def get_scheduler_trace(self) -> Dict[str, List[dict]]:
+        """Get the scheduler trace from the EngineCore."""
+        return self.call_utility("get_scheduler_trace")
 
     def add_request(self, request: EngineCoreRequest) -> None:
         if self.is_dp:

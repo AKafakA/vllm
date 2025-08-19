@@ -105,6 +105,7 @@ class Request:
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
+        self.num_all_tokens = len(self._all_token_ids)
 
         # State
         # The number of tokens with prefix cache hits.
