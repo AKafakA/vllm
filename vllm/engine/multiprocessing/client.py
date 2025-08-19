@@ -4,6 +4,7 @@
 import asyncio
 import copy
 import pickle
+import uuid
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterable, Iterator, List,
                     Mapping, Optional, Union, cast)
@@ -33,7 +34,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
-                                         RPCUProfileRequest, RPCWakeUpRequest)
+                                         RPCUProfileRequest, RPCWakeUpRequest, RPCSchedulerTracingRequest,
+                                         RPCSchedulerTracingResponse)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
@@ -253,7 +255,7 @@ class MQLLMEngineClient(EngineClient):
                 # Put each output into the appropriate queue.
                 elif isinstance(
                         request_outputs,
-                    (RPCAdapterLoadedResponse, RPCIsSleepingResponse)):
+                    (RPCAdapterLoadedResponse, RPCIsSleepingResponse, RPCSchedulerTracingResponse)):
                     self._add_output(request_outputs)
                 else:
                     for request_output in request_outputs:
@@ -264,7 +266,7 @@ class MQLLMEngineClient(EngineClient):
 
     def _add_output(self, request_output: Union[RequestOutput,
                                                 RPCAdapterLoadedResponse,
-                                                RPCIsSleepingResponse]):
+                                                RPCIsSleepingResponse, RPCSchedulerTracingResponse]):
         queue = self.output_queues.get(request_output.request_id)
         if queue is not None:
             queue.put_nowait(request_output)
@@ -666,3 +668,17 @@ class MQLLMEngineClient(EngineClient):
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
             raise request_output
+
+    async def get_scheduler_trace(self):
+        tracing_request = RPCSchedulerTracingRequest()
+        queue: asyncio.Queue[Union[BaseException,
+                                   RPCSchedulerTracingResponse]] = asyncio.Queue()
+        self.output_queues[tracing_request.request_id] = queue
+        request_bytes = pickle.dumps(tracing_request)
+        await self.input_socket.send_multipart((request_bytes, ), copy=False)
+        request_output = await queue.get()
+        self.output_queues.pop(tracing_request.request_id)
+        if isinstance(request_output, BaseException):
+            raise request_output
+        return request_output.scheduler_tracing
+

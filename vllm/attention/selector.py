@@ -201,6 +201,8 @@ def _cached_get_attn_backend(
                     f"Invalid attention backend: '{backend_by_env_var}'. "
                     f"Valid backends are: {list(_Backend.__members__.keys())}")
 
+    selected_backend = _Backend.FLASHINFER
+
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
         selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,

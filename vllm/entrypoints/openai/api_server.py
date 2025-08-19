@@ -191,6 +191,7 @@ async def build_async_engine_client_from_engine_args(
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     disable_frontend_multiprocessing: bool = False,
     client_config: Optional[dict[str, Any]] = None,
+    use_for_openai_api: bool = False,
 ) -> AsyncIterator[EngineClient]:
     """
     Create EngineClient, either:
@@ -201,6 +202,11 @@ async def build_async_engine_client_from_engine_args(
     """
 
     # Create the EngineConfig (determines if we can use V1).
+
+    if use_for_openai_api:
+        usage_context = UsageContext.OPENAI_API_SERVER
+    else:
+        usage_context = UsageContext.API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     # V1 AsyncLLM.
@@ -639,6 +645,11 @@ async def cancel_responses(response_id: str, raw_request: Request):
         return JSONResponse(content=response.model_dump(),
                             status_code=response.error.code)
     return JSONResponse(content=response.model_dump())
+
+@router.get("/scheduler_trace")
+async def scheduler_trace(raw_request: Request) -> Response:
+    trace = await engine_client(raw_request).get_scheduler_trace()
+    return JSONResponse(trace)
 
 
 @router.post("/v1/chat/completions",
@@ -1872,6 +1883,8 @@ async def run_server_worker(listen_address,
             client_config=client_config,
     ) as engine_client:
         maybe_register_tokenizer_info_endpoint(args)
+
+    async with build_async_engine_client(args, True) as engine_client:
         app = build_app(args)
 
         vllm_config = await engine_client.get_vllm_config()

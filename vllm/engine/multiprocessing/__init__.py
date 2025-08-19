@@ -4,7 +4,7 @@
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Mapping, Optional, Union
+from typing import List, Mapping, Optional, Union, overload, Dict
 
 from vllm import PoolingParams
 from vllm.inputs import PromptType
@@ -111,6 +111,17 @@ class RPCIsSleepingResponse:
 
 
 @dataclass
+class RPCSchedulerTracingRequest:
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class RPCSchedulerTracingResponse:
+    request_id: str
+    scheduler_tracing: Dict
+
+
+@dataclass
 class RPCLoadAdapterRequest:
     lora_request: LoRARequest
     # Set the default value of request_id to a new UUID
@@ -126,10 +137,10 @@ RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest,
                       RPCResetMultiModalCacheRequest,
                       RPCResetPrefixCacheRequest, RPCSleepRequest,
-                      RPCWakeUpRequest, RPCIsSleepingRequest]
+                      RPCWakeUpRequest, RPCIsSleepingRequest, RPCSchedulerTracingRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
-                          RPCIsSleepingResponse, RPCError]
+                          RPCIsSleepingResponse, RPCError, RPCSchedulerTracingResponse]
 
 
 def ENGINE_DEAD_ERROR(

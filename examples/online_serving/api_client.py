@@ -51,8 +51,16 @@ def get_streaming_response(response: requests.Response) -> Iterable[list[str]]:
 
 def get_response(response: requests.Response) -> list[str]:
     data = json.loads(response.content)
-    output = data["text"]
-    return output
+    output = data["generated_text"]
+    token_latency = data["per_token_latency"]
+    metrics = {}
+    if 'ttft' in data:
+        metrics['ttft'] = data['ttft']
+    if 'waiting_latency' in data:
+        metrics['waiting_latency'] = data['waiting_latency']
+    if 'inference_latency' in data:
+        metrics['inference_latency'] = data['inference_latency']
+    return output, token_latency, metrics
 
 
 def parse_args():
@@ -62,17 +70,23 @@ def parse_args():
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--prompt", type=str, default="San Francisco is a")
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--return_scheduler_trace", type=bool, default=True)
     return parser.parse_args()
 
 
 def main(args: Namespace):
     prompt = args.prompt
-    api_url = f"http://{args.host}:{args.port}/generate"
+    api_url = f"http://{args.host}:{args.port}/generate_benchmark"
     n = args.n
     stream = args.stream
+    return_scheduler_trace = args.return_scheduler_trace
 
     print(f"Prompt: {prompt!r}\n", flush=True)
     response = post_http_request(prompt, api_url, n, stream)
+    if return_scheduler_trace:
+        api_url = f"http://{args.host}:{args.port}/schedule_trace"
+        trace_data = json.loads(response.content)
+        print(f"Scheduler trace: {trace_data}", flush=True)
 
     if stream:
         num_printed_lines = 0

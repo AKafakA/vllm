@@ -154,16 +154,16 @@ class EngineClient(ABC):
                     logprobs = result.outputs[0].logprobs[0]
                     for token_id, logprob_obj in logprobs.items():
                         if token_id == tokenizer.eos_token_id and \
-                            not ignore_eos:
+                                not ignore_eos:
                             completed.append(
                                 BeamSearchSequence(
                                     tokens=current_beam.tokens +
-                                    [token_id] if include_stop_str_in_output
+                                           [token_id] if include_stop_str_in_output
                                     else current_beam.tokens,
                                     logprobs=current_beam.logprobs +
-                                    [logprobs],
+                                             [logprobs],
                                     cum_logprob=current_beam.cum_logprob +
-                                    logprob_obj.logprob,
+                                                logprob_obj.logprob,
                                     finish_reason="stop",
                                     stop_reason=tokenizer.eos_token_id))
                         else:
@@ -174,7 +174,7 @@ class EngineClient(ABC):
                                     [logprobs],
                                     lora_request=current_beam.lora_request,
                                     cum_logprob=current_beam.cum_logprob +
-                                    logprob_obj.logprob,
+                                                logprob_obj.logprob,
                                     multi_modal_data=current_beam.
                                     multi_modal_data,
                                     mm_processor_kwargs=current_beam.
@@ -217,13 +217,13 @@ class EngineClient(ABC):
 
     @abstractmethod
     def encode(
-        self,
-        prompt: PromptType,
-        pooling_params: PoolingParams,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        priority: int = 0,
+            self,
+            prompt: PromptType,
+            pooling_params: PoolingParams,
+            request_id: str,
+            lora_request: Optional[LoRARequest] = None,
+            trace_headers: Optional[Mapping[str, str]] = None,
+            priority: int = 0,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
         ...
@@ -260,8 +260,8 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
+            self,
+            lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         """Get the appropriate tokenizer for the request"""
         ...
@@ -322,6 +322,12 @@ class EngineClient(ABC):
     @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
+        ...
+
+
+    @abstractmethod
+    async def get_scheduler_trace(self) -> Optional[Mapping[str, str]]:
+        """Get the scheduler trace headers for the engine"""
         ...
 
     async def scale_elastic_ep(self,
