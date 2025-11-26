@@ -165,6 +165,11 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_scheduler_trace(self) -> dict:
+        """Get the trace information of the scheduler for debugging."""
+        raise NotImplementedError
+
+    @abstractmethod
     def make_stats(self) -> Optional["SchedulerStats"]:
         """Make a SchedulerStats object for logging.
 

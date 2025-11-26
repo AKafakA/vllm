@@ -485,6 +485,10 @@ class EngineCore:
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
+    def get_scheduler_trace(self) -> dict:
+        """Get the trace information of the scheduler for debugging."""
+        return self.scheduler.get_scheduler_trace()
+
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 

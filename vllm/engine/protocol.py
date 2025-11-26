@@ -110,6 +110,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def get_scheduler_trace(self) -> dict:
+        """Get the scheduler trace"""
+        ...
+
+    @abstractmethod
     async def start_profile(self) -> None:
         """Start profiling the engine"""
         ...

@@ -141,6 +141,9 @@ class EngineCoreClient(ABC):
     def reset_prefix_cache(self) -> None:
         raise NotImplementedError
 
+    def get_scheduler_trace(self) -> dict:
+        raise NotImplementedError
+
     def sleep(self, level: int = 1) -> None:
         raise NotImplementedError
 
@@ -203,6 +206,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def profile_async(self, is_start: bool = True) -> None:
+        raise NotImplementedError
+
+    async def get_scheduler_trace_async(self) -> dict:
         raise NotImplementedError
 
     async def reset_mm_cache_async(self) -> None:
@@ -289,6 +295,9 @@ class InprocClient(EngineCoreClient):
 
     def reset_prefix_cache(self) -> None:
         self.engine_core.reset_prefix_cache()
+
+    def get_scheduler_trace(self) -> dict:
+        return self.engine_core.get_scheduler_trace()
 
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
@@ -754,6 +763,9 @@ class SyncMPClient(MPClient):
     def reset_prefix_cache(self) -> None:
         self.call_utility("reset_prefix_cache")
 
+    def get_scheduler_trace(self) -> dict:
+        return self.call_utility("get_scheduler_trace")
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.call_utility("add_lora", lora_request)
 
@@ -951,6 +963,9 @@ class AsyncMPClient(MPClient):
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)
+
+    async def get_scheduler_trace_async(self) -> dict:
+        return await self.call_utility_async("get_scheduler_trace")
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
