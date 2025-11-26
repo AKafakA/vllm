@@ -4,7 +4,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, List, Dict
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -48,6 +48,22 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+
+def get_request_info(requests) -> List[Dict]:
+    request_info = []
+    for req in requests:
+        info = {
+            "request_id": req.request_id,
+            "num_prompt_tokens": req.num_prompt_tokens,
+            "num_computed_tokens": req.num_computed_tokens,
+            "total_num_tokens": req.num_tokens,
+            "arrival_time": req.arrival_time,
+            "n_blocks": len(req.block_hashes),
+        }
+        request_info.append(info)
+    return request_info
 
 
 class Scheduler(SchedulerInterface):
@@ -123,6 +139,7 @@ class Scheduler(SchedulerInterface):
         self.block_size = block_size
         self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.num_preempted_requests: int = 0
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
@@ -292,6 +309,7 @@ class Scheduler(SchedulerInterface):
 
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
+                    self.num_preempted_requests += 1
                     if self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
                             self.running,
@@ -1250,6 +1268,13 @@ class Scheduler(SchedulerInterface):
                 )
             else:
                 request.spec_token_ids = spec_token_ids
+
+    def get_scheduler_trace(self):
+        scheduler_trace = {"running": get_request_info(self.running),
+                           "waiting": get_request_info(self.waiting),
+                           "free_gpu_blocks": self.kv_cache_manager.block_pool.get_num_free_blocks(),
+                           "num_preempted": self.num_preempted_requests}
+        return scheduler_trace
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
