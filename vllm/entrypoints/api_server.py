@@ -42,7 +42,7 @@ async def status() -> Response:
     scheduler_trace = await engine.get_scheduler_trace()
     free_gpu_blocks = scheduler_trace["free_gpu_blocks"]
     num_preempts = scheduler_trace["num_preempted"]
-    return Response(content=scheduler_trace,
+    return JSONResponse(content=scheduler_trace,
                     media_type="application/json")
 
 
