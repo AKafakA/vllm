@@ -395,7 +395,7 @@ async def schedule_trace(raw_request: Request):
         else:
             scheduler_trace_flattened[key] = scheduler_trace[key]
             for request_info in scheduler_trace[key]:
-                request_id = int(request_info['request_id'])
+                request_id = request_info['request_id']
                 arrival_time = request_info["arrival_time"]
                 num_prompt_tokens = request_info["num_prompt_tokens"]
                 num_computed_tokens = request_info["num_computed_tokens"]
