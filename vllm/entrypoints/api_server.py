@@ -40,9 +40,30 @@ engine = None
 @app.get("/schedule_trace")
 async def status() -> Response:
     scheduler_trace = await engine.get_scheduler_trace()
-    free_gpu_blocks = scheduler_trace["free_gpu_blocks"]
-    num_preempts = scheduler_trace["num_preempted"]
-    return JSONResponse(content=scheduler_trace,
+    scheduler_trace_flattened = {}
+    free_gpu_blocks = 0
+    num_preempted = 0
+    for key in scheduler_trace.keys():
+        if key == "free_gpu_blocks":
+            free_gpu_blocks = scheduler_trace[key]
+        elif key == "num_preempted":
+            num_preempted = scheduler_trace[key]
+        else:
+            scheduler_trace_flattened[key] = scheduler_trace[key]
+            for request_info in scheduler_trace[key]:
+                request_id = int(request_info['request_id'])
+                arrival_time = request_info["arrival_time"]
+                num_prompt_tokens = request_info["num_prompt_tokens"]
+                num_computed_tokens = request_info["num_computed_tokens"]
+                total_num_tokens = request_info["total_num_tokens"]
+                n_blocks = request_info["n_blocks"]
+                scheduler_trace_flattened[key].extend([request_id, arrival_time,
+                                                         num_prompt_tokens, num_computed_tokens,
+                                                         total_num_tokens, n_blocks])
+    scheduler_trace_flattened["free_gpu_blocks"] = free_gpu_blocks
+    scheduler_trace_flattened["num_preempted"] = num_preempted
+    encoded_scheduler_trace = orjson.dumps(scheduler_trace_flattened)
+    return Response(content=encoded_scheduler_trace,
                     media_type="application/json")
 
 
@@ -72,7 +93,6 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
-    assert engine is not None
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     # Streaming case
@@ -139,7 +159,6 @@ async def run_server(
     set_ulimit()
 
     app = await init_app(args, llm_engine)
-    assert engine is not None
 
     shutdown_task = await serve_http(
         app,
