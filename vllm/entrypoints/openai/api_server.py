@@ -384,7 +384,6 @@ async def schedule_trace(raw_request: Request):
     """
     logger.info("Collecting trace for the next request scheduling")
     scheduler_trace = await engine_client(request=raw_request).get_scheduler_trace()
-    print(scheduler_trace)
     scheduler_trace_flattened = {}
     free_gpu_blocks = 0
     num_preempted = 0
@@ -396,6 +395,7 @@ async def schedule_trace(raw_request: Request):
         else:
             scheduler_trace_flattened[key] = scheduler_trace[key]
             for request_info in scheduler_trace[key]:
+                print(request_info)
                 num_prompt_tokens = request_info["num_prompt_tokens"]
                 num_computed_tokens = request_info["num_computed_tokens"]
                 total_num_tokens = request_info["total_num_tokens"]
