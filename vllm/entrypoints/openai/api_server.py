@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Query, Req
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from orjson import orjson
 from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.concurrency import iterate_in_threadpool
@@ -373,6 +374,41 @@ async def health(raw_request: Request) -> Response:
         return Response(status_code=200)
     except EngineDeadError:
         return Response(status_code=503)
+
+
+@router.get("/schedule_trace")
+async def schedule_trace(raw_request: Request):
+    """
+    Schedule trace for the next request. Note that we currently do not check if the
+    trace is successfully scheduled in the API server.
+    """
+    logger.info("Collecting trace for the next request scheduling")
+    scheduler_trace = await engine_client(request=raw_request).get_scheduler_trace()
+    scheduler_trace_flattened = {}
+    free_gpu_blocks = 0
+    num_preempted = 0
+    for key in scheduler_trace.keys():
+        if key == "free_gpu_blocks":
+            free_gpu_blocks = scheduler_trace[key]
+        elif key == "num_preempted":
+            num_preempted = scheduler_trace[key]
+        else:
+            scheduler_trace_flattened[key] = scheduler_trace[key]
+            for request_info in scheduler_trace[key]:
+                request_id = int(request_info['request_id'])
+                arrival_time = request_info["arrival_time"]
+                num_prompt_tokens = request_info["num_prompt_tokens"]
+                num_computed_tokens = request_info["num_computed_tokens"]
+                total_num_tokens = request_info["total_num_tokens"]
+                n_blocks = request_info["n_blocks"]
+                scheduler_trace_flattened[key].extend([request_id, arrival_time,
+                                                         num_prompt_tokens, num_computed_tokens,
+                                                         total_num_tokens, n_blocks])
+    scheduler_trace_flattened["free_gpu_blocks"] = free_gpu_blocks
+    scheduler_trace_flattened["num_preempted"] = num_preempted
+    encoded_scheduler_trace = orjson.dumps(scheduler_trace_flattened)
+    return Response(content=encoded_scheduler_trace,
+                    media_type="application/json")
 
 
 @router.get("/load")
