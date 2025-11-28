@@ -384,6 +384,7 @@ async def schedule_trace(raw_request: Request):
     """
     logger.info("Collecting trace for the next request scheduling")
     scheduler_trace = await engine_client(request=raw_request).get_scheduler_trace()
+    print(scheduler_trace)
     scheduler_trace_flattened = {}
     free_gpu_blocks = 0
     num_preempted = 0
