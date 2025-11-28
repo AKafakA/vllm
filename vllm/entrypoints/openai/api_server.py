@@ -393,9 +393,8 @@ async def schedule_trace(raw_request: Request):
         elif key == "num_preempted":
             num_preempted = scheduler_trace[key]
         else:
-            scheduler_trace_flattened[key] = scheduler_trace[key]
+            scheduler_trace_flattened[key] = []
             for request_info in scheduler_trace[key]:
-                print(request_info)
                 num_prompt_tokens = request_info["num_prompt_tokens"]
                 num_computed_tokens = request_info["num_computed_tokens"]
                 total_num_tokens = request_info["total_num_tokens"]
