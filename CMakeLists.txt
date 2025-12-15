@@ -909,24 +909,25 @@ target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 #
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  # 1. Define the source file
+  # Define the source file
   set(VLLM_MOE_WNA16_SRC "csrc/moe/moe_wna16.cu")
 
-  # 2. Filter architectures: Only allow sm_70 (Volta) and higher for this file
-  #    because P100 (sm_60) lacks atomicAdd(half).
-  cuda_archs_loose_intersection(MOE_WNA16_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
+  # FILTER: Only build this for Volta (7.0) and newer.
+  # P100 is 6.0, so this block will exclude 6.0 from the target list for this specific file.
+  cuda_archs_loose_intersection(MOE_WNA16_ARCHS "7.0;7.5;8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
 
-  # 3. Only add the source file if there is a valid architecture to build it for.
+  # Only compile if we have a valid architecture remaining
   if(MOE_WNA16_ARCHS)
-      set_gencode_flags_for_srcs(
-        SRCS "${VLLM_MOE_WNA16_SRC}"
-        CUDA_ARCHS "${MOE_WNA16_ARCHS}")
+    set_gencode_flags_for_srcs(
+      SRCS "${VLLM_MOE_WNA16_SRC}"
+      CUDA_ARCHS "${MOE_WNA16_ARCHS}")
 
-      list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
-      message(STATUS "Building moe_wna16 for archs: ${MOE_WNA16_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   else()
-      message(STATUS "Skipping moe_wna16 (Requires sm_70+, current target is too old)")
+    message(STATUS "Skipping moe_wna16.cu (Requires sm_70+, but target is sm_60)")
   endif()
+
+endif()
 
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
