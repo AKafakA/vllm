@@ -11,7 +11,9 @@ if current_platform.is_cuda():
     from vllm import _custom_ops as ops
 
     reshape_and_cache_flash = ops.reshape_and_cache_flash
-    from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
+    # P100 does not support flash attention
+    flash_attn_varlen_func = None
+    get_scheduler_metadata = None
 elif current_platform.is_xpu():
     from vllm._ipex_ops import ipex_ops as ops
 
@@ -46,4 +48,5 @@ def flash_attn_supports_mla():
 
 
 def is_flash_attn_varlen_func_available() -> bool:
-    return current_platform.is_cuda() or current_platform.is_xpu()
+    # P100 does not support flash attention
+    return False
