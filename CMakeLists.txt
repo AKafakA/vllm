@@ -904,104 +904,79 @@ define_extension_target(
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
-#
-# _moe_C extension
-#
+# =============================================================================
+# _moe_C extension (Clean P100 Fix)
+# =============================================================================
+
+# 1. Initialize the list with source files compatible with ALL GPUs
+set(VLLM_MOE_EXT_SRC
+  "csrc/moe/torch_bindings.cpp"
+  "csrc/moe/moe_align_sum_kernels.cu"
+  "csrc/moe/moe_lora_align_sum_kernels.cu"
+  "csrc/moe/topk_softmax_kernels.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  # Define the source file
-  set(VLLM_MOE_WNA16_SRC "csrc/moe/moe_wna16.cu")
+  # 2. Add extra CUDA kernels
+  # NOTE: moe_wna16.cu is excluded here because it requires sm_70+ (Volta)
+  # and causes build failures on P100 (sm_60).
+  list(APPEND VLLM_MOE_EXT_SRC
+    # "csrc/moe/moe_wna16.cu"  <-- DISABLED FOR P100
+    "csrc/moe/grouped_topk_kernels.cu")
 
-  # FILTER: Only build this for Volta (7.0) and newer.
-  # P100 is 6.0, so this block will exclude 6.0 from the target list for this specific file.
-  cuda_archs_loose_intersection(MOE_WNA16_ARCHS "7.0;7.5;8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
-
-  # Only compile if we have a valid architecture remaining
-  if(MOE_WNA16_ARCHS)
-    set_gencode_flags_for_srcs(
-      SRCS "${VLLM_MOE_WNA16_SRC}"
-      CUDA_ARCHS "${MOE_WNA16_ARCHS}")
-
-    list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
-  else()
-    message(STATUS "Skipping moe_wna16.cu (Requires sm_70+, but target is sm_60)")
-  endif()
-
+  # 3. Add Permute kernels
+  set(MOE_PERMUTE_SRC
+      "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
+      "csrc/moe/moe_permute_unpermute_op.cu")
+  list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
 endif()
 
+# 4. Set compilation flags for the sources we just defined
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
   CUDA_ARCHS "${CUDA_ARCHS}")
 
+# 5. Handle Marlin MoE (Automatically skips on P100)
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-    # P100 FIX: Commented out incompatible kernel
-      # set(VLLM_MOE_WNA16_SRC "csrc/moe/moe_wna16.cu")
-      #
-      # set_gencode_flags_for_srcs(
-      #   SRCS "${VLLM_MOE_WNA16_SRC}"
-      #   CUDA_ARCHS "${CUDA_ARCHS}")
-      #
-      # list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
-
-  # 9.0 for latest bf16 atomicAdd PTX
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
-
-    #
-    # For the Marlin MOE kernels we automatically generate sources for various
-    # preselected input type pairs and schedules.
-    # Generate sources:
+    # Generate sources
     set(MOE_MARLIN_GEN_SCRIPT
       ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.py)
     file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
 
-    message(STATUS "Marlin MOE generation script hash: ${MOE_MARLIN_GEN_SCRIPT_HASH}")
-    message(STATUS "Last run Marlin MOE generate script hash: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}")
-
     if (NOT DEFINED CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}
         OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH})
       execute_process(
-        COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=$PYTHONPATH
+        COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=$PYTHONPATH
           ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT}
         RESULT_VARIABLE moe_marlin_generation_result
         OUTPUT_VARIABLE moe_marlin_generation_output
         OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
         ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
       )
-
       if (NOT moe_marlin_generation_result EQUAL 0)
-        message(FATAL_ERROR "Marlin MOE generation failed."
-                            " Result: \"${moe_marlin_generation_result}\""
-                            "\nCheck the log for details: "
-                            "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log")
+        message(FATAL_ERROR "Marlin MOE generation failed.")
       else()
         set(MOE_MARLIN_GEN_SCRIPT_HASH ${MOE_MARLIN_GEN_SCRIPT_HASH}
             CACHE STRING "Last run Marlin MOE generate script hash" FORCE)
-        message(STATUS "Marlin MOE generation completed successfully.")
       endif()
-    else()
-      message(STATUS "Marlin MOE generation script has not changed, skipping generation.")
     endif()
 
     file(GLOB MOE_WNAA16_MARLIN_SRC "csrc/moe/marlin_moe_wna16/*.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MOE_WNAA16_MARLIN_SRC}"
       CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
+
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
       set_source_files_properties(${MOE_WNAA16_MARLIN_SRC}
         PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
     endif()
 
     list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
-
-    message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
-  else()
-    message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
-                   " in CUDA target architectures")
   endif()
 endif()
 
+# 6. Define the target
 message(STATUS "Enabling moe extension.")
 define_extension_target(
   _moe_C
@@ -1014,6 +989,8 @@ define_extension_target(
   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
+
+
 
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
