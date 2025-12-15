@@ -934,14 +934,15 @@ set_gencode_flags_for_srcs(
   CUDA_ARCHS "${CUDA_ARCHS}")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  set(VLLM_MOE_WNA16_SRC
-    "csrc/moe/moe_wna16.cu")
+    # P100 FIX: Commented out incompatible kernel
+      # set(VLLM_MOE_WNA16_SRC "csrc/moe/moe_wna16.cu")
+      #
+      # set_gencode_flags_for_srcs(
+      #   SRCS "${VLLM_MOE_WNA16_SRC}"
+      #   CUDA_ARCHS "${CUDA_ARCHS}")
+      #
+      # list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
 
-  set_gencode_flags_for_srcs(
-    SRCS "${VLLM_MOE_WNA16_SRC}"
-    CUDA_ARCHS "${CUDA_ARCHS}")
-
-  list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   # 9.0 for latest bf16 atomicAdd PTX
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
@@ -1041,9 +1042,10 @@ endif()
 
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
-    include(cmake/external_projects/flashmla.cmake)
+    # P100 FIX: Disable FlashMLA (Requires newer GPU)
+    # include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/qutlass.cmake)
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
-    include(cmake/external_projects/vllm_flash_attn.cmake)
+    #include(cmake/external_projects/vllm_flash_attn.cmake)
 endif ()
