@@ -13,7 +13,10 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 if current_platform.is_cuda():
-    from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+    try:
+        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+    except ImportError:
+        apply_rotary_emb = None
 
 logger = init_logger(__name__)
 
