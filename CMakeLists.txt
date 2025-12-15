@@ -908,25 +908,25 @@ target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 # _moe_C extension
 #
 
-set(VLLM_MOE_EXT_SRC
-  "csrc/moe/torch_bindings.cpp"
-  "csrc/moe/moe_align_sum_kernels.cu"
-  "csrc/moe/moe_lora_align_sum_kernels.cu"
-  "csrc/moe/topk_softmax_kernels.cu")
-
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_MOE_EXT_SRC
-    "csrc/moe/moe_wna16.cu"
-    "csrc/moe/grouped_topk_kernels.cu")
-endif()
+  # 1. Define the source file
+  set(VLLM_MOE_WNA16_SRC "csrc/moe/moe_wna16.cu")
 
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  set(MOE_PERMUTE_SRC
-      "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
-      "csrc/moe/moe_permute_unpermute_op.cu")
+  # 2. Filter architectures: Only allow sm_70 (Volta) and higher for this file
+  #    because P100 (sm_60) lacks atomicAdd(half).
+  cuda_archs_loose_intersection(MOE_WNA16_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
 
-  list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
-endif()
+  # 3. Only add the source file if there is a valid architecture to build it for.
+  if(MOE_WNA16_ARCHS)
+      set_gencode_flags_for_srcs(
+        SRCS "${VLLM_MOE_WNA16_SRC}"
+        CUDA_ARCHS "${MOE_WNA16_ARCHS}")
+
+      list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
+      message(STATUS "Building moe_wna16 for archs: ${MOE_WNA16_ARCHS}")
+  else()
+      message(STATUS "Skipping moe_wna16 (Requires sm_70+, current target is too old)")
+  endif()
 
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
