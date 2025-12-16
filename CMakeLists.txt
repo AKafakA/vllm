@@ -31,7 +31,7 @@ set(ignoreMe "${VLLM_PYTHON_PATH}")
 set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
 # Supported NVIDIA architectures.
-set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
+set(CUDA_SUPPORTED_ARCHS "6.0;7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
 
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101")
@@ -566,9 +566,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # 2. Add extra CUDA kernels
   # NOTE: moe_wna16.cu is excluded here because it requires sm_70+ (Volta)
   # and causes build failures on P100 (sm_60).
-  list(APPEND VLLM_MOE_EXT_SRC
-    # "csrc/moe/moe_wna16.cu"  <-- DISABLED FOR P100
-    "csrc/moe/grouped_topk_kernels.cu")
+
+  # --- COMMENT OUT THE LINE BELOW ---
+  # list(APPEND VLLM_MOE_EXT_SRC
+  #   "csrc/moe/grouped_topk_kernels.cu")
+
+  # Keep grouped_topk_kernels commented out or removed entirely.
 
   # 3. Add Permute kernels
   set(MOE_PERMUTE_SRC
