@@ -562,24 +562,6 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu")
 
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  # 2. Add extra CUDA kernels
-  # NOTE: moe_wna16.cu is excluded here because it requires sm_70+ (Volta)
-  # and causes build failures on P100 (sm_60).
-
-  # --- COMMENT OUT THE LINE BELOW ---
-  # list(APPEND VLLM_MOE_EXT_SRC
-  #   "csrc/moe/grouped_topk_kernels.cu")
-
-  # Keep grouped_topk_kernels commented out or removed entirely.
-
-  # 3. Add Permute kernels
-  set(MOE_PERMUTE_SRC
-      "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
-      "csrc/moe/moe_permute_unpermute_op.cu")
-  list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
-endif()
-
 # 4. Set compilation flags for the sources we just defined
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
