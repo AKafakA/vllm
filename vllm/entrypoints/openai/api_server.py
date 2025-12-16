@@ -398,7 +398,8 @@ async def schedule_trace(raw_request: Request):
                 num_prompt_tokens = request_info["num_prompt_tokens"]
                 num_computed_tokens = request_info["num_computed_tokens"]
                 total_num_tokens = request_info["total_num_tokens"]
-                scheduler_trace_flattened[key].extend([num_prompt_tokens, num_computed_tokens,
+                request_id = request_info["request_id"]
+                scheduler_trace_flattened[key].extend([request_id, num_prompt_tokens, num_computed_tokens,
                                                        total_num_tokens])
     scheduler_trace_flattened["free_gpu_blocks"] = free_gpu_blocks
     scheduler_trace_flattened["num_preempted"] = num_preempted
