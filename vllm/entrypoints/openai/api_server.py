@@ -19,6 +19,7 @@ from functools import partial
 from http import HTTPStatus
 from typing import Annotated, Optional, Union
 
+import orjson
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -451,10 +452,35 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-@router.get("/scheduler_trace")
-async def scheduler_trace(raw_request: Request) -> Response:
-    trace = await engine_client(raw_request).get_scheduler_trace()
-    return JSONResponse(trace)
+@router.get("/schedule_trace")
+async def schedule_trace(raw_request: Request) -> Response:
+    scheduler_trace = await engine_client(raw_request).get_scheduler_trace()
+    scheduler_trace_count = 0
+    scheduler_trace_flattened = {}
+    free_gpu_blocks = 0
+    num_preempted = 0
+    for i in scheduler_trace.keys():
+        for key in scheduler_trace[i].keys():
+            if key == "free_gpu_blocks":
+                free_gpu_blocks += scheduler_trace[i][key]
+            elif key == "num_preempted":
+                num_preempted += scheduler_trace[i][key]
+            else:
+                scheduler_trace_flattened[key] = []
+                for request_info in scheduler_trace[i][key]:
+                    # the request_id is in the format of "<chatcmpl->-<real id>>"
+                    request_id = int(request_info['request_id']).split('-')[1]
+                    total_output_length = request_info["seq_total_output_length"]
+                    prompt_length = request_info["seq_prompts_length"]
+                    computed_length = request_info["seq_computed_length"]
+                    scheduler_trace_flattened[key].extend([request_id,
+                                                           total_output_length, prompt_length,
+                                                           computed_length])
+                    scheduler_trace_count += 1
+    scheduler_trace_flattened["free_gpu_blocks"] = free_gpu_blocks
+    scheduler_trace_flattened["num_preempted"] = num_preempted
+    encoded_scheduler_trace = orjson.dumps(scheduler_trace_flattened)
+    return Response(content=encoded_scheduler_trace, media_type="application/json")
 
 
 @router.post("/v1/chat/completions",
