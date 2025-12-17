@@ -469,7 +469,7 @@ async def schedule_trace(raw_request: Request) -> Response:
                 scheduler_trace_flattened[key] = []
                 for request_info in scheduler_trace[i][key]:
                     # the request_id is in the format of "<chatcmpl->-<real id>>"
-                    request_id = request_info['request_id'].split('-')[1]
+                    request_id = request_info['request_id'].split('-')[-1]
                     total_output_length = request_info["seq_total_output_length"]
                     prompt_length = request_info["seq_prompts_length"]
                     computed_length = request_info["seq_computed_length"]
