@@ -1239,6 +1239,7 @@ class ShareGPTDataset(BenchmarkDataset):
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        max_total_len: int = 2048,
         **kwargs,
     ) -> list:
         samples: list = []
@@ -1261,6 +1262,7 @@ class ShareGPTDataset(BenchmarkDataset):
             if not is_valid_sequence(
                 prompt_len,
                 new_output_len,
+                max_total_len=max_total_len,
                 skip_min_output_len_check=output_len is not None,
             ):
                 continue
@@ -1363,6 +1365,13 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--disable-shuffle",
         action="store_true",
         help="Disable shuffling of dataset samples for deterministic ordering.",
+    )
+
+    parser.add_argument(
+        "--max-total-len",
+        type=int,
+        default=2048,
+        help="Maximum total length (input + output) of each request. Used for conversation datasets.",
     )
 
     # group for dataset specific arguments
@@ -1827,6 +1836,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 output_len=args.sharegpt_output_len,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
+                max_total_len=args.max_total_len,
             ),
             "burstgpt": lambda: BurstGPTDataset(
                 random_seed=args.seed,
