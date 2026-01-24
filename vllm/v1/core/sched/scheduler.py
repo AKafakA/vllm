@@ -1286,6 +1286,9 @@ class Scheduler(SchedulerInterface):
         - Memory pressure (KV cache utilization)
         - Scheduler config (static values)
         """
+        # Auto-extension buffer for predicted_decode_tokens
+        AUTO_EXTEND_BUFFER = 10
+
         # Counts
         num_running = len(self.running)
         num_waiting = len(self.waiting)
@@ -1297,10 +1300,15 @@ class Scheduler(SchedulerInterface):
         # Decode sequence stats
         decode_ctx_lengths = []
 
-        # Process waiting requests
+        # Process waiting requests (includes preempted requests with output)
         for req in self.waiting:
             pending_prefill += req.num_prompt_tokens
-            pending_decode += req.predicted_decode_tokens
+            # Auto-extend prediction if output exceeds estimate
+            if req.num_output_tokens >= req.predicted_decode_tokens:
+                req.predicted_decode_tokens = req.num_output_tokens + AUTO_EXTEND_BUFFER
+            # Account for any output already generated (preempted requests)
+            remaining_decode = req.predicted_decode_tokens - req.num_output_tokens
+            pending_decode += remaining_decode
 
         # Process running requests
         for req in self.running:
@@ -1312,9 +1320,12 @@ class Scheduler(SchedulerInterface):
                 # In decode phase
                 decode_ctx_lengths.append(req.num_computed_tokens)
 
+            # Auto-extend prediction if output exceeds estimate
+            if req.num_output_tokens >= req.predicted_decode_tokens:
+                req.predicted_decode_tokens = req.num_output_tokens + AUTO_EXTEND_BUFFER
             # Remaining decode work
             remaining_decode = req.predicted_decode_tokens - req.num_output_tokens
-            pending_decode += max(0, remaining_decode)
+            pending_decode += remaining_decode
 
         # Context length distribution (decode seqs only)
         num_active_decode = len(decode_ctx_lengths)
