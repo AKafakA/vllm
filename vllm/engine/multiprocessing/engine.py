@@ -26,7 +26,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
                                          RPCUProfileRequest, RPCWakeUpRequest, RPCSchedulerTracingRequest,
-                                         RPCSchedulerTracingResponse)
+                                         RPCSchedulerTracingResponse, RPCAggregatedStatsRequest,
+                                         RPCAggregatedStatsResponse)
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -280,6 +281,8 @@ class MQLLMEngine:
                     self._handle_is_sleeping_request(request)
                 elif isinstance(request, RPCSchedulerTracingRequest):
                     self._handle_scheduler_trace_request(request)
+                elif isinstance(request, RPCAggregatedStatsRequest):
+                    self._handle_aggregated_stats_request(request)
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -359,6 +362,13 @@ class MQLLMEngine:
                 request_id=request.request_id,
                 scheduler_tracing=scheduler_trace))
 
+    def _handle_aggregated_stats_request(self, request: RPCAggregatedStatsRequest):
+        aggregated_stats = self.get_aggregated_stats()
+        self._send_outputs(
+            RPCAggregatedStatsResponse(
+                request_id=request.request_id,
+                aggregated_stats=aggregated_stats))
+
     def _health_check(self):
         # Send unhealthy if engine has already errored
         if self._errored_with is not None:
@@ -433,6 +443,9 @@ class MQLLMEngine:
 
     def get_scheduler_trace(self) -> Dict:
         return self.engine.get_scheduler_trace()
+
+    def get_aggregated_stats(self) -> Dict:
+        return self.engine.get_aggregated_stats()
 
 
 def signal_handler(*_) -> None:

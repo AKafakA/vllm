@@ -585,6 +585,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        predicted_decode_tokens: Optional[int] = None,
     ) -> Optional[SequenceGroup]:
         """Add a processed request to the engine's request pool.
         return the created sequence group.
@@ -634,7 +635,8 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
-                priority=priority)
+                priority=priority,
+                predicted_decode_tokens=predicted_decode_tokens)
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
                 request_id,
@@ -673,6 +675,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        predicted_decode_tokens: Optional[int] = None,
     ) -> None:
         ...
 
@@ -689,6 +692,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        predicted_decode_tokens: Optional[int] = None,
     ) -> None:
         ...
 
@@ -706,6 +710,7 @@ class LLMEngine:
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
+            predicted_decode_tokens: Optional[int] = None,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
@@ -797,6 +802,7 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
             priority=priority,
+            predicted_decode_tokens=predicted_decode_tokens,
         )
 
     def _validate_token_prompt(self, prompt: PromptType,
@@ -831,6 +837,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         encoder_seq: Optional[Sequence] = None,
         priority: int = 0,
+        predicted_decode_tokens: Optional[int] = None,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -866,6 +873,7 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq,
             priority=priority,
+            predicted_decode_tokens=predicted_decode_tokens,
             draft_size=draft_size)
 
         return seq_group
@@ -945,6 +953,63 @@ class LLMEngine:
             scheduler_traces[i]["num_preempted"] = scheduler.num_preempted_requests
         return scheduler_traces
 
+    def get_aggregated_stats(self) -> dict:
+        """Get aggregated scheduler statistics for monitoring/load balancing.
+
+        Aggregates stats from all schedulers (for pipeline parallelism).
+        """
+        if len(self.scheduler) == 1:
+            # Single scheduler - return directly
+            return self.scheduler[0].get_aggregated_stats()
+
+        # Multiple schedulers - aggregate stats
+        combined = {
+            "num_running": 0,
+            "num_waiting": 0,
+            "num_active_decode_seqs": 0,
+            "decode_ctx_mean": 0,
+            "decode_ctx_p50": 0,
+            "decode_ctx_p95": 0,
+            "decode_ctx_max": 0,
+            "total_decode_context_tokens": 0,
+            "pending_prefill_tokens": 0,
+            "pending_decode_tokens": 0,
+            "kv_cache_utilization": 0.0,
+            "kv_free_blocks": 0,
+            "token_budget_per_iter": 0,
+            "max_num_seqs": 0,
+            "num_preempted": 0,
+            "timestamp": 0.0,
+        }
+
+        for scheduler in self.scheduler:
+            stats = scheduler.get_aggregated_stats()
+            combined["num_running"] += stats["num_running"]
+            combined["num_waiting"] += stats["num_waiting"]
+            combined["num_active_decode_seqs"] += stats["num_active_decode_seqs"]
+            combined["total_decode_context_tokens"] += stats["total_decode_context_tokens"]
+            combined["pending_prefill_tokens"] += stats["pending_prefill_tokens"]
+            combined["pending_decode_tokens"] += stats["pending_decode_tokens"]
+            combined["kv_free_blocks"] += stats["kv_free_blocks"]
+            combined["num_preempted"] += stats["num_preempted"]
+            # Take max for these
+            combined["decode_ctx_max"] = max(combined["decode_ctx_max"], stats["decode_ctx_max"])
+            combined["token_budget_per_iter"] = max(combined["token_budget_per_iter"],
+                                                     stats["token_budget_per_iter"])
+            combined["max_num_seqs"] = max(combined["max_num_seqs"], stats["max_num_seqs"])
+            combined["timestamp"] = max(combined["timestamp"], stats["timestamp"])
+
+        # Average utilization across schedulers
+        total_utilization = sum(s.get_aggregated_stats()["kv_cache_utilization"]
+                                 for s in self.scheduler)
+        combined["kv_cache_utilization"] = total_utilization / len(self.scheduler)
+
+        # Recalculate mean/percentiles from total
+        if combined["num_active_decode_seqs"] > 0:
+            combined["decode_ctx_mean"] = (combined["total_decode_context_tokens"] //
+                                            combined["num_active_decode_seqs"])
+
+        return combined
 
     def get_lora_config(self) -> LoRAConfig:
         """Gets the LoRA configuration."""

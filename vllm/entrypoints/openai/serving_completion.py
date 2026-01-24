@@ -167,6 +167,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         prompt_adapter_request=prompt_adapter_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        predicted_decode_tokens=request.predicted_decode_tokens,
                     )
 
                 generators.append(generator)

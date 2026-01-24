@@ -36,7 +36,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
                                          RPCUProfileRequest, RPCWakeUpRequest, RPCSchedulerTracingRequest,
-                                         RPCSchedulerTracingResponse)
+                                         RPCSchedulerTracingResponse, RPCAggregatedStatsRequest,
+                                         RPCAggregatedStatsResponse)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
@@ -449,6 +450,7 @@ class MQLLMEngineClient(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        predicted_decode_tokens: Optional[int] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
 
@@ -464,6 +466,7 @@ class MQLLMEngineClient(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        predicted_decode_tokens: Optional[int] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
 
@@ -480,6 +483,7 @@ class MQLLMEngineClient(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        predicted_decode_tokens: Optional[int] = None,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -647,6 +651,7 @@ class MQLLMEngineClient(EngineClient):
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
+                    predicted_decode_tokens=predicted_decode_tokens,
                 ))
 
             # 3) Send the RPCGenerateRequest to the MQLLMEngine.
@@ -755,4 +760,17 @@ class MQLLMEngineClient(EngineClient):
         if isinstance(request_output, BaseException):
             raise request_output
         return request_output.scheduler_tracing
+
+    async def get_aggregated_stats(self):
+        stats_request = RPCAggregatedStatsRequest()
+        queue: asyncio.Queue[Union[BaseException,
+                                   RPCAggregatedStatsResponse]] = asyncio.Queue()
+        self.output_queues[stats_request.request_id] = queue
+        request_bytes = pickle.dumps(stats_request)
+        await self.input_socket.send_multipart((request_bytes, ), copy=False)
+        request_output = await queue.get()
+        self.output_queues.pop(stats_request.request_id)
+        if isinstance(request_output, BaseException):
+            raise request_output
+        return request_output.aggregated_stats
 

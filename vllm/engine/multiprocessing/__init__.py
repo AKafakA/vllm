@@ -36,6 +36,7 @@ class RPCProcessRequest:
     trace_headers: Optional[Mapping[str, str]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     priority: int = 0
+    predicted_decode_tokens: Optional[int] = None
 
     @overload
     def __init__(
@@ -47,6 +48,7 @@ class RPCProcessRequest:
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
+            predicted_decode_tokens: Optional[int] = None,
     ) -> None:
         ...
 
@@ -62,6 +64,7 @@ class RPCProcessRequest:
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
+            predicted_decode_tokens: Optional[int] = None,
     ) -> None:
         ...
 
@@ -78,6 +81,7 @@ class RPCProcessRequest:
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
+            predicted_decode_tokens: Optional[int] = None,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
@@ -95,6 +99,7 @@ class RPCProcessRequest:
         self.trace_headers = trace_headers
         self.prompt_adapter_request = prompt_adapter_request
         self.priority = priority
+        self.predicted_decode_tokens = predicted_decode_tokens
 
 
 @dataclass
@@ -161,6 +166,17 @@ class RPCSchedulerTracingResponse:
 
 
 @dataclass
+class RPCAggregatedStatsRequest:
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class RPCAggregatedStatsResponse:
+    request_id: str
+    aggregated_stats: Dict
+
+
+@dataclass
 class RPCLoadAdapterRequest:
     lora_request: LoRARequest
     # Set the default value of request_id to a new UUID
@@ -175,10 +191,12 @@ class RPCAdapterLoadedResponse:
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest,
                       RPCResetPrefixCacheRequest, RPCSleepRequest,
-                      RPCWakeUpRequest, RPCIsSleepingRequest, RPCSchedulerTracingRequest]
+                      RPCWakeUpRequest, RPCIsSleepingRequest, RPCSchedulerTracingRequest,
+                      RPCAggregatedStatsRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
-                          RPCIsSleepingResponse, RPCError, RPCSchedulerTracingResponse]
+                          RPCIsSleepingResponse, RPCError, RPCSchedulerTracingResponse,
+                          RPCAggregatedStatsResponse]
 
 
 def ENGINE_DEAD_ERROR(

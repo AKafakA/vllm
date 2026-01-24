@@ -483,6 +483,14 @@ async def schedule_trace(raw_request: Request) -> Response:
     return Response(content=encoded_scheduler_trace, media_type="application/json")
 
 
+@router.get("/scheduler_stats")
+async def scheduler_stats(raw_request: Request) -> Response:
+    """Get aggregated scheduler statistics for monitoring and load balancing."""
+    stats = await engine_client(raw_request).get_aggregated_stats()
+    encoded_stats = orjson.dumps(stats)
+    return Response(content=encoded_stats, media_type="application/json")
+
+
 @router.post("/v1/chat/completions",
              dependencies=[Depends(validate_json_request)])
 @with_cancellation

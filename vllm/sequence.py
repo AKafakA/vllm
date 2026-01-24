@@ -655,9 +655,11 @@ class SequenceGroup:
         trace_headers: OpenTelemetry trace headers.
         prompt_adapter_request: Prompt Adapter request.
         priority: User-defined priority of the request.
-        draft_size: The number of speculative tokens plus one from the target 
+        predicted_decode_tokens: Predicted number of output tokens for scheduler
+            load estimation. Defaults to max_tokens if not provided.
+        draft_size: The number of speculative tokens plus one from the target
                     model; equal to max number of tokens a step can generate
-                    for single-draft speculative decoding but larger than 
+                    for single-draft speculative decoding but larger than
                     that for multi-draft SD (currently not supported).
     """
 
@@ -673,6 +675,7 @@ class SequenceGroup:
                  trace_headers: Optional[Mapping[str, str]] = None,
                  prompt_adapter_request: Optional[PromptAdapterRequest] = None,
                  priority: int = 0,
+                 predicted_decode_tokens: Optional[int] = None,
                  draft_size: int = 1) -> None:
         self.request_id = request_id
         self.seqs = seqs
@@ -699,6 +702,15 @@ class SequenceGroup:
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
         self.priority = priority
+
+        # Predicted decode tokens for scheduler load estimation
+        # Defaults to max_tokens if not provided
+        if predicted_decode_tokens is not None:
+            self.predicted_decode_tokens = predicted_decode_tokens
+        elif sampling_params is not None and sampling_params.max_tokens is not None:
+            self.predicted_decode_tokens = sampling_params.max_tokens
+        else:
+            self.predicted_decode_tokens = 0
 
         self.cached_request_output = None
 

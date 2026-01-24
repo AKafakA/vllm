@@ -438,6 +438,7 @@ class _AsyncLLMEngine(LLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        predicted_decode_tokens: Optional[int] = None,
     ) -> None:
         ...
 
@@ -452,6 +453,7 @@ class _AsyncLLMEngine(LLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        predicted_decode_tokens: Optional[int] = None,
     ) -> None:
         ...
 
@@ -469,6 +471,7 @@ class _AsyncLLMEngine(LLMEngine):
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
+            predicted_decode_tokens: Optional[int] = None,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
@@ -520,6 +523,7 @@ class _AsyncLLMEngine(LLMEngine):
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
             priority=priority,
+            predicted_decode_tokens=predicted_decode_tokens,
         )
 
     async def check_health_async(self) -> None:
@@ -922,6 +926,7 @@ class AsyncLLMEngine(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        predicted_decode_tokens: Optional[int] = None,
         *,
         inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
@@ -954,6 +959,7 @@ class AsyncLLMEngine(EngineClient):
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,
             priority=priority,
+            predicted_decode_tokens=predicted_decode_tokens,
         )
 
         return stream.generator()
@@ -967,6 +973,7 @@ class AsyncLLMEngine(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        predicted_decode_tokens: Optional[int] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
 
@@ -1043,6 +1050,7 @@ class AsyncLLMEngine(EngineClient):
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
+                    predicted_decode_tokens=predicted_decode_tokens,
             ):
                 yield LLMEngine.validate_output(output, RequestOutput)
         except asyncio.CancelledError:
@@ -1187,6 +1195,10 @@ class AsyncLLMEngine(EngineClient):
 
     async def get_scheduler_trace(self):
         return self.engine.get_scheduler_trace()
+
+    async def get_aggregated_stats(self) -> dict:
+        """Get aggregated scheduler statistics for monitoring/load balancing."""
+        return self.engine.get_aggregated_stats()
 
     async def do_log_stats(
             self,

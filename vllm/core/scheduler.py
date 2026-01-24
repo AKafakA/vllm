@@ -588,6 +588,117 @@ class Scheduler:
         return SchedulerRequestLengthTrace(
             list(self.running), list(self.waiting), list(self.swapped))
 
+    def get_aggregated_stats(self) -> dict:
+        """Get aggregated scheduler statistics for monitoring/load balancing.
+
+        Returns a compact summary of scheduler state including:
+        - Batch state counts (running, waiting, decode sequences)
+        - Context length distribution for decode sequences
+        - Backlog in tokens (prefill and decode)
+        - Memory pressure (KV cache utilization)
+        - Scheduler config (static values)
+        """
+        # Counts
+        num_running = len(self.running)
+        num_waiting = len(self.waiting)
+
+        # Backlog calculation
+        pending_prefill = 0
+        pending_decode = 0
+
+        # Decode sequence stats
+        decode_ctx_lengths = []
+
+        # Auto-extension buffer for requests exceeding their prediction
+        AUTO_EXTEND_BUFFER = 10
+
+        # Process waiting requests
+        # Note: This includes both new requests and preempted requests.
+        # Preempted requests have num_computed_tokens reset to 0 but may have
+        # already generated output tokens that are preserved.
+        for seq_group in self.waiting:
+            seq = seq_group.get_seqs()[0]  # First sequence
+            pending_prefill += seq.get_prompt_len()
+            output_len = seq.get_output_len()
+            # Auto-extend prediction if output exceeds it (update the attribute)
+            if output_len >= seq_group.predicted_decode_tokens:
+                seq_group.predicted_decode_tokens = output_len + AUTO_EXTEND_BUFFER
+            remaining_decode = seq_group.predicted_decode_tokens - output_len
+            pending_decode += remaining_decode
+
+        # Process running requests
+        for seq_group in self.running:
+            seq = seq_group.get_seqs()[0]  # First sequence
+            remaining_prefill = seq.get_prompt_len() - seq.get_num_computed_tokens()
+            if remaining_prefill > 0:
+                # Still prefilling
+                pending_prefill += remaining_prefill
+            else:
+                # In decode phase
+                decode_ctx_lengths.append(seq.get_num_computed_tokens())
+
+            # Auto-extend prediction if output exceeds it (update the attribute)
+            output_len = seq.get_output_len()
+            if output_len >= seq_group.predicted_decode_tokens:
+                seq_group.predicted_decode_tokens = output_len + AUTO_EXTEND_BUFFER
+            remaining_decode = seq_group.predicted_decode_tokens - output_len
+            pending_decode += remaining_decode
+
+        # Context length distribution (decode seqs only)
+        num_active_decode = len(decode_ctx_lengths)
+        if decode_ctx_lengths:
+            decode_ctx_mean = int(sum(decode_ctx_lengths) / len(decode_ctx_lengths))
+            sorted_ctx = sorted(decode_ctx_lengths)
+            n = len(sorted_ctx)
+            decode_ctx_p50 = sorted_ctx[n // 2]
+            decode_ctx_p95 = sorted_ctx[min(int(n * 0.95), n - 1)]
+            decode_ctx_max = sorted_ctx[-1]
+            total_decode_ctx = sum(decode_ctx_lengths)
+        else:
+            decode_ctx_mean = 0
+            decode_ctx_p50 = 0
+            decode_ctx_p95 = 0
+            decode_ctx_max = 0
+            total_decode_ctx = 0
+
+        # KV cache utilization
+        free_blocks = self.block_manager.get_num_free_gpu_blocks()
+        total_blocks = self.cache_config.num_gpu_blocks or 0
+        if total_blocks > 0:
+            kv_cache_utilization = 1.0 - (free_blocks / total_blocks)
+        else:
+            kv_cache_utilization = 0.0
+
+        return {
+            # Batch state counts
+            "num_running": num_running,
+            "num_waiting": num_waiting,
+            "num_active_decode_seqs": num_active_decode,
+
+            # Context length distribution
+            "decode_ctx_mean": decode_ctx_mean,
+            "decode_ctx_p50": decode_ctx_p50,
+            "decode_ctx_p95": decode_ctx_p95,
+            "decode_ctx_max": decode_ctx_max,
+            "total_decode_context_tokens": total_decode_ctx,
+
+            # Backlog in tokens
+            "pending_prefill_tokens": pending_prefill,
+            "pending_decode_tokens": pending_decode,
+
+            # Memory pressure
+            "kv_cache_utilization": kv_cache_utilization,
+            "kv_free_blocks": free_blocks,
+
+            # Scheduler config (static)
+            "token_budget_per_iter": self.scheduler_config.max_num_batched_tokens,
+            "max_num_seqs": self.scheduler_config.max_num_seqs,
+
+            # Metadata
+            "num_preempted": self.num_preempted_requests,
+            "timestamp": time.time(),
+        }
+
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)

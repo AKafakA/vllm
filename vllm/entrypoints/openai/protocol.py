@@ -375,6 +375,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    predicted_decode_tokens: Optional[int] = Field(
+        default=None,
+        description=(
+            "Predicted number of output tokens for this request. Used for "
+            "scheduler load estimation. If not provided, defaults to "
+            "max_tokens. Unlike max_tokens (hard upper bound), this is a "
+            "soft estimate for scheduling purposes."))
 
     # doc: end-chat-completion-extra-params
 
@@ -751,6 +758,13 @@ class CompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    predicted_decode_tokens: Optional[int] = Field(
+        default=None,
+        description=(
+            "Predicted number of output tokens for this request. Used for "
+            "scheduler load estimation. If not provided, defaults to "
+            "max_tokens. Unlike max_tokens (hard upper bound), this is a "
+            "soft estimate for scheduling purposes."))
 
     # doc: end-completion-extra-params
 
