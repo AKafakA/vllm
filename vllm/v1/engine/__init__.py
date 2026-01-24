@@ -72,6 +72,9 @@ class EngineCoreRequest(
 
     trace_headers: Mapping[str, str] | None = None
 
+    # Predicted output tokens for scheduler load estimation (defaults to max_tokens)
+    predicted_decode_tokens: int | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""

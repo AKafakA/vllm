@@ -734,6 +734,9 @@ class AsyncLLM(EngineClient):
     async def get_scheduler_trace(self) -> dict:
         return await self.engine_core.get_scheduler_trace_async()
 
+    async def get_aggregated_stats(self) -> dict:
+        return await self.engine_core.get_aggregated_stats_async()
+
     async def stop_profile(self) -> None:
         coros = [self.engine_core.profile_async(False)]
         if self.profiler is not None:

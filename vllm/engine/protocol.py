@@ -115,6 +115,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def get_aggregated_stats(self) -> dict:
+        """Get aggregated scheduler statistics for monitoring/load balancing"""
+        ...
+
+    @abstractmethod
     async def start_profile(self) -> None:
         """Start profiling the engine"""
         ...

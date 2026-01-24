@@ -226,6 +226,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        predicted_decode_tokens=request.predicted_decode_tokens,
                     )
 
                     generator = self.engine_client.generate(

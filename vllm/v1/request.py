@@ -44,6 +44,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        predicted_decode_tokens: int | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -81,6 +82,12 @@ class Request:
                 )
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
+
+        # Predicted decode tokens for scheduler load estimation (defaults to max_tokens)
+        self.predicted_decode_tokens = (
+            predicted_decode_tokens if predicted_decode_tokens is not None
+            else self.max_tokens
+        )
 
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
@@ -153,6 +160,7 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            predicted_decode_tokens=request.predicted_decode_tokens,
         )
 
     def append_output_token_ids(

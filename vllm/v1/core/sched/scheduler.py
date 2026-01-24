@@ -1276,6 +1276,93 @@ class Scheduler(SchedulerInterface):
                            "num_preempted": self.num_preempted_requests}
         return scheduler_trace
 
+    def get_aggregated_stats(self) -> dict:
+        """Get aggregated scheduler statistics for monitoring/load balancing.
+
+        Returns a compact summary of scheduler state including:
+        - Batch state counts (running, waiting, decode sequences)
+        - Context length distribution for decode sequences
+        - Backlog in tokens (prefill and decode)
+        - Memory pressure (KV cache utilization)
+        - Scheduler config (static values)
+        """
+        # Counts
+        num_running = len(self.running)
+        num_waiting = len(self.waiting)
+
+        # Backlog calculation
+        pending_prefill = 0
+        pending_decode = 0
+
+        # Decode sequence stats
+        decode_ctx_lengths = []
+
+        # Process waiting requests
+        for req in self.waiting:
+            pending_prefill += req.num_prompt_tokens
+            pending_decode += req.predicted_decode_tokens
+
+        # Process running requests
+        for req in self.running:
+            remaining_prefill = req.num_prompt_tokens - req.num_computed_tokens
+            if remaining_prefill > 0:
+                # Still prefilling
+                pending_prefill += remaining_prefill
+            else:
+                # In decode phase
+                decode_ctx_lengths.append(req.num_computed_tokens)
+
+            # Remaining decode work
+            remaining_decode = req.predicted_decode_tokens - req.num_output_tokens
+            pending_decode += max(0, remaining_decode)
+
+        # Context length distribution (decode seqs only)
+        num_active_decode = len(decode_ctx_lengths)
+        if decode_ctx_lengths:
+            decode_ctx_mean = int(sum(decode_ctx_lengths) / len(decode_ctx_lengths))
+            sorted_ctx = sorted(decode_ctx_lengths)
+            n = len(sorted_ctx)
+            decode_ctx_p50 = sorted_ctx[n // 2]
+            decode_ctx_p95 = sorted_ctx[min(int(n * 0.95), n - 1)]
+            decode_ctx_max = sorted_ctx[-1]
+            total_decode_ctx = sum(decode_ctx_lengths)
+        else:
+            decode_ctx_mean = 0
+            decode_ctx_p50 = 0
+            decode_ctx_p95 = 0
+            decode_ctx_max = 0
+            total_decode_ctx = 0
+
+        return {
+            # Batch state counts
+            "num_running": num_running,
+            "num_waiting": num_waiting,
+            "num_active_decode_seqs": num_active_decode,
+
+            # Context length distribution
+            "decode_ctx_mean": decode_ctx_mean,
+            "decode_ctx_p50": decode_ctx_p50,
+            "decode_ctx_p95": decode_ctx_p95,
+            "decode_ctx_max": decode_ctx_max,
+            "total_decode_context_tokens": total_decode_ctx,
+
+            # Backlog in tokens
+            "pending_prefill_tokens": pending_prefill,
+            "pending_decode_tokens": pending_decode,
+
+            # Memory pressure
+            "kv_cache_utilization": self.kv_cache_manager.usage,
+            "kv_free_blocks": self.kv_cache_manager.block_pool.get_num_free_blocks(),
+
+            # Scheduler config (static)
+            "token_budget_per_iter": self.max_num_scheduled_tokens,
+            "max_num_seqs": self.max_num_running_reqs,
+
+            # Metadata
+            "num_preempted": self.num_preempted_requests,
+            "timestamp": time.time(),
+        }
+
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting)
