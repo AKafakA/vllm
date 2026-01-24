@@ -1207,6 +1207,7 @@ class OpenAIServing:
         lora_request: LoRARequest | None,
         trace_headers: Mapping[str, str] | None,
         priority: int,
+        predicted_decode_tokens: int | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for AsyncLLM."""
         tokenization_kwargs: dict[str, Any] = {}
@@ -1222,6 +1223,7 @@ class OpenAIServing:
             tokenization_kwargs=tokenization_kwargs,
             trace_headers=trace_headers,
             priority=priority,
+            predicted_decode_tokens=predicted_decode_tokens,
         )
         return engine_request, tokenization_kwargs
 

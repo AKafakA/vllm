@@ -489,6 +489,10 @@ class EngineCore:
         """Get the trace information of the scheduler for debugging."""
         return self.scheduler.get_scheduler_trace()
 
+    def get_aggregated_stats(self) -> dict:
+        """Get aggregated scheduler statistics for monitoring/load balancing."""
+        return self.scheduler.get_aggregated_stats()
+
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 

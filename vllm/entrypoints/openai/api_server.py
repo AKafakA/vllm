@@ -407,6 +407,24 @@ async def schedule_trace(raw_request: Request):
                     media_type="application/json")
 
 
+@router.get("/instance_stats")
+async def scheduler_stats(raw_request: Request):
+    """
+    Get aggregated scheduler statistics for monitoring and load balancing.
+
+    Returns a compact summary including:
+    - Batch state counts (num_running, num_waiting, num_active_decode_seqs)
+    - Context length distribution for decode sequences (mean, p50, p95, max)
+    - Backlog in tokens (pending_prefill_tokens, pending_decode_tokens)
+    - Memory pressure (kv_cache_utilization, kv_free_blocks)
+    - Scheduler config (token_budget_per_iter, max_num_seqs)
+    - Metadata (num_preempted, timestamp)
+    """
+    stats = await engine_client(request=raw_request).get_aggregated_stats()
+    encoded_stats = orjson.dumps(stats)
+    return Response(content=encoded_stats, media_type="application/json")
+
+
 @router.get("/load")
 async def get_server_load_metrics(request: Request):
     # This endpoint returns the current server load metrics.

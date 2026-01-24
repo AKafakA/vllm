@@ -720,6 +720,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    predicted_decode_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Predicted number of output tokens for this request. Used for "
+            "scheduler load estimation. If not provided, defaults to max_tokens. "
+            "Unlike max_tokens (hard upper bound), this is a soft estimate."
+        ),
+    )
+
     # --8<-- [end:chat-completion-extra-params]
 
     # Default sampling parameters for chat completion requests
@@ -1137,6 +1146,15 @@ class CompletionRequest(OpenAIBaseModel):
         description=(
             "Additional request parameters with string or "
             "numeric values, used by custom extensions."
+        ),
+    )
+
+    predicted_decode_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Predicted number of output tokens for this request. Used for "
+            "scheduler load estimation. If not provided, defaults to max_tokens. "
+            "Unlike max_tokens (hard upper bound), this is a soft estimate."
         ),
     )
 

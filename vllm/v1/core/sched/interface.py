@@ -170,6 +170,11 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_aggregated_stats(self) -> dict:
+        """Get aggregated scheduler statistics for monitoring/load balancing."""
+        raise NotImplementedError
+
+    @abstractmethod
     def make_stats(self) -> Optional["SchedulerStats"]:
         """Make a SchedulerStats object for logging.
 

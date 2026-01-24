@@ -144,6 +144,9 @@ class EngineCoreClient(ABC):
     def get_scheduler_trace(self) -> dict:
         raise NotImplementedError
 
+    def get_aggregated_stats(self) -> dict:
+        raise NotImplementedError
+
     def sleep(self, level: int = 1) -> None:
         raise NotImplementedError
 
@@ -209,6 +212,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def get_scheduler_trace_async(self) -> dict:
+        raise NotImplementedError
+
+    async def get_aggregated_stats_async(self) -> dict:
         raise NotImplementedError
 
     async def reset_mm_cache_async(self) -> None:
@@ -298,6 +304,9 @@ class InprocClient(EngineCoreClient):
 
     def get_scheduler_trace(self) -> dict:
         return self.engine_core.get_scheduler_trace()
+
+    def get_aggregated_stats(self) -> dict:
+        return self.engine_core.get_aggregated_stats()
 
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
@@ -766,6 +775,9 @@ class SyncMPClient(MPClient):
     def get_scheduler_trace(self) -> dict:
         return self.call_utility("get_scheduler_trace")
 
+    def get_aggregated_stats(self) -> dict:
+        return self.call_utility("get_aggregated_stats")
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.call_utility("add_lora", lora_request)
 
@@ -966,6 +978,9 @@ class AsyncMPClient(MPClient):
 
     async def get_scheduler_trace_async(self) -> dict:
         return await self.call_utility_async("get_scheduler_trace")
+
+    async def get_aggregated_stats_async(self) -> dict:
+        return await self.call_utility_async("get_aggregated_stats")
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
