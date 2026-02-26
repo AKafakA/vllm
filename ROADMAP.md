@@ -192,6 +192,46 @@ vllm-emulator/
 - **Deliverables:**
   1. `vllm_emulator/oracle/network_cost_oracle.py`
   2. `vllm_emulator/hooks/network_hook.py`
+- **Commit
+- **Status ID:** TBD:** NOT_STARTED.5: Advanced 2
+
+---
+
+### Phase Features (Before Workshop Paper)
+
+**Rationale:** Complete these before writing workshop paper to allow testing rounds before testbed expires (March 24, 2026).
+
+#### P2.5.1: Cuda Graph Capture
+- **Task:** Implement CUDA graph capture for accurate timing
+- **Acceptance:**
+  - Can capture CUDA graphs during profiling
+  - Replays captured graphs in emulator
+  - Improves timing accuracy
+- **Deliverables:**
+  1. CUDA graph capture utility
+  2. Replay mechanism
+- **Commit ID:** TBD
+- **Status:** NOT_STARTED
+
+#### P2.5.2: Prefill/Decode Separation Support
+- **Task:** Add support for PD separation (vLLM v1 engine)
+- **Acceptance:**
+  - Can profile prefill and decode separately
+  - Can emulate PD-separated scheduling
+  - Accurate latency for both phases
+- **Deliverables:**
+  1. PD separation oracle hooks
+  2. Scheduling emulation
+- **Commit ID:** TBD
+- **Status:** NOT_STARTED
+
+#### P2.5.3: KV Cache Offload Integration
+- **Task:** Integrate KV offload cost modeling
+- **Acceptance:**
+  - Accurate offload/recall timing
+  - Works with profile packs
+- **Deliverables:**
+  1. Offload oracle integration
 - **Commit ID:** TBD
 - **Status:** NOT_STARTED
 
@@ -237,6 +277,18 @@ vllm-emulator/
 - **Commit ID:** TBD
 - **Status:** NOT_STARTED
 
+#### P2.4: Workshop Paper
+- **Task:** Write workshop paper for ArXiv preprint
+- **Acceptance:**
+  - Paper follows ACM SIGCONF template
+  - Includes evaluation methodology
+  - Submitted to ArXiv
+- **Deliverables:**
+  1. Paper LaTeX
+  2. ArXiv submission
+- **Commit ID:** TBD
+- **Status:** NOT_STARTED
+
 ---
 
 ## 6. Design Change Log
@@ -258,9 +310,19 @@ vllm-emulator/
 | P1 | P1.1 GPU Oracle | Latency accuracy <15% |
 | P1 | P1.2 Offload Oracle | Transfer accuracy |
 | P1 | P1.3 Network Oracle | Network accuracy |
+| P2 | P2.5.1 Cuda Graph | Capture/replay works |
+| P2 | P2.5.2 PD Separation | Prefill/decode separate |
+| P2 | P2.5.3 KV Offload | Offload modeling works |
 | P2 | P2.1 CLI | Flags work |
 | P2 | P2.2 Testing | A/B comparison works |
 | P2 | P2.3 Docs | Complete |
+| P2 | P2.4 Workshop Paper | ArXiv submitted |
+
+## 8. Timeline
+
+- **Testbed Expiry:** March 24, 2026
+- **Goal:** Complete P2.5.1-2.5.3 before testbed expiry for potential testing round
+- **Workshop Paper:** After advanced features, before July 2026
 
 ---
 
