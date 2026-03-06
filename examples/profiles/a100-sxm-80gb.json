@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "gpu_model": "A100-SXM-80GB",
+  "prefill": [
+    {"seq_len": 128, "batch_size": 1, "latency_us": 15000},
+    {"seq_len": 256, "batch_size": 1, "latency_us": 28000},
+    {"seq_len": 512, "batch_size": 1, "latency_us": 55000},
+    {"seq_len": 1024, "batch_size": 1, "latency_us": 108000}
+  ],
+  "decode": [
+    {"active_seqs": 1, "latency_us_per_token": 500},
+    {"active_seqs": 4, "latency_us_per_token": 1800},
+    {"active_seqs": 8, "latency_us_per_token": 3500},
+    {"active_seqs": 16, "latency_us_per_token": 6800}
+  ]
+}
