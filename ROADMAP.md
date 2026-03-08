@@ -109,19 +109,19 @@ vllm-emulator/
 - **Commit ID:** TBD
 - **Status:** NOT_STARTED
 
-#### P0.4: Profile Generation Scripts - REQUIRED
+#### P0.4: Profile Generation Scripts - REQUIRED ✅ DONE
 - **Task:** Create profiling scripts to generate profile packs from real GPU runs
 - **Acceptance:**
   - Script can run on real GPU and collect latency profiles
   - Output format matches profile pack schema
   - Supports different GPU models (A100, H100, etc.)
 - **Deliverables:**
-  1. `vllm_emulator/profiler/gpu_profiler.py` - GPU compute profiling
-  2. `vllm_emulator/profiler/offload_profiler.py` - Offload profiling (optional)
-  3. `vllm_emulator/profiler/network_profiler.py` - Network profiling (optional)
+  1. `vllm_emulator/profiler/gpu_profiler.py` - GPU compute profiling ✅
+  2. `vllm_emulator/profiler/offload_profiler.py` - Offload profiling (stub) ✅
+  3. `vllm_emulator/profiler/network_profiler.py` - Network profiling (stub) ✅
 - **Reference:** Vidur profiler design
-- **Commit ID:** TBD
-- **Status:** NOT_STARTED
+- **Commit ID:** 241130a
+- **Status:** ✅ DONE
 
 ---
 
