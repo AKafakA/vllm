@@ -96,7 +96,7 @@ vllm-emulator/
 - **Commit ID:** e567315
 - **Status:** ✅ DONE
 
-#### P0.3: Profile Pack System
+#### P0.3: Profile Pack System ✅ DONE
 - **Task:** Define and implement profile pack loading
 - **Acceptance:**
   - Can load JSON profile pack
@@ -106,10 +106,10 @@ vllm-emulator/
   1. `vllm_emulator/profile/loader.py`
   2. `vllm_emulator/profile/validator.py`
   3. Example profiles in `examples/profiles/`
-- **Commit ID:** TBD
-- **Status:** NOT_STARTED
+- **Commit ID:** ef01678
+- **Status:** ✅ DONE
 
-#### P0.4: Profile Generation Scripts - REQUIRED
+#### P0.4: Profile Generation Scripts - REQUIRED ✅ DONE
 - **Task:** Create profiling scripts to generate profile packs from real GPU runs
 - **Acceptance:**
   - Script can run on real GPU and collect latency profiles
@@ -120,8 +120,8 @@ vllm-emulator/
   2. `vllm_emulator/profiler/offload_profiler.py` - Offload profiling (optional)
   3. `vllm_emulator/profiler/network_profiler.py` - Network profiling (optional)
 - **Reference:** Vidur profiler design
-- **Commit ID:** TBD
-- **Status:** NOT_STARTED
+- **Commit ID:** HEAD (feature/emulator-backend)
+- **Status:** ✅ DONE
 
 ---
 
