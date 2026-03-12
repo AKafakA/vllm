@@ -430,6 +430,32 @@ class LLM:
         self.renderer.clear_mm_cache()
         self.llm_engine.reset_mm_cache()
 
+    def _check_emulator_blocking_mode(self) -> None:
+        """Check emulator blocking mode and warn for offline batch inference.
+        
+        When using LLM.generate() (offline batch mode) with emulator enabled,
+        recommend using offline blocking mode for better performance.
+        """
+        import os
+        emulator_enabled = os.environ.get("VLLM_EMULATOR_ENABLE_ORACLE", "").lower()
+        if emulator_enabled not in ("1", "true", "yes"):
+            return
+        
+        blocking_mode = os.environ.get("VLLM_EMULATOR_BLOCKING_MODE", "online").lower()
+        if blocking_mode == "offline":
+            return
+        
+        # Emulator enabled + online mode + LLM.generate path = warn
+        import warnings
+        warnings.warn(
+            "Emulator is enabled with blocking mode 'online' but you're using "
+            "LLM.generate() (offline batch inference). Consider using "
+            "VLLM_EMULATOR_BLOCKING_MODE=offline for better performance. "
+            "Online mode is recommended for async engine / online serving only.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:
             self.default_sampling_params = self.model_config.get_diff_sampling_param()
@@ -478,6 +504,9 @@ class LLM:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
         """
+        # Emulator mode check: warn if using LLM.generate (offline batch) without offline blocking mode
+        self._check_emulator_blocking_mode()
+
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
             raise ValueError(

@@ -368,6 +368,16 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
+    # Emulator mode validation
+    emulator_mode = getattr(args, "emulator_mode", None)
+    profile_pack = getattr(args, "profile_pack", None)
+    if profile_pack and not emulator_mode:
+        logger.warning(
+            "--profile-pack is set without --emulator-mode; "
+            "the profile pack will be used if VLLM_EMULATOR_ENABLE_ORACLE "
+            "is also set via environment variable."
+        )
+
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
     parser_for_docs = FlexibleArgumentParser(

@@ -4,6 +4,7 @@
 
 import gc
 import os
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
@@ -62,6 +63,22 @@ from vllm.v1.worker.workspace import init_workspace_manager
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
+
+# Optional emulator hook - lazy import to avoid hard dependency
+_EMULATOR_HOOK_MODULE = None
+
+
+def _get_emulator_hook():
+    """Lazy import emulator hook to avoid hard dependency."""
+    global _EMULATOR_HOOK_MODULE
+    if _EMULATOR_HOOK_MODULE is None:
+        try:
+            from vllm_emulator.hooks import GpuWorkerHook
+            _EMULATOR_HOOK_MODULE = GpuWorkerHook
+        except ImportError:
+            _EMULATOR_HOOK_MODULE = False
+    return _EMULATOR_HOOK_MODULE if _EMULATOR_HOOK_MODULE else None
+
 
 logger = init_logger(__name__)
 
@@ -153,6 +170,16 @@ class Worker(WorkerBase):
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
+
+        # Optional emulator hook for cost estimation (lazy loaded)
+        self._emulator_hook = None
+        hook_cls = _get_emulator_hook()
+        if hook_cls is not None:
+            try:
+                self._emulator_hook = hook_cls(self)
+            except Exception:
+                # Hook initialization failed - continue without it
+                pass
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -771,6 +798,39 @@ class Worker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # Emulator mode: Use oracle to generate fake output instead of real inference
+        if self._emulator_hook is not None and self._emulator_hook.is_enabled:
+            # Check if we should use oracle for this iteration
+            if self._emulator_hook.should_use_oracle(scheduler_output):
+                # Get cost estimate for logging
+                cost_estimate = self._emulator_hook.estimate_execution_cost(scheduler_output)
+                logger.debug(
+                    "Emulator oracle: prefill=%.2fms, decode=%.2fms, total=%.2fms",
+                    cost_estimate["prefill_latency_us"] / 1000,
+                    cost_estimate["decode_latency_us"] / 1000,
+                    cost_estimate["total_estimated_us"] / 1000,
+                )
+                
+                # Create fake output and return it (skip real GPU execution)
+                fake_output = self._emulator_hook.create_fake_output(scheduler_output)
+                if fake_output is not None:
+                    estimated_latency_s = cost_estimate["total_estimated_us"] / 1_000_000
+                    
+                    # Block for timing simulation based on blocking mode
+                    if self._emulator_hook.should_block:
+                        # Online mode: block for estimated latency
+                        if estimated_latency_s >= 0.001:
+                            time.sleep(estimated_latency_s)
+                        # else: ignore sub-ms delays
+                    else:
+                        # Offline mode (REVATI-like): no blocking
+                        # Just record timing for metrics/logging
+                        pass
+                    
+                    return fake_output
+                # Fall through if no requests to schedule
+
         all_gather_tensors = {}
         compilation_config = self.vllm_config.compilation_config
         parallel_config = self.vllm_config.parallel_config

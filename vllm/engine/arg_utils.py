@@ -617,6 +617,11 @@ class EngineArgs:
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton"] | None = None
 
+    # Emulator backend flags (env var fallback: VLLM_EMULATOR_BLOCKING_MODE,
+    # VLLM_EMULATOR_PROFILE_PACK)
+    emulator_mode: str | None = None
+    profile_pack: str | None = None
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -657,6 +662,55 @@ class EngineArgs:
                         tokenizer_id,
                         self.tokenizer,
                     )
+
+        # --- Emulator backend: resolve CLI flags / env vars and propagate ---
+        self._resolve_emulator_args()
+
+    def _resolve_emulator_args(self) -> None:
+        """Resolve emulator CLI flags with env-var fallback and propagate.
+
+        Priority: explicit CLI flag > environment variable > disabled.
+        When --emulator-mode is set (or VLLM_EMULATOR_BLOCKING_MODE env var),
+        the corresponding environment variables are written so that the
+        GpuWorkerHook (which reads env vars) picks them up in every worker
+        process.
+        """
+        import os
+
+        # 1. Resolve emulator_mode: CLI flag > env var
+        if self.emulator_mode is None:
+            env_mode = os.environ.get("VLLM_EMULATOR_BLOCKING_MODE")
+            if env_mode and env_mode.lower() in ("online", "offline"):
+                self.emulator_mode = env_mode.lower()
+            elif os.environ.get("VLLM_EMULATOR_ENABLE_ORACLE", "").lower() in (
+                "1", "true", "yes",
+            ):
+                # Legacy: ENABLE_ORACLE without BLOCKING_MODE → default online
+                self.emulator_mode = "online"
+
+        # 2. Resolve profile_pack: CLI flag > env var
+        if self.profile_pack is None:
+            env_pack = os.environ.get("VLLM_EMULATOR_PROFILE_PACK")
+            if env_pack:
+                self.profile_pack = env_pack
+
+        # 3. Validation
+        if self.emulator_mode is not None and self.profile_pack is None:
+            raise ValueError(
+                "--emulator-mode requires --profile-pack (or "
+                "VLLM_EMULATOR_PROFILE_PACK env var) to be set."
+            )
+
+        # 4. Propagate to env vars so that GpuWorkerHook picks them up
+        if self.emulator_mode is not None:
+            os.environ["VLLM_EMULATOR_ENABLE_ORACLE"] = "1"
+            os.environ["VLLM_EMULATOR_BLOCKING_MODE"] = self.emulator_mode
+            os.environ["VLLM_EMULATOR_PROFILE_PACK"] = self.profile_pack  # type: ignore[assignment]
+            logger.info(
+                "Emulator mode enabled: mode=%s, profile_pack=%s",
+                self.emulator_mode,
+                self.profile_pack,
+            )
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -1330,6 +1384,34 @@ class EngineArgs:
             choices=["flashinfer", "triton"],
             default=None,
             help="Select GDN prefill backend.",
+        )
+
+        # Emulator backend arguments
+        emulator_group = parser.add_argument_group(
+            title="EmulatorConfig",
+            description="vLLM emulator backend configuration for GPU-free "
+            "scheduling research. Enables cost-oracle-driven "
+            "simulation instead of real GPU inference.",
+        )
+        emulator_group.add_argument(
+            "--emulator-mode",
+            type=str,
+            default=None,
+            choices=["online", "offline"],
+            help="Enable emulator mode. 'online' blocks for estimated "
+            "latency (real-time simulation for serving). 'offline' "
+            "uses virtual time with no blocking (batch analysis). "
+            "Can also be set via VLLM_EMULATOR_BLOCKING_MODE env var. "
+            "Setting this flag implicitly enables the emulator oracle.",
+        )
+        emulator_group.add_argument(
+            "--profile-pack",
+            type=str,
+            default=None,
+            help="Path to a JSON profile pack for the emulator cost "
+            "oracle. Contains GPU latency samples for prefill and "
+            "decode phases. Can also be set via "
+            "VLLM_EMULATOR_PROFILE_PACK env var.",
         )
         return parser
 
