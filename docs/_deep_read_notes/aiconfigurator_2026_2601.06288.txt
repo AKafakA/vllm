@@ -1,0 +1,1168 @@
+AIConfigurator: Lightning-Fast Configuration Optimization for Multi-Framework
+LLM Serving
+Tianhao Xu
+Yi Shen
+
+arXiv:2601.06288v1 [cs.LG] 9 Jan 2026
+
+Yuanzhe Li
+
+Yiming Liu
+Qin Zhou
+
+Xianglong Lu
+
+Xumeng Chen
+
+Xue Huang
+
+Wenpeng Wu
+
+Yijia Zhao
+
+Ilya Sherstyuk
+
+Xuting Zhou
+Haorui Li
+
+Anish Shanbhag
+
+Aichen Feng
+
+Rishi Thakkar
+
+Harry Kim
+
+Yiyi Chen
+Ben Hamm
+
+Chuan Chen
+
+Junjie Lai
+
+NVIDIA
+Abstract
+Optimizing Large Language Model (LLM) inference in production systems is increasingly difficult due to dynamic workloads, stringent latency/throughput targets, and a rapidly expanding configuration space. This complexity spans not only
+distributed parallelism strategies (tensor/pipeline/expert) but
+also intricate framework-specific runtime parameters such
+as those concerning the enablement of CUDA graphs, available KV-cache memory fractions, and maximum token capacity, which drastically impact performance. The diversity
+of modern inference frameworks (e.g., TRT-LLM, vLLM,
+SGLang), each employing distinct kernels and execution policies, makes manual tuning both framework-specific and computationally prohibitive. We present AIConfigurator, a unified
+performance-modeling system that enables rapid, frameworkagnostic inference configuration search without requiring
+GPU-based profiling. AIConfigurator combines (1) a methodology that decomposes inference into analytically modelable
+primitives—GEMM, attention, communication, and memory
+operations while capturing framework-specific scheduling
+dynamics; (2) a calibrated kernel-level performance database
+for these primitives across a wide range of hardware platforms and popular open-weights models (GPT-OSS, Qwen,
+DeepSeek, LLama, Mistral); and (3) an abstraction layer that
+automatically resolves optimal launch parameters for the target backend, seamlessly integrating into production-grade
+orchestration systems. Evaluation on production LLM serving workloads demonstrates that AIConfigurator identifies
+superior serving configurations that improve performance by
+up to 40% for dense models (e.g., Qwen3-32B) and 50% for
+MoE architectures (e.g., DeepSeek-V3), while completing
+searches within 30 seconds on average, enabling the rapid exploration of vast design spaces—from cluster topology down
+to engine specific flags.
+
+1
+
+Introduction
+
+The rapid evolution of Large Language Models (LLMs) has
+placed unprecedented demands on computational infrastruc-
+
+ture. As state-of-the-art parameter counts scale from hundreds
+of millions to hundreds of billions, the efficiency of inference
+deployment has become a critical determinant of economic
+viability. However, optimizing these deployments is fraught
+with complexity. Service providers must navigate a combinatorial explosion of configuration parameters—ranging from
+tensor, pipeline, and expert parallelism strategies to granular
+settings for batch sizes and quantization. Traditional performance tuning, often reliant on manual benchmarking and
+exhaustive testing, is increasingly untenable. With the rising
+cost of modern GPUs, manual exhaustive testing becomes
+prohibitively expensive. These methods require significant
+engineering effort to converge on solutions that frequently
+remain sub-optimal, leaving substantial performance potential
+untapped.
+The emergence of disaggregated serving [19, 28]—separating prefill and decode phases onto distinct compute resources—has further complicated this landscape. While disaggregation promises to optimize "Goodput" (throughput under strict latency constraints), it is not a universally superior solution; gains depend heavily on the interplay between
+model architecture, hardware topology, and network bandwidth. Practitioners face a difficult trade-off: does the scheduling flexibility of disaggregation outweigh the communication
+overhead for a specific workload? Furthermore, configuring
+such systems to satisfy rigorous Service Level Agreements
+(SLAs)—specifically Time-To-First-Token (TTFT) and TimePer-Output-Token (TPOT)—creates a design space that can
+easily exceed 10,000 permutations.
+Beyond architectural decisions, the complexity is further
+compounded by the intricacies of the inference engines themselves. Modern frameworks such as TensorRT-LLM [2],
+vLLM [13], and SGLang [27] expose a myriad of tunable
+runtime flags, such as those pertaining to the enablement
+of CUDA graphs, available KV-cache memory fractions, and
+maximum token capacity, that drastically impact performance.
+A configuration that maximizes throughput for a specific
+workload often proves brittle or inefficient as the serving
+environment evolves. Consequently, developers frequently
+
+abandon the tuning process, defaulting to conservative settings that leave significant performance potential untapped.
+While black-box optimization methods such as Vizier [11]
+or automated serving frameworks like Morphling [23] can
+help speed up finding the optimal configs, they still require a
+substantial amount of GPU hours to converge on a solution
+for each specific scenario.
+To address these challenges, we present AIConfigurator, a
+specialized toolkit designed to optimize LLM inference across
+diverse inference frameworks. Unlike generic simulators reliant on theoretical abstractions, AIConfigurator employs a
+data-driven approach rooted in operation-level performance
+modeling. By decomposing inference into fundamental kernels—such as GEMM computations, attention mechanisms,
+and communication primitives (e.g., all-reduce, P2P)—and
+utilizing interpolation of real system data, the toolkit achieves
+high-fidelity estimates tailored to NVIDIA platforms (Ampere, Ada, Hopper, and Blackwell). Our contributions include:
+
+this overhead can negate benefits for short contexts. The optimal architecture depends on workload mix (prefill-heavy vs.
+decode-heavy), interconnect bandwidth, and cluster scale—
+aggregated serving with chunked prefills often outperforms
+disaggregation for smaller deployments. This complexity motivates AIConfigurator, which models both architectures to
+identify optimal configurations.
+
+3
+
+Traditional heuristics like "TP within node, PP across nodes"
+fail to capture non-linear interactions between compute and
+network bandwidth. Studies [17, 26] show automated search
+can outperform manual tuning by >2× in cost-efficiency.
+Framework Heterogeneity. Production inference spans
+diverse frameworks with distinct performance characteristics: vLLM [13] (PagedAttention, Python-based scheduling),
+SGLang [27] (RadixAttention, Triton kernels), TensorRTLLM [2] (static graph optimization, custom kernels), and
+NVIDIA Dynamo [1] (backend-agnostic orchestration). Each
+exhibits unique performance cliffs governed by a myriad of
+framework-specific runtime flags that generic models cannot
+effectively capture.
+Configuration Tuning Gap. Current approaches—nightly
+benchmarks [20] and curated recipes [3]—are static lookup
+tables insufficient for dynamic production environments.
+AIConfigurator provides algorithmic search that identifies
+SLA-compliant configurations across the multi-dimensional
+space of parallelism, batch sizes, and serving architectures.
+
+• Designing a system capable of navigating the complex
+inference configuration space to identify optimal settings
+in seconds with high precision.
+• Demonstrating the effectiveness of the system through
+seamless integration with mainstream inference frameworks—including vLLM, SGLang, TRTLLM, and
+NVIDIA’s Dynamo—delivering actionable, productionready recommendations.
+• Conducting a comprehensive evaluation by benchmarking against ground-truth silicon data.
+
+2
+
+Motivation
+
+4
+
+Background
+
+Design and Implementation
+
+LLM inference optimization involves three interdependent
+pillars. Advanced scheduling—including continuous batching [24], PagedAttention [13], chunked prefills [5], and disaggregated serving [28]—maximizes hardware utilization
+by addressing the distinct computational profiles of prefill
+(compute-bound) and decode (memory-bound) phases. Model
+parallelism distributes large models across GPUs via Tensor
+Parallelism (TP) [21], Pipeline Parallelism (PP) [12], and
+Expert Parallelism (EP) [16] for MoE architectures. Configuration tuning navigates the resulting combinatorial space;
+while simulators like Vidur [4] and APEX [15] enable rapid
+exploration, their reliance on theoretical roofline models often
+diverges from production performance.
+
+AIConfigurator employs a principled, data-driven approach to
+navigate the vast LLM inference configuration space. Rather
+than relying on theoretical roofline models or exhaustive
+benchmarking, the system decomposes inference into fundamental operations, collects real hardware measurements
+for these primitives, and composes end-to-end performance
+estimates through a well-defined performance model.
+The toolkit supports multiple inference frameworks
+through a unified backend abstraction. Each backend
+(TensorRT-LLM, SGLang, vLLM) implements frameworkspecific logic for memory estimation, aggregated serving simulation, and constraint-based optimization, while sharing the
+common operation modeling infrastructure.
+This section illustrates the architecture, core mechanisms,
+and implementation details of AIConfigurator.
+
+2.2
+
+4.1
+
+2.1
+
+LLM Inference Optimization
+
+Aggregated vs. Disaggregated Serving
+
+Disaggregated serving [19, 28] separates prefill and decode
+onto distinct GPU pools, enabling independent scaling but introducing KV-cache transfer overhead. Splitwise [18] shows
+
+Workflow of AIConfigurator
+
+Figure 1 shows Pareto curves comparing two serving modes—
+aggregated and disaggregated—for a Qwen-235B model
+on 64 H200 GPUs. This represents one of the key insights
+2
+
+Figure 1: AIConfigurator projected Throughput vs Speed Pareto frontiers for Qwen3-235B running on 64 H200 GPUs. All serving configurations that can achieve a TTFT (Time to First Token) ≤ 1000ms are plotted on the chart.
+
+Figure 2: Key components of AIConfigurator and the general workflow of finding the optimal configuration.
+from AIConfigurator’s simulation results. The horizontal axis
+shows generation speed (tokens generated per second per
+user request), while the vertical axis shows system throughput (tokens generated per second per GPU). Each point represents a serving configuration that satisfies the TTFT constraint.
+
+tably, disaggregated serving is preferable here: its best configuration achieves 823 tokens/s/GPU, approximately 53%
+higher than the best aggregated configuration (564 tokens/s/GPU) under the same speed constraint.
+In summary, AIConfigurator identifies the optimal serving
+configuration that maximizes system throughput while meeting specific SLA targets (e.g., TTFT < 1s, generation speed >
+20 tokens/s/user).
+Figure 2 describes the general workflow of utilizing AIConfigurator, which typically involves five steps, each revolving
+around one of the key components of AIConfigurator:
+
+An optimal configuration is one that achieves the highest
+system throughput while meeting a target generation speed.
+For example, with an input sequence length of 4096 and output length of 1024, if we require at least 20 tokens/s per user,
+the starred configurations are optimal as they maximize perGPU throughput while exceeding this speed threshold. No-
+
+• PerfDatabase: First, an offline data collection process is
+3
+
+Figure 3: Three serving modes modeled by AIConfigurator. (A) Static: GPU workers process fixed inference requests end-to-end.
+(B) Aggregated: prefill and decode of different requests are mixed (continuous batching). (C) Disaggregated: separate GPU
+pools for prefill and decode phases.
+performed to construct a database with comprehensive
+performance data for a wide range of commonly used
+LLM operators across different designated hardware platforms. Each of the supported inference frameworks is
+handled independently in this process.
+
+can also directly leverage the launch file to set up an
+optimally configured inference server.
+
+4.2
+
+Performance Modeling
+
+Instead of directly estimating the system throughput and generation speed, AIConfigurator derives these two metrics from
+the perspective of an average request arriving at the server
+operating at a steady state of concurrency.
+
+• TaskRunner: At the second step, the TaskRunner will
+construct a search space comprised of all the valid candidate serving configurations based on the user provided
+workload descriptor, which will include information like
+user desired environment setup, SLAs and request specific characteristics.
+
+Generation Speed = 1000/T POT
+1000
+T T FT + (OSL − 1) × T POT
+∗ Batch Size
+
+(1)
+
+System Throughput =
+
+• InferenceSession: InferenceSession will then iterate
+over all the candidate serving configurations, and for
+each candidate, it will estimate key performance metrics
+by combining iteration-level modeling with operatorlevel performance data queried directly from the PerfDatabase.
+
+(2)
+
+∗ OSL
+/Total Number of GPU
+Both TTFT(Time to First Token) and TPOT(Time Per
+Output Token) are measured in milliseconds. OSL(output
+sequence length) is treated as a fixed value provided by the
+user-supplied workload descriptor. As for Batch size, AIConfigurator will sweep over a range of pre-defined values when
+estimating the performance for a given serving configuration.
+In order to estimate TPOT and TTFT efficiently, we first
+consider the full life cycle of a typical request being processed
+by an inference server. In the context of LLM serving, any
+given request will go through two distinct processing phases:
+The prefill/context phase processes the entire user input
+prompt, computing and storing the associated KV cache before producing the first output token. This phase is normally
+compute intensive, and fused multi-head attention style kernels like FlashAttention [8] are usually utilized in this phase
+to accelerate the attention computation. Additionally, context
+
+• Pareto Analyzer: Afterwards, the Pareto analyzer will
+filter and rank all the valid serving configurations based
+on the performance projections generated in the previous stage, and output the top-ranked configurations with
+comprehensive performance projections.
+• Generator: Finally, AIConfigurator’s generator module can directly convert the serving recommendations identified by the Pareto analyzer into version compatible launch file for any one of the inference engines among TensorRT-LLM, vLLM and
+SGLang, automatically setting the optimal serving
+flags such as --enable_cuda_graph, --kv_cache_free_gpu_mem_fraction and --enable_chunked_context. Serving frameworks like NVIDIA Dynamo
+4
+
+4.2.1
+
+chunking [5] can also be employed to split prefill of long
+input prompts into multiple iteration steps.
+
+Static Mode
+
+In the static serving mode, as depicted in Figure 3(A), the
+workload is processed in a strictly sequential manner with
+a fixed batch size. In this regime, TTFT is equivalent to the
+latency of the prefill phase. TPOT is approximated by averaging the latency of the subsequent decoding steps required to
+generate the entirety of the output sequence.
+Algorithm 1 outlines the procedure for calculating these
+metrics. It employs a stride-based optimization (Step 13) to
+reduce the computational overhead of estimating generation
+latency, interpolating costs over intervals rather than querying
+the database for every token step.
+
+The decode/generation phase generates the remaining
+output tokens one at a time in a step-by-step auto-regressive
+fashion. Newly generated tokens are utilized as the input for
+the subsequent step, and cached key-value pairs are used to
+avoid recomputing key-value pairs for the past tokens. This
+phase is normally memory intensive and specialized kernels
+like XQA [2] are utilized in this phase.
+While prefill and decode constitute the fundamental computational stages of LLM inference, real-world performance
+depends heavily on how the serving engine orchestrates them.
+A naive abstraction is insufficient to capture the nuances of
+different scheduling strategies. Therefore, AIConfigurator explicitly models three distinct serving modes—Static, Aggregated, and Disaggregated—each of which handles resource
+contention and phase interleaving differently. We first define
+the baseline behavior under the static mode.
+
+4.2.2
+
+Aggregated Mode
+
+Also known as inflight batching or continuous batching [24],
+this serving mode is distinguished by its ability to mix prefill and decode steps from different requests within a single
+inference iteration, as shown in Figure 3(B). This flexibility
+significantly improves GPU resource utilization compared to
+static serving, leading to higher system throughput.
+Our performance model, detailed in Algorithm 2, approximates this behavior by dividing execution into two distinct
+stages:
+Mixed Phase: This phase represents the steady-state operation of a continuous batching system where prefill and
+decode requests run concurrently. The scheduler prioritizes
+utilizing the available context capacity (Cctx ) to process prefill
+requests. By default a prefill request will contain a ISL number of tokens, and context chunking can be optionally enabled
+to split full ISL number of context tokens into multiple prefill
+requests. The remaining batch slots are allocated to decoding
+gen
+tasks (Nmix ). Crucially, when the prefill workload is heavy
+(context processing time exceeds generation time), our model
+(Algorithm 2, lines 6-10) throttles the number of concurrent
+decode streams using a rate-matching heuristic. This prevents
+the "starvation" scenario where decode requests finish faster
+than new requests can be prefilled. The step latency (Lmix )
+in this phase is dominated by the compute-intensive prefill
+attention.
+Generation-Only Phase: This phase models the tail end
+of a workload or periods of low arrival rate where the prefill queue has been drained. The system transitions to a pure
+decoding regime, dedicating all batch slots (B) to autoregressive generation. The step latency (Lgen ) here is significantly
+lower, typically bounded by memory bandwidth rather than
+compute.
+We estimate TTFT based on the latency of the Mixed Phase,
+incorporating an empirical correction factor (Fcorr ) modeled
+as a piecewise linear function. This factor accounts for base
+scheduling overhead (constant term), proportional queuing
+delay as the context backlog grows, and a saturation limit to
+reflect system-level admission controls. For TPOT, we employ
+a weighted average of latencies from both phases. Notably,
+
+Algorithm 1 Static Mode Inference Performance Estimation
+Require: ISL (Input Length), OSL (Output Length)
+Require: B (Batch Size), P (Prefix Length)
+Require: Stride Sstride (Default: 32)
+Require: Function G ET S TEP L ATENCY(batch_size,
+seq_len, phase)
+1: Phase 1: Context Latency (TTFT)
+2: ISLe f f ← ISL − P
+3:
+▷ Calculate latency for processing the input prompt
+4: TTFT ← G ET S TEP L ATENCY(B, ISLe f f , ’prefill’)
+5: Phase 2: Generation Latency (Total Generation Time)
+6: Tgen ← 0
+7: if OSL > 1 then
+8:
+k←0
+9:
+while k < OSL − 1 do
+10:
+Sseq ← ISL + k + 1
+▷ Current total sequence
+length
+11:
+▷ Query latency for a single decode step at
+current length
+12:
+Tstep ← G ET S TEP L ATENCY(B, Sseq , ’decode’)
+13:
+R ← min(Sstride , OSL − 1 − k) ▷ Interpolate for
+next R tokens
+14:
+Tgen ← Tgen + (Tstep × R)
+15:
+k ← k + Sstride
+16:
+end while
+17: end if
+18: Phase 3: TPOT Calculation
+19: if OSL > 1 then
+20:
+TPOT ← Tgen /(OSL − 1)
+21: else
+22:
+TPOT ← 0
+23: end if
+24: return TTFT, TPOT
+
+5
+
+4.2.3
+
+we apply a small offset (3 steps) to the mixed phase duration
+when calculating weights (Algorithm 2, Step 5). This heuristic
+filters out scheduling jitter often observed in the initial steps
+of a batch, providing a more robust estimate of steady-state
+decoding performance. This approach models the non-linear
+interference between prefill and decode operations without
+requiring a full discrete-event simulation.
+Algorithm 2 Aggregated Mode (Continuous Batching) Performance Estimation
+Require: ISL, OSL
+Require: B (Batch Size), Cctx (Context Token Capacity)
+Require: Helper Functions:
+G ET M IX L AT(Nctx , Ngen , ISL, OSL)
+G ET G EN L AT(Ngen , ISL, OSL)
+1: Step 1: Phase Duration (in Steps)
+2: Ttotal_ctx ← ⌈(ISL × B)/Cctx ⌉ ▷ Total steps to process all
+context
+3: Step 2: Workload Distribution (Steps & Tokens)
+4: if B > 1 then
+5:
+if Ttotal_ctx ≥ OSL then
+6:
+▷ Context dominates; generation slots are limited
+7:
+Tmix ← Ttotal_ctx
+8:
+Tgen ← 0
+ctx ← C
+9:
+Nmix
+▷ Tokens per step
+ctx
+gen
+10:
+Nmix ← max(1, ⌊B/(Ttotal_ctx /OSL)⌋) ▷ Tokens
+per step
+11:
+else
+12:
+▷ Standard continuous batching
+13:
+Tmix ← Ttotal_ctx
+14:
+Tgen ← OSL − Tmix
+ctx ← C
+15:
+Nmix
+ctx
+gen
+16:
+Nmix ← B − ⌈Cctx /ISL⌉
+▷ Fill remaining slots
+gen
+17:
+assert Nmix ≥ 1
+18:
+end if
+19: else
+20:
+▷ Single Batch (B = 1)
+21:
+Tmix ← 1, Tgen ← OSL − 1
+gen
+ctx ← C ,
+22:
+Nmix
+Nmix ← 0
+ctx
+23: end if
+24: Step 3: Latency Calculation
+ctx , N gen , ISL, OSL)
+25: Lmix ← G ET M IX L AT (Nmix
+mix
+26: Lgen ← G ET G EN L AT(B, ISL, OSL)
+27: Step 4: TTFT
+ Estimation 
+T
+−3
+,4
+28: Fcorr ← min 2 + total_ctx
+20
+29: TTFT ← Lmix × ⌈ISL/Cctx ⌉ × Fcorr
+30: Step 5: TPOT Estimation
+′ ← max(1, T
+31: Tmix
+mix − 3)
+32: if B > 1 then
+L ×T ′ +Lgen ×Tgen
+33:
+TPOT ← mix Tmix
+′
+mix +Tgen
+34: else
+35:
+TPOT ← Lgen
+36: end if
+37: return TTFT, TPOT
+
+Disaggregated Mode
+
+Algorithm 3 Disaggregated Mode Performance Estimation
+Require: Candidate Configs: C pre (Prefill), Cdec (Decode)
+T T FT ), Max TPOT
+Require: Constraints: Max TTFT (Llimit
+T
+POT
+(Llimit )
+Require: Valid Total GPU Counts: Gvalid
+Require: Degradation Factors: α pre = 0.9, αdec = 0.92
+Require: TTFT Correction Factor: βT T FT = 1.8
+1: Step 1: Filter Candidates by Latency
+2:
+▷ Filter prefill configs (c pre ) and decode configs (cdec )
+T T FT }
+3: C′pre ← {c ∈ C pre | (L pre (c) × βT T FT ) ≤ Llimit
+′
+T
+POT
+4: Cdec ← {c ∈ Cdec | Ldec (c) ≤ Llimit }
+5: Step 2: Rate Matching (Find Optimal x, y)
+/ MaxT hruGPU ← 0
+6: BestCon f ig ← 0,
+′
+7: for cdec ∈ Cdec
+do
+8:
+for c pre ∈ C′pre do
+9:
+T hru pre ← SeqThroughput(c pre )
+10:
+T hrudec ← SeqThroughput(cdec )
+11:
+G pre ← GPUs(c pre ), Gdec ← GPUs(cdec )
+12:
+▷ Sweep worker counts x (prefill) and y (decode)
+13:
+for x ∈ [1, 32], y ∈ [1, 64] do
+14:
+Gtotal ← x · G pre + y · Gdec
+15:
+if Gtotal ∈
+/ Gvalid then continue
+16:
+end if
+17:
+R pre ← T hru pre · x · α pre
+18:
+Rdec ← T hrudec · y · αdec
+19:
+Rsys ← min(R pre , Rdec )
+▷ System Rate
+20:
+T hruGPU ← Rsys /Gtotal
+21:
+if T hruGPU > MaxT hruGPU then
+22:
+MaxT hruGPU ← T hruGPU
+23:
+BestCon f ig
+←
+{TTFT
+:
+L pre (c pre ), TPOT : Ldec (cdec ), . . . }
+24:
+end if
+25:
+end for
+26:
+end for
+27: end for
+28: return BestCon f ig
+
+In contrast to the static and aggregated modes, the Disaggregated Mode employs two distinct worker pools, each dedicated to a specific phase of LLM inference. As illustrated in
+Figure 3(C), incoming requests are first processed by dedicated prefill workers. Upon completion of the prefill phase,
+the computed key-value (KV) cache and intermediate states
+are transferred to decode workers, which generate subsequent
+tokens in an autoregressive manner.
+This decoupling offers significant architectural advantages:
+it eliminates prefill-decode interference and allows each pool
+to employ distinct model parallelism strategies specialized for
+its specific workload characteristics—optimizing computebound prefill and memory-bound decoding independently.
+6
+
+This separation has been shown to significantly improve overall system Goodput in prior studies [28].
+From a modeling perspective, AIConfigurator estimates
+the performance of a disaggregated system in two stages.
+Firstly, it independently sweeps the search space for prefill and
+decode configurations, treating each candidate as an isolated
+static instance and estimating its base latency using Algorithm
+1. It applies a correction factor (βT T FT ) to the prefill latency
+to account for the KV-cache transmission overhead inherent
+to disaggregated architectures.
+Secondly, it constructs valid composite servers—denoted
+as (x)P(y)D, where x and y represent the number of prefill
+and decode instances, respectively—through a rate-matching
+process. The algorithm identifies the optimal configuration by
+maximizing the effective per-GPU throughput (T hruGPU ),
+derived from the system rate Rsys :
+
+For instance, Figure 4 depicts a typical composition of operators while performing inference with an MoE model. The
+entire inference step essentially amounts to running 4 types
+of operators, namely embedding, GEMM, Attention(prefill or
+decode, depending on the phase) and MoE for a number of
+times. If expert parallelism is added to the mix, it will scale
+down the size of MoE operator while adding a pair of communication operators, and the exact pair shall depend on the
+inference engine backend used in production.
+Given the above observations, in AIConfigurator, we model
+the latency of an inference iteration step by aggregating the
+performance profiles of its constituent operators.
+
+Rsys = min(R pre , Rdec )
+where R represents the request rate (requests per second) of
+the respective worker pools, discounted by interference factors
+α. Once the optimal (x)P(y)D configuration is identified, the
+system’s TTFT is derived from the latency of the selected prefill workers pool (including transfer overhead), while TPOT
+is determined by the latency of the decode workers pool. Algorithm 3 details this optimization procedure.
+
+4.3
+
+Figure 4: A step of LLM inference can be decomposed into repeated
+execution of a few key operators. For instance, the inference step of a
+typical MoE model normally involves the above depicted operators,
+and how expert parallelism is implemented depends on the specific
+backend used.
+
+Iteration-level Modeling
+
+The effectiveness of all three of the algorithms introduced thus
+far depends on how accurately we can predict the latency of a
+given inference iteration step. For instance, in Algorithm 1, we
+rely on the latency data of prefill-only step and decode-step acquired via G ET S TEP L ATENCY(batch_size, seq_len, phase)
+to perform further estimation, while in Algorithm 2, besides
+decode-only step (G ET G EN L AT(Ngen , ISL, OSL)), we must
+also obtain accurate latency measurement for the mixed step
+(G ET M IX L AT(Nctx , Ngen , ISL, OSL)) in order to move forward. Therefore, aiming at establishing a fast and robust way
+of estimating the latency of a given iteration step, AIConfigurator approaches this issue by fully exploiting the decomposable nature of the modern LLM inference.
+4.3.1
+
+4.4
+
+Operator Database
+
+AIConfigurator constructs a performance database through
+offline profiling on actual GPU hardware, currently supporting
+TensorRT-LLM, vLLM, and SGLang.
+Database Coverage. The database includes: (1) GEMM
+operations parameterized by dimensions (M, N, K) and quantization (FP16, FP8, INT8, INT4); (2) Attention operations
+for both compute-bound context attention and memory-bound
+generation attention, supporting MHA [22], GQA [7], and
+MLA [9]; (3) Communication primitives including AllReduce, AllGather, AllToAll, and point-to-point transfers across
+message sizes and GPU counts; (4) MoE operations with
+dispatch/combine [25] patterns; and (5) Hardware specifications (memory bandwidth, compute throughput, interconnect
+bandwidth).
+Data Collection. We combine three strategies: exhaustive
+profiling sweeps parameters (batch size, sequence length, hidden dimension) with framework-native tools (∼30 GPU-hours
+per platform-framework pair); interpolation estimates latencies for intermediate configurations using profiled data points;
+and Speed-of-Light estimation provides analytical bounds via
+roofline models for unprofiled operators.
+
+Decompose Iteration Into Operators
+
+As modern LLMs are composed of repetitive transformer
+layers, any inference iteration step can then be modeled as
+running a fixed sequence of operators for a number of times,
+typically depending on the number of layers that the model
+possesses. Introducing modern parallel strategies does not
+alter this fundamental property except for inserting a few
+well-defined communication operators at fixed positions of
+the iteration’s execution path and scaling down the compute
+operators by sharding inputs across multiple compute devices.
+7
+
+4.4.1
+
+Power Law Correction for MoE
+
+Effect of (α) on Expert Load Balancing
+
+Normalized Load
+
+MoE operator performance depends heavily on token distribution. Prior works [10, 14] show that during inference, certain
+experts receive disproportionately more tokens—observations
+from Qwen3-235B indicate ∼70% of compute is handled by
+only 20% of active experts. To account for this imbalance,
+AIConfigurator implements a controlled token assignment
+procedure that emulates power-law distributions observed in
+production (Figure 5).
+Step 1: Sample Expert Load Weights. We generate a
+load profile by sampling E weights (one per expert) from
+a power-law distribution. Using inverse transform sampling
+with U ∼ Uniform(0, 1), each raw weight is computed as:
+ 1−α
+ 1
+1−α
+1−α 1−α
+xi = (xmax
+− xmin
+) ·U + xmin
+(3)
+
+E1
+
+E2 E3 E4 E5 E6 E7
+Experts (Ranked by Usage)
+
+E8
+
+Figure 5: Visualizing the effect of α. As α increases, the routing distribution shifts from perfectly balanced (uniform) to highly skewed,
+where the top-ranked experts (E1, E2) handle the majority of tokens.
+
+Setup. Experiments were conducted on a single NVIDIA
+H100 SXM node with 8 GPUs (80GB HBM3 each) connected
+via NVSwitch. We evaluated two models spanning different sizes and architectures: Qwen3-32B (32B parameters,
+dense, FP8) and Qwen3-235B (235B parameters, Mixture-ofExperts with 128 experts, FP8). All models were served using
+TensorRT-LLM v1.0.0. To assess cross-framework generalization, we also evaluated Qwen3-32B using vLLM v0.11.0.
+We swept a comprehensive configuration space to stresstest prediction accuracy across diverse operating points:
+• Input Sequence Length (ISL): 128–4096 tokens
+• Output Sequence Length (OSL): 128–512 tokens
+• Concurrency: 4–128 concurrent requests
+• Tensor Parallelism (TP): 1, 2, 4, 8 GPUs
+• Expert Parallelism (EP): 1, 2, 4, 8 GPUs (for Qwen3235B)
+This yields 960 unique configurations for TensorRT-LLM
+(360 for Qwen3-32B and 600 for Qwen3-235B) plus 128
+configurations for vLLM, covering workloads from latencysensitive chat to throughput-oriented batch processing.
+Metrics. We measure prediction fidelity using Mean Absolute Percentage Error (MAPE) for two key latency metrics:
+Time-Per-Output-Token (TPOT), which determines generation throughput, and Time-To-First-Token (TTFT), which
+governs user-perceived responsiveness.
+Results. Figure 6 presents the fidelity analysis across
+both frameworks. For TPOT prediction, AIConfigurator
+achieves an overall MAPE of 7.8% with strong correlation
+across all models: Qwen3-32B-TRTLLM (8.2%, r=0.96),
+Qwen3-235B-MoE-TRTLLM (6.8%, r=0.98), and Qwen332B-VLLM (11.9%, r=0.99). The MoE model achieves the
+lowest error, validating our power-law workload modeling
+for expert load imbalance. The consistent accuracy across
+
+where Ttotal is the batch size, K is the top-k routing factor
+(each token routes to K experts), and Ni is the number of
+tokens assigned to expert i. Residual tokens from rounding
+are distributed to balance the total. The parameter α controls
+the skew: α ≈ 0 yields nearly uniform load (theoretical ideal),
+while α ≈ 1.2 produces heavy-tailed distributions where a few
+“hot” experts receive most tokens—matching observations
+from models like Qwen3-235B.
+Step 2: Construct Synthetic Router Assignments. During normal inference, a learned gating network routes each token to its assigned expert(s). For controlled benchmarking, we
+bypass this router and directly inject a synthetic assignment
+matrix L ∈ RTtotal ×E , where exactly Ni tokens are deterministically routed to expert i. This eliminates stochastic variance
+from the router and ensures the hardware executes the precise
+workload shape from Step 1—allowing us to capture the "tail
+latency" caused by the most heavily loaded expert, which
+determines overall throughput in practice.
+
+Evaluation
+
+We evaluate AIConfigurator along three dimensions: (1) prediction fidelity against ground-truth hardware measurements,
+(2) search efficiency compared to exhaustive benchmarking,
+and (3) practical performance gains in production scenarios.
+Each subsection describes its own experimental setup.
+
+5.1
+
+0.2
+
+0
+
+where xmin and xmax define the distribution bounds, and α
+controls the degree of imbalance. These weights are then
+normalized to obtain the token count for each expert:
+!
+xi
+Ni = round
+× Ttotal × K
+(4)
+∑E−1
+j=0 x j
+
+5
+
+α = 0.0 (Balanced)
+α = 1.01 (Zipfian)
+α = 1.2 (High Skew)
+
+0.4
+
+Aggregated Serving Fidelity
+
+We first evaluate AIConfigurator’s prediction accuracy for
+aggregated (continuous batching) serving, the most common
+deployment mode in production LLM inference.
+8
+
+• Data Parallelism (DP): 1, 2, 4, 8
+• Expert Parallelism (EP): 1, 2, 4, 8
+Configurations exceeding memory capacity were automatically pruned. This sweep produced a Pareto frontier
+of optimal throughput-vs-speed trade-offs.
+2. Ground-truth validation: We benchmarked each
+Pareto-optimal configuration on actual TensorRT-LLM
+and measured MAPE between AIConfigurator predictions and ground-truth measurements.
+Results. Figure 7 compares AIConfigurator projections
+against TensorRT-LLM measurements. Across all configurations, we observed a MAPE of 25.49% for system throughput
+and 14.94% for generation speed. Notably, within the interactive speed region of 25–50 tokens/s/user (indicated by dashed
+green lines), which represents comfortable reading speed for
+most users, fidelity improves significantly: MAPEs reduce
+to 13.19% for throughput and 3.35% for generation speed.
+This demonstrates that AIConfigurator predictions are most
+accurate precisely where they matter most—the operating
+region where production deployments typically target.
+
+Figure 6: Prediction fidelity for aggregated serving across
+TensorRT-LLM and vLLM on H100 SXM. Each point represents one configuration; the diagonal indicates perfect prediction. TTFT values > 1000ms are filtered as outliers.
+
+TensorRT-LLM and vLLM demonstrates that our operatorlevel modeling generalizes well—the core computational patterns (GEMM, attention, communication) are predictable regardless of framework.
+TTFT prediction also demonstrates strong fidelity: Qwen332B-TRTLLM achieves 22.1% MAPE (r=0.89), Qwen3235B-MoE-TRTLLM achieves 18.3% MAPE (r=0.66), and
+Qwen3-32B-VLLM achieves 16.9% MAPE (r=0.95). Notably, vLLM shows the best TTFT prediction accuracy, likely
+due to its more predictable prefill scheduling compared to
+TensorRT-LLM’s batching heuristics. Extreme outliers (TTFT
+> 1000ms) are excluded as they represent pathological queuing delays rather than steady-state operation. The strong correlation across both metrics confirms AIConfigurator’s utility
+for configuration selection across heterogeneous framework
+deployments.
+
+5.2
+
+5.3
+
+Search Efficiency
+
+Table 1: Configuration search efficiency: AIConfigurator vs.
+GPU benchmarking on H100 SXM.
+Model
+
+Disaggregated Serving Fidelity
+
+Beyond aggregated mode, we evaluated AIConfigurator’s prediction fidelity for multi-node disaggregated serving, where
+prefill and decode phases run on separate GPU pools.
+Setup. Experiments were conducted on two compute nodes,
+each equipped with 8 NVIDIA Hopper GPUs interconnected
+via NVLink. One node was dedicated to prefill while the
+other handled decode, with parallelism settings configured
+independently per node. We evaluated the full-size DeepSeek
+V3 [16] model (671B parameters, MoE) using TensorRTLLM as the serving backend.
+Unlike aggregated mode where we measure per-request
+TTFT and TPOT, disaggregated serving requires system-level
+metrics: generation speed (tokens/s/user) and system throughput (total tokens/s). We evaluated AIConfigurator in two steps:
+1. Configuration search: AIConfigurator explored the configuration space for two input profiles (ISL 5k and 6k
+tokens, OSL 1k tokens) under a 5-second TTFT constraint. The search space included:
+• Tensor Parallelism (TP): 1, 2, 4, 8
+
+AIConfigurator
+
+GPU Bench
+
+Speedup
+
+Total time (all configurations)
+Llama3.1-8B (339 configs)
+Qwen3-32B FP8 (358 configs)
+Qwen3-235B FP8 (506 configs)
+
+0.52s
+0.72s
+0.84s
+
+24.4 hr
+35.4 hr
+99.5 hr
+
+171,000×
+177,000×
+427,000×
+
+Median time per configuration
+Llama3.1-8B
+Qwen3-32B FP8
+Qwen3-235B FP8
+
+1.5ms
+1.5ms
+1.5ms
+
+4.0 min
+5.4 min
+11.5 min
+
+162,000×
+214,000×
+459,000×
+
+A critical advantage of AIConfigurator is its ability to explore the configuration space on CPU, eliminating the need
+for exhaustive GPU benchmarking. To quantify this efficiency
+gain, we compare the time required for AIConfigurator to evaluate the search space of configurations against the wall-clock
+time needed to benchmark the same configurations.
+Table 1 presents the efficiency comparison across three
+models of varying complexity. Note that the "GPU time"
+represents the end-to-end wall-clock time including weight
+loading, server startup, and benchmark execution. AIConfigurator completes configuration search in sub-second time on
+CPU, while equivalent GPU benchmarking requires days of
+GPU time. For example, for Qwen3-235B (506 configurations), AIConfigurator achieves a 427,000× speedup (0.8s vs.
+99.5 GPU-hours).
+Notably, median per-configuration simulation time remains
+constant at ∼1.5ms regardless of model size, as AIConfigurator’s operator-level database queries scale with model architecture rather than parameter count. In contrast, per-configuration
+9
+
+Figure 7: AIConfigurator projected Pareto frontier (red) vs. TensorRT-LLM ground truth (blue) for DeepSeek V3 deployed across two nodes
+using prefill/decode disaggregation. Shaded region indicates the discrepancy between AIConfigurator’s projections and framework reality.
+
+benchmarking time grows with model complexity due to
+longer weight loading and inference times, ranging from 4 to
+11.5 minutes.
+This efficiency enables practitioners to rapidly iterate on deployment scenarios—adjusting SLA targets, exploring different hardware allocations, or evaluating new model variants—
+without incurring prohibitive GPU costs.
+
+5.4
+
+with TensorRT-LLM backend (v0.5.0) and AI-Perf [6] for
+load testing. Request concurrency matches the maximum
+batch size to maximize throughput, with 20× oversampling
+to mitigate warmup effects on TTFT measurements.
+Aggregated Baseline. Using AIConfigurator, we identified
+the optimal aggregated configuration: a single TP2 instance
+with batch size 8, achieving 321.5 tokens/s/GPU and 95.9
+tokens/s/user (Table 2). We validated this as the global optimum by exhaustively benchmarking all valid TP and batch
+size combinations.
+Disaggregated Optimization. AIConfigurator explored
+the disaggregated configuration space in tens of seconds and
+identified a prefill/decode split: 4 prefill replicas (TP1) and
+2 decode replicas (TP2), with batch sizes of 1 and 80 respectively. This configuration achieves 648.3 tokens/s/GPU—
+a 101.6% throughput improvement over the aggregated
+baseline—while satisfying all SLA constraints (Table 2).
+Projection Accuracy. To validate AIConfigurator’s predictions across the Pareto frontier, we benchmarked all recommended configurations under a relaxed TTFT constraint
+of 2000ms (Figure 8). The AIConfigurator-projected frontier
+closely tracks ground-truth measurements, with maximum deviations of 11.2% for generation speed and 17.4% for system
+throughput at identical concurrency levels.
+
+Case Study: Finding the Optimal
+
+We demonstrate AIConfigurator’s practical value by finding
+optimal serving configurations for a production deployment
+scenario, comparing aggregated vs. disaggregated serving
+under realistic SLA constraints.
+
+6
+
+Related Work
+
+LLM Inference Systems. Modern serving has evolved from
+static batching to dynamic scheduling via Orca [24] (continuous batching), vLLM [13] (PagedAttention), SGLang [27]
+(RadixAttention), and TensorRT-LLM [2] (optimized kernels).
+Model parallelism techniques—TP [21], PP [12], EP [16]—
+distribute large models across GPUs with complex performance trade-offs. Disaggregated architectures [18,19,28] separate prefill/decode phases for independent scaling. AIConfigurator targets these systems, automating configuration selection rather than proposing new scheduling algorithms.
+Performance Simulation. Vidur [4] and APEX [15] en-
+
+Figure 8: AIConfigurator projections vs. ground-truth measurements for Qwen3-32B-FP8 on 8 H200 GPUs. The Pareto
+frontiers show throughput-vs-speed trade-offs; disaggregated
+serving achieves 2× higher throughput than the optimal aggregated configuration while meeting SLA constraints.
+Setup. We target the following SLA requirements: TTFT ≤
+1200ms, generation speed ≥ 60 tokens/s/user, on 8 NVIDIA
+H200 SXM GPUs. The workload consists of ISL = 4000 and
+OSL = 500 tokens. All experiments use NVIDIA Dynamo
+10
+
+Table 2: Optimal aggregated vs. disaggregated configurations for Qwen3-32B-FP8 on 8 H200 GPUs under production SLA
+(TTFT ≤ 1200ms, speed ≥ 60 tokens/s/user). P = prefill, D = decode.
+Mode
+
+Throughput (tokens/s/GPU)
+
+Speed (tokens/s/user)
+
+TTFT (ms)
+
+Batch Size
+
+Configuration
+
+321.5
+648.3
+
+95.9
+78.4
+
+1017.5
+1068.9
+
+8
+P:1, D:80
+
+1 × TP2
+P: 4 × TP1, D: 2 × TP2
+
+Aggregated
+Disaggregated
+
+able rapid configuration exploration via discrete-event simulation and cost optimization. However, these rely on analytical
+roofline models that abstract framework-specific behavior.
+AIConfigurator differs through its data-driven foundation:
+measuring actual execution times on target hardware and
+composing these measurements to predict end-to-end performance, capturing implementation-specific overheads that
+analytical models miss. Unlike static resources like InferenceMax [20] benchmarks and deployment recipes [3], AIConfigurator provides algorithmic search that generalizes across
+novel workload combinations.
+
+7
+
+Conclusion
+
+We presented AIConfigurator, a data-driven toolkit for optimizing LLM inference configurations across TensorRT-LLM,
+vLLM, and SGLang. By decomposing inference into fundamental operations and measuring their latencies on target
+hardware, AIConfigurator achieves high-fidelity performance
+predictions that capture framework-specific overheads missed
+by analytical simulators. The toolkit evaluates thousands of
+configurations in seconds on CPU, eliminating expensive
+GPU benchmarking campaigns.
+Our evaluation demonstrates strong prediction accuracy (6–
+12% MAPE for TPOT) across dense and MoE architectures,
+with production case studies showing 2× throughput improvements via automated disaggregated configuration discovery.
+Integration with NVIDIA Dynamo also enables seamless deployment of optimized configurations. Future work includes
+extending to additional hardware platforms, incorporating
+cost models, and supporting emerging techniques like speculative decoding and sparse attention.
+
+11
+
+References
+
+[11] G OLOVIN , D., S OLNIK , B., M OITRA , S., KOCHANSKI , G., K ARRO ,
+J., AND S CULLEY, D. Google vizier: A service for black-box optimization. In Proceedings of the 23rd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (2017), pp. 1487–1495.
+
+[1] GitHub - ai-dynamo/dynamo: A Datacenter Scale Distributed Inference Serving Framework — github.com. https://github.com/
+ai-dynamo/dynamo. [Accessed 23-11-2025].
+
+[12] H UANG , Y., C HENG , Y., BAPNA , A., F IRAT, O., C HEN , D., C HEN ,
+M., L EE , H., N GIAM , J., L E , Q. V., W U , Y., ET AL . Gpipe: Efficient
+training of giant neural networks using pipeline parallelism. Advances
+in neural information processing systems 32 (2019).
+
+[2] GitHub - NVIDIA/TensorRT-LLM: TensorRT LLM provides users
+with an easy-to-use Python API to define Large Language Models (LLMs) and supports state-of-the-art optimizations to perform
+inference efficiently on NVIDIA GPUs. TensorRT LLM also contains components to create Python and C++ runtimes that orchestrate the inference execution in a performant way. — github.com.
+https://github.com/NVIDIA/TensorRT-LLM. [Accessed 23-112025].
+
+[13] K WON , W., L I , Z., Z HUANG , S., S HENG , Y., Z HENG , L., Y U , C. H.,
+G ONZALEZ , J., Z HANG , H., AND S TOICA , I. Efficient memory management for large language model serving with pagedattention. In
+Proceedings of the 29th symposium on operating systems principles
+(2023), pp. 611–626.
+
+[3] GitHub - vllm-project/recipes: Common recipes to run vLLM —
+github.com. https://github.com/vllm-project/recipes. [Accessed 23-11-2025].
+
+[14] L EPIKHIN , D., L EE , H., X U , Y., C HEN , D., F IRAT, O., H UANG , Y.,
+K RIKUN , M., S HAZEER , N., AND C HEN , Z. Gshard: Scaling giant models with conditional computation and automatic sharding. In
+International Conference on Learning Representations (2021).
+
+[4] AGRAWAL , A., K EDIA , N., M OHAN , J., PANWAR , A., K WATRA , N.,
+G ULAVANI , B. S., R AMJEE , R., AND T UMANOV, A. Vidur: A largescale simulation framework for llm inference. Proceedings of Machine
+Learning and Systems 6 (2024), 351–366.
+
+[15] L IN , Y.-C., K WON , W., P INEDA , R., AND PARAVECINO , F. N. Apex:
+An extensible and dynamism-aware simulator for automated parallel
+execution in llm serving. arXiv preprint arXiv:2411.17651 (2024).
+[16] L IU , A., F ENG , B., X UE , B., WANG , B., W U , B., L U , C., Z HAO ,
+C., D ENG , C., Z HANG , C., RUAN , C., ET AL . Deepseek-v3 technical
+report. arXiv preprint arXiv:2412.19437 (2024).
+
+[5] AGRAWAL , A., K EDIA , N., PANWAR , A., M OHAN , J., K WATRA ,
+N., G ULAVANI , B., T UMANOV, A., AND R AMJEE , R. Taming
+{Throughput-Latency} tradeoff in {LLM} inference with {SarathiServe}. In 18th USENIX Symposium on Operating Systems Design
+and Implementation (OSDI 24) (2024), pp. 117–134.
+
+[17] M IAO , X., WANG , Y., J IANG , Y., S HI , C., Z HU , X., Z HANG , Z., AND
+C UI , B. Galvatron: Efficient transformer training over multiple gpus
+using automatic parallelism. Proceedings of the VLDB Endowment 16,
+3 (2022), 470–479.
+
+[6] AI DYNAMO T EAM. Aiperf: A comprehensive benchmarking tool
+for generative ai models. https://github.com/ai-dynamo/aiperf,
+2025. Accessed: 2025-12-11.
+
+[18] PATEL , P., C HOUKSE , E., Z HANG , C., S HAH , A., G OIRI , Í., M ALEKI ,
+S., AND B IANCHINI , R. Splitwise: Efficient generative llm inference
+using phase splitting. In 2024 ACM/IEEE 51st Annual International
+Symposium on Computer Architecture (ISCA) (2024), IEEE, pp. 118–
+132.
+
+[7] A INSLIE , J., L EE -T HORP, J., DE J ONG , M., Z EMLYANSKIY, Y., L E BRÓN , F., AND S ANGHAI , S. Gqa: Training generalized multi-query
+transformer models from multi-head checkpoints, 2023.
+[8] DAO , T., F U , D. Y., E RMON , S., RUDRA , A., AND R É , C. FlashAttention: Fast and memory-efficient exact attention with IO-awareness. In
+Advances in Neural Information Processing Systems (NeurIPS) (2022).
+
+[19] Q IN , R., L I , Z., H E , W., C UI , J., TANG , H., R EN , F., M A , T., C AI ,
+S., Z HANG , Y., Z HANG , M., ET AL . Mooncake: A kvcache-centric
+disaggregated architecture for llm serving. ACM Transactions on
+Storage (2024).
+
+[9] D EEP S EEK -AI, L IU , A., F ENG , B., WANG , B., WANG , B., L IU , B.,
+Z HAO , C., D ENGR , C., RUAN , C., DAI , D., G UO , D., YANG , D.,
+C HEN , D., J I , D., L I , E., L IN , F., L UO , F., H AO , G., C HEN , G., L I ,
+G., Z HANG , H., X U , H., YANG , H., Z HANG , H., D ING , H., X IN ,
+H., G AO , H., L I , H., Q U , H., C AI , J. L., L IANG , J., G UO , J., N I ,
+J., L I , J., C HEN , J., Y UAN , J., Q IU , J., S ONG , J., D ONG , K., G AO ,
+K., G UAN , K., WANG , L., Z HANG , L., X U , L., X IA , L., Z HAO , L.,
+Z HANG , L., L I , M., WANG , M., Z HANG , M., Z HANG , M., TANG ,
+M., L I , M., T IAN , N., H UANG , P., WANG , P., Z HANG , P., Z HU , Q.,
+C HEN , Q., D U , Q., C HEN , R. J., J IN , R. L., G E , R., PAN , R., X U ,
+R., C HEN , R., L I , S. S., L U , S., Z HOU , S., C HEN , S., W U , S., Y E ,
+S., M A , S., WANG , S., Z HOU , S., Y U , S., Z HOU , S., Z HENG , S.,
+WANG , T., P EI , T., Y UAN , T., S UN , T., X IAO , W. L., Z ENG , W., A N ,
+W., L IU , W., L IANG , W., G AO , W., Z HANG , W., L I , X. Q., J IN , X.,
+WANG , X., B I , X., L IU , X., WANG , X., S HEN , X., C HEN , X., C HEN ,
+X., N IE , X., S UN , X., WANG , X., L IU , X., X IE , X., Y U , X., S ONG ,
+X., Z HOU , X., YANG , X., L U , X., S U , X., W U , Y., L I , Y. K., W EI ,
+Y. X., Z HU , Y. X., X U , Y., H UANG , Y., L I , Y., Z HAO , Y., S UN , Y.,
+L I , Y., WANG , Y., Z HENG , Y., Z HANG , Y., X IONG , Y., Z HAO , Y.,
+H E , Y., TANG , Y., P IAO , Y., D ONG , Y., TAN , Y., L IU , Y., WANG , Y.,
+G UO , Y., Z HU , Y., WANG , Y., Z OU , Y., Z HA , Y., M A , Y., YAN , Y.,
+YOU , Y., L IU , Y., R EN , Z. Z., R EN , Z., S HA , Z., F U , Z., H UANG , Z.,
+Z HANG , Z., X IE , Z., H AO , Z., S HAO , Z., W EN , Z., X U , Z., Z HANG ,
+Z., L I , Z., WANG , Z., G U , Z., L I , Z., AND X IE , Z. Deepseek-v2: A
+strong, economical, and efficient mixture-of-experts language model,
+2024.
+
+[20] S EMI A NALYSIS. InferenceMAX by SemiAnalysis — inferencemax.semianalysis.com. https://inferencemax.semianalysis.
+com/. [Accessed 23-11-2025].
+[21] S HOEYBI , M., PATWARY, M., P URI , R., L E G RESLEY, P., C ASPER ,
+J., AND C ATANZARO , B. Megatron-lm: Training multi-billion parameter language models using model parallelism. arXiv preprint
+arXiv:1909.08053 (2019).
+[22] VASWANI , A., S HAZEER , N., PARMAR , N., U SZKOREIT, J., J ONES ,
+L., G OMEZ , A. N., K AISER , L., AND P OLOSUKHIN , I. Attention is
+all you need, 2023.
+[23] WANG , L., YANG , J., L UO , Y., AND WANG , D. Morphling: Fast,
+near-optimal auto-configuration for cloud-native model serving. In
+Proceedings of the 2021 ACM Symposium on Cloud Computing (2021),
+pp. 63–77.
+[24] Y U , G.-I., J EONG , J. S., K IM , G.-W., K IM , S., AND C HUN , B.-G.
+Orca: A distributed serving system for {Transformer-Based} generative
+models. In 16th USENIX Symposium on Operating Systems Design
+and Implementation (OSDI 22) (2022), pp. 521–538.
+[25] Z HAO , C., Z HOU , S., Z HANG , L., D ENG , C., X U , Z., L IU , Y., Y U , K.,
+L I , J., AND Z HAO , L. Deepep: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP, 2025.
+[26] Z HENG , L., L I , Z., Z HANG , H., Z HUANG , Y., C HEN , Z., H UANG , Y.,
+WANG , Y., X U , Y., Z HUO , D., X ING , E. P., ET AL . Alpa: Automating
+inter- and intra-operator parallelism for distributed deep learning. In
+16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) (2022), pp. 559–578.
+
+[10] F EDUS , W., Z OPH , B., AND S HAZEER , N. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity.
+Journal of Machine Learning Research 23, 120 (2022), 1–39.
+
+12
+
+[27] Z HENG , L., Y IN , L., X IE , Z., H UANG , J., S UN , C., Y U , C., C AO , S.,
+KOZYRAKIS , C., S TOICA , I., G ONZALEZ , J. E., ET AL . Efficiently
+programming large language models using sglang.
+[28] Z HONG , Y., L IU , S., C HEN , J., H U , J., Z HU , Y., L IU , X., J IN , X.,
+AND Z HANG , H. Distserve: Disaggregating prefill and decoding for
+goodput-optimized large language model serving, 2024.
+
+13
+
+

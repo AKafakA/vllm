@@ -24,45 +24,76 @@ This document describes the design for a vLLM Emulator Backend that enables fast
 - Scheduling algorithm research requires extensive experimentation
 - Current approaches: (1) simulation, (2) small-scale real testing
 
-### 2.2 Existing Work: Vidur
+### 2.2 Related Work Landscape (Updated)
 
-Vidur is an event-driven LLM inference simulator. However, it has significant limitations:
+Recent work is no longer a single-baseline (Vidur-only) landscape. It now has three families:
 
-| Aspect | Vidur | Our Approach |
-|--------|-------|--------------|
-| **Simulation Type** | Event-driven, offline | End-to-end emulation |
-| **GPU Modeling** | Kernel-level | Phase-level (B/C/D) |
-| **CPU/API Overhead** | ❌ Not modeled | ✅ Modeled |
-| **Scheduling Changes** | ❌ Requires re-implementation | ✅ Automatic |
-| **Backward Compatibility** | ❌ Breaks on vLLM updates | ✅ Strong guarantee |
-| **PD Separation** | ❌ Not supported | ✅ Optional |
-| **KV Offloading** | ❌ Not supported | ✅ Optional |
+1. **System simulators**: Vidur, LLMServingSim, Frontier, LLMServingSim 2.0, APEX
+   - strong for broad what-if studies and search;
+   - typically rely on explicit simulator abstractions and calibration.
 
-### 2.3 Our Differentiation
+2. **Code-path-preserving emulation**: REVATI
+   - runs real serving framework control logic with GPU execution virtualized (time-warp);
+   - strongest overlap with our original motivation.
 
-**Key Advantages:**
-1. **End-to-End Emulation**: Runs actual vLLM code, not a re-implementation
-2. **CPU/API Overhead**: Models prefill/decode scheduling, request queue, API latency
-3. **Strong Consistency**: Any vLLM scheduling change works automatically
-4. **Backward Compatible**: No need to re-implement when vLLM updates
-5. **Extensible**: PD separation and KV offloading can be added as optional modules
+3. **Configuration optimizer/estimator**: AIConfigurator
+   - high-speed configuration recommendations under SLO constraints;
+   - narrower than full runtime simulation/emulation, but strong on practical search productivity.
 
-### 2.4 Challenges
-- vLLM is complex with many interacting components
-- Need to preserve scheduling logic while replacing execution
-- Must maintain API compatibility for benchmarking
-- Accuracy vs. speed tradeoff
+### 2.3 Positioning and Differentiation (Revised)
 
-### 2.5 Limitations (vs Vidur)
+Given this landscape, this RFC should **not** claim novelty from "GPU-free exploration" alone.
 
-| Aspect | Vidur | Our Approach |
-|--------|-------|--------------|
-| **Simulation Speed** | Fast (event-driven) | Slower (near real-time) |
-| **CPU/Memory Overhead** | Low | High (runs real Python code) |
-| **Parameter Flexibility** | Flexible but manual | Automatic (runs real vLLM code) |
-| **Scheduler Parameters** | Requires re-implementation | ✅ Automatically captured |
-| **Profiling Requirement** | - | Needs real GPU for profiling |
-| **Lightweight Testing** | Better suited | Heavier |
+**Our intended differentiation is:**
+1. **vLLM-native decomposed emulation boundary (A/B/C/D)**:
+   - A (API/scheduler/tokenization) runs real;
+   - B/C/D are modeled explicitly via independent oracles.
+2. **Mechanism-level explainability**:
+   - prediction is decomposable into compute/offload/network contributions.
+3. **Diagnosis-oriented workflow**:
+   - errors can be localized by component (B/C/D) instead of only reporting aggregate TTFT/TPOT gaps.
+4. **Research iteration support**:
+   - pluggable oracles and profile packs for rapid scheduler what-if studies in vLLM-focused research.
+5. **Online serving focus (key differentiator from REVATI)**:
+   - **Primary LLM application is online serving**, not offline batch inference.
+   - We support **real-time blocking simulation** for accurate temporal dynamics.
+   - REVATI-style virtual time is available as an **option** for offline analysis.
+
+**Non-goals / claims we avoid:**
+- claiming to be the first code-path-preserving approach;
+- claiming broad superiority over all simulators/emulators without direct evidence;
+- claiming "strong compatibility guarantee" without cross-version measurements.
+
+### 2.4 Key Risks and Impact on RFC
+
+New related work (especially REVATI) changes risk profile:
+- **Novelty collision risk**: high if we frame contribution as generic emulation speedup.
+- **Reviewer risk**: high if related work stays Vidur-centric.
+- **Evidence risk**: high if we only report aggregate accuracy without per-component diagnostics.
+
+Impact on this RFC:
+- keep architecture direction;
+- tighten claims around explainability/diagnostics and vLLM-native integration;
+- require explicit cross-baseline evaluation plan (simulator/emulator/optimizer families).
+
+### 2.5 Comparative Limitations and Trade-offs (Revised)
+
+| Axis | Our RFC (A/B/C/D decomposition + Online Blocking) | REVATI-style time-warp emulation | Simulator family (Vidur/LLMServingSim/Frontier/APEX) |
+|------|----------------------------------|----------------------------------|-------------------------------------------------------|
+| **Framework control-path fidelity** | High for A path; modeled for B/C/D | Very high (unchanged control plane) | Medium (abstraction/re-implementation dependent) |
+| **Explainability of prediction error** | High (component-level) | Medium (often aggregate) | Medium (model-dependent) |
+| **Search throughput** | Medium (depends on oracle efficiency) | Medium-high | High (often fastest at scale) |
+| **Maintenance under fast framework evolution** | Medium-high (if hooks stable) | High (code-path inheritance) | Medium-low to medium |
+| **Calibration dependence** | High | High | High |
+| **Online serving simulation** | ✅ Full real-time blocking | ❌ Virtual time only | ❌ Not supported |
+| **Offline batch inference** | ✅ Supported (offline mode) | ✅ Supported | ✅ Supported |
+| **Primary risk** | overlap if claims too broad | interception coverage/corner cases | abstraction drift vs real systems |
+
+**Key insight:** Online serving (real-time request arrival) is the primary application scenario for LLM inference systems. Our emulator supports both:
+- **Online mode (default)**: Block for estimated latency to simulate real temporal dynamics
+- **Offline mode**: No blocking (virtual time, like REVATI) for faster batch analysis
+
+This table is a planning aid, not a superiority claim. Quantitative validation is required in Section 6.
 
 ---
 
@@ -186,6 +217,29 @@ class GpuCostOracle:
 3. If emulator mode enabled: return emulated latency
 4. If disabled: use real GPU execution
 
+**Blocking Modes (Critical for Online Serving):**
+
+The emulator supports two timing modes, configured via `VLLM_EMULATOR_BLOCKING_MODE`:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `online` (default) | Block for estimated latency using `time.sleep()` | Online serving with real-time request arrival |
+| `offline` | No blocking (virtual time, like REVATI) | Offline batch inference analysis |
+
+**Why this matters:**
+- **Online serving is the primary application** for LLM inference systems
+- When request arrival time matters (t=0: A arrives, t=100ms: B arrives), we must simulate real temporal dynamics
+- The scheduler's decisions depend on actual timing: when a batch completes, pending requests see new state
+- Virtual-time emulation (REVATI-style) cannot capture this because time doesn't advance between operations
+
+**Timing Precision:**
+- Online mode: uses `time.sleep()` with 1ms threshold (sub-ms delays ignored)
+- For finer precision, consider ctypes-based spin-wait in future work
+
+**LLM.generate() Warning:**
+- When using offline batch interface (LLM.generate()) with online blocking mode, a warning is issued
+- Recommends switching to offline mode for better performance
+
 ### 4.3 Category C: CPU↔GPU Interaction Model
 
 **Hook Points:**
@@ -305,6 +359,31 @@ class NetworkCostOracle:
   "send_recv": {...},
   "kv_transfer": {...}
 }
+```
+
+## 4.5 Configuration
+
+**Environment Variables:**
+
+| Variable | Values | Default | Description |
+|----------|--------|---------|-------------|
+| `VLLM_EMULATOR_ENABLE_ORACLE` | `1`, `true`, `yes` | - | Enable emulator mode |
+| `VLLM_EMULATOR_PROFILE_PACK` | path | - | Path to profile pack JSON |
+| `VLLM_EMULATOR_BLOCKING_MODE` | `online`, `offline` | `online` | Timing simulation mode |
+
+**Usage Examples:**
+
+```bash
+# Online serving (default): block for real-time simulation
+VLLM_EMULATOR_ENABLE_ORACLE=1 \
+VLLM_EMULATOR_PROFILE_PACK=/path/to/profile.json \
+vllm serve <model>
+
+# Offline batch: no blocking (faster)
+VLLM_EMULATOR_ENABLE_ORACLE=1 \
+VLLM_EMULATOR_PROFILE_PACK=/path/to/profile.json \
+VLLM_EMULATOR_BLOCKING_MODE=offline \
+python -c "from vllm import LLM; llm = LLM(<model>); llm.generate(<inputs>)"
 ```
 
 ---
@@ -468,13 +547,15 @@ vllm-emulator/
 
 ### Phase 2: Core Oracle (P1) - REQUIRED
 
-#### P1.1: GPU Cost Oracle (Category B) - REQUIRED
-- [ ] Create `GpuCostOracle` interface
-- [ ] Implement lookup logic
-- [ ] Hook into `gpu_worker.execute_model()`
-- [ ] Add fallback to real execution
-- **Focus:** Start with Decode-only mode (simpler), add Prefill in Phase 1.5
-- **Status:** NOT_STARTED
+#### P1.1: GPU Cost Oracle (Category B) - REQUIRED ✅ DONE
+- [x] Create `GpuCostOracle` interface
+- [x] Implement lookup logic (batch-level)
+- [x] Hook into `gpu_worker.execute_model()`
+- [x] Add fallback to real execution
+- [x] Add online/offline blocking modes
+- [x] Add warning for LLM.generate() + online mode
+- **Focus:** Batch-level estimation, supports online serving simulation
+- **Status:** ✅ DONE
 
 ### Phase 3: Optional Extensions (P2) - OPTIONAL
 
@@ -530,9 +611,22 @@ vllm-emulator/
 
 ## 10. References
 
+Implementation references:
 - vLLM Source: `vllm/v1/`
 - Platform Plugin: `vllm/platforms/`
-- Vidur Profiling: Reference for network profiling
+
+Related work references (must-cover set):
+- Vidur: A Large-Scale Simulation Framework for LLM Inference
+- LLMServingSim: A HW/SW Co-Simulation Infrastructure for LLM Inference Serving at Scale
+- Frontier: Simulating the Next Generation of LLM Inference Systems
+- LLMServingSim 2.0: A Unified Simulator for Heterogeneous and Disaggregated LLM Serving Infrastructure
+- REVATI: Transparent GPU-Free Time-Warp Emulation for LLM Serving
+- AIConfigurator: Lightning-Fast Configuration Optimization for Multi-Framework LLM Serving
+- APEX: An Extensible and Dynamism-Aware Simulator for Automated Parallel Execution in LLM Serving
+
+Local analysis artifacts:
+- `docs/paper-list.md`
+- `docs/sim-emu-deep-dive-2026-03-06-v2.md`
 
 ---
 

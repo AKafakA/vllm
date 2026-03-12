@@ -1,0 +1,1998 @@
+arXiv:2411.17651v2 [cs.DC] 29 Apr 2025
+
+APEX: An Extensible and Dynamism-Aware Simulator for
+Automated Parallel Execution in LLM Serving
+Yi-Chien Lin
+
+Woosuk Kwon
+
+yichienl@usc.edu
+University of Southern California
+Los Angeles, California, USA
+
+woosuk.kwon@berkeley.edu
+University of California, Berkeley
+Berkeley, California, USA
+
+Ronald Pineda
+
+Fanny Nina Paravecino
+
+ronaldp10@ucla.edu
+University of California, Los Angeles
+Los Angeles, California, USA
+
+fanny.nina@microsoft.com
+Microsoft
+Mountain View, California, USA
+
+Abstract
+
+ACM Reference Format:
+Yi-Chien Lin, Woosuk Kwon, Ronald Pineda, and Fanny Nina Paravecino.
+2018. APEX: An Extensible and Dynamism-Aware Simulator for Automated
+Parallel Execution in LLM Serving. In Proceedings of Make sure to enter
+the correct conference title from your rights confirmation emai (Conference
+acronym ’XX). ACM, New York, NY, USA, 13 pages. https://doi.org/xxx.xxx
+
+Efficiently serving Large Language Models (LLMs) requires selecting an optimal parallel execution plan, balancing computation,
+memory, and communication overhead. However, determining the
+best strategy is challenging due to varying parallelism techniques
+(data, pipeline, tensor) and workload characteristics (e.g., computeintensive tasks with long prompts vs. memory-intensive tasks with
+long generation). We propose APEX, an LLM serving system simulator that efficiently identifies optimal parallel execution plans by considering key factors of LLM serving systems, such as memory usage,
+batching behavior, etc. APEX performs dynamism-aware simulation
+to model iteration-level batching, and leverages LLMs’ repetitive
+structure to reduce design space, scaling efficiently to trillion-scale
+models. APEX abstracts the key components of LLM serving systems—including the model, batching module, quantization formats,
+and device clusters—enabling the simulator to be general and extensible. Simulating on a CPU, APEX evaluates execution plans
+for various device clusters, covering diverse LLMs and workloads.
+APEX finds plans up to 3.37× faster than heuristics, and also plans
+that reduce energy consumption by up to 45% compared to latencyoptimal plans. APEX performs comprehensive evaluations, reporting key system metrics like time per output token and time to first
+token, which can help service providers meet SLOs. APEX identifies
+an optimal plan within 15 minutes on a CPU, making it 71× faster
+and 1234× more cost-effective than cloud-based GPU deployment.
+APEX can be accessed at: https://github.com/microsoft/apex_plus
+
+1
+
+Introduction
+
+Large Language Models (LLMs) have been successfully applied to
+various applications, such as code generation [14, 50], questionanswering [32, 54], and many more [44, 51, 53]. Serving an LLM is
+both memory- and compute-intensive, necessitating multi-device
+clusters to achieve high performance. Several techniques have been
+proposed to parallelize LLM, such as data parallelism (DP) [28],
+pipeline parallelism (PP) [17], tensor parallelism (TP) [41], etc. Each
+parallelism has its pros and cons: TP is memory efficient, as it does
+not produce model replicas like DP, but it incurs an expensive communication overhead [41]. PP reduces communication overhead,
+but can suffer from workload imbalance [17]. Hybrid parallelism
+can effectively balance the trade-offs to improve performance, but
+identifying the optimal parallel execution plan is non-trivial due
+to the many factors involved, including computation workload,
+network traffic, memory efficiency, etc. Furthermore, the optimal
+parallel execution plan also depends on the characteristics of the input requests. Compute-intensive tasks (e.g., tasks with long prompts
+like summarization) and memory-intensive tasks (e.g., tasks with
+long generations like coding) favor different parallelism strategies.
+A common practice is to adopt heuristic execution plans instead,
+such as applying TP within the same node and PP across different
+nodes [34, 43]. Yet, recent studies show that heuristics plans can be
+2× slower than optimal configurations [20], underscoring the need
+for service providers to search for and adopt an optimal parallel
+execution plan rather than relying on heuristics.
+To find an optimal execution plan, a straightforward way is to
+deploy and evaluate parallel execution plans exhaustively; however, this is prohibitively expensive as it would take thousands of
+GPU hours [1, 2]. An alternative is to leverage modeling-based approaches, such as performance models [20] or simulators [11, 46],
+to estimate the performance of parallel execution plans; nevertheless, existing solutions developed for Deep Neural Network
+[11, 46] or LLM training [4, 20] cannot be applied to LLM serving,
+as serving systems introduce unique challenges: (1) Dynamism of
+
+CCS Concepts
+• Computing methodologies → Modeling and simulation;
+Parallel computing methodologies.
+
+Keywords
+LLM Serving, Optimal Parallelism, Simulation
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+© 2018 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM ISBN 978-1-4503-XXXX-X/18/06
+https://doi.org/xxx.xxx
+1
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+Lin et al.
+
+iteration-level batching: Unlike conventional ML systems that
+use static batching, where all requests in a batch must be completed
+before new ones are added, LLM serving systems [2, 24, 52] employ
+iteration-level batching [45]. In this approach, incoming requests are
+continuously added to the processing batch as memory becomes
+available, resulting in dynamically changing batch sizes which are
+hard to model. Moreover, some requests within the batch may be
+in the prefill stage, while others are in the decode stage. This interleaving of stages further complicates the modeling, as these stages
+have significantly different computational characteristics (details
+in Section 2.1). (2) Exponentially-growing design space: The
+design space grows exponentially with respect to the model size
+and the number of devices in the cluster. Since LLM serving often involves large models and clusters, it is non-trivial to develop
+a solution that can search for an optimal parallel execution plan
+within a reasonable timeframe. (3) Adapting for continuouslyevolving systems: LLM serving system is an emerging area, with
+continuous evolution in model architecture, hardware platforms,
+and system optimizations such as quantization [16, 29] and parallelism techniques [30, 38]. Consequently, a performance model or a
+simulator can easily become obsolete and inapplicable to the latest
+LLM serving systems. Thus, keeping pace with the rapid evolution
+of such systems is necessary but also challenging.
+To this end, we propose APEX, an extensible and dynamismaware simulator for Automated Parallel EXecution in LLM serving.
+Given an LLM, a device cluster, and input requests with varying
+context/generation lengths, APEX generates an optimal parallel execution plan for LLM serving. APEX first generates various parallel
+execution plans, each representing a unique way to parallelize the
+model by combining various parallelisms (i.e., DP, PP, TP). APEX
+then evaluates each plan by estimating the execution time of serving
+the input requests through simulation. APEX performs dynamismaware simulation that is capable of modeling the characteristics of
+iteration-level batching. After simulation, APEX provides a comprehensive evaluation for each execution plan with key LLM serving
+metrics, such as time per output token (TPOT), time to first token
+(TTFT), and energy consumption, among others [33]. This detailed
+evaluation enables service providers to select execution plans optimized for various objectives (e.g., minimizing latency or energy
+consumption) while meeting service-level objectives (SLOs).
+Despite performing complex simulations, APEX remains highly
+scalable by leveraging the repetitive structure of transformer models, significantly reducing design space and enabling simulations
+at trillion-scale models across multi-node clusters. To model stateof-the-art LLM serving systems, APEX supports a broad range of
+LLMs, parallelisms, quantization formats, and device clusters. Recognizing the rapid evolution of LLM serving, APEX is designed to
+be modular and extensible, allowing easy integration of new models
+and hardware with minimal effort. Additionally, APEX leverages
+operation-level profilings to estimate the system execution time,
+which allows APEX to adapt to different clusters by collecting performance data from the underlying platform. Note that APEX not
+only supports GPU clusters but also ASIC clusters such as TPU
+[23] and Intel Gaudi [19]. We evaluate APEX using a myriad of
+LLMs, device clusters, and distinct workloads. APEX consistently
+identifies optimal execution plans that outperform heuristic plans
+
+while maintaining low simulation overhead. APEX is open-sourced:
+https://github.com/microsoft/apex_plus. Our key contributions are:
+• Automated parallel execution: We propose APEX, a simulator that automatically finds an optimal parallel execution
+plan for a given LLM, a device cluster, and input requests.
+• Dynamism-aware simulation: APEX models iterationlevel batching, capturing real-world LLM serving behavior.
+• Accurate & effective: APEX delivers accurate speedup predictions, with an average relative error of just 10.7%. APEX
+finds optimal plans up to 3.37× faster than heuristic plans,
+and energy-optimal plans that reduce energy consumption
+by up to 45% compared to latency-optimal plans.
+• Broad compatibility and extensibility: APEX supports
+various LLMs, parallelisms, quantizations, and device clusters, while allowing easy extension to new configurations.
+• Cost-effective & scalable: APEX identifies an optimal plan
+within 15 minutes on a CPU, making it 71× faster and 1234×
+more cost-effective than cloud-based GPU deployment. It
+also maintains similar simulation overhead when scaling
+from billion-scale to trillion-scale models.
+• Comprehensive evaluation: APEX reports key LLM-serving
+metrics, which can help service providers meet SLOs.
+
+2 Background
+2.1 LLM Inference
+Large Language Model (LLM) inference takes a user prompt as input,
+and generates a response token by token. The sequential token
+generation process is also known as auto-regressive generation [15],
+which utilizes previously generated tokens as input to predict the
+next token. The inference process of LLMs consists of two stages:
+1. Prefill Stage: In the prefill stage, LLM processes the input request
+(i.e., prompt) to set up intermediate states (keys and values) that
+are used to predict the first token. Unlike token generation, the
+computation of prefill does not rely on previously generated output
+tokens, allowing the tokens of the input request to be processed
+in parallel all at once. This high degree of parallelism makes the
+prefill stage compute-bound [52].
+2. Decode Stage: During the decode stage, LLM generates output
+tokens autoregressively until a stopping criterion is met. The generation of each token depends on all previous tokens’ output states
+(keys and values). The generation phase is often memory-bound
+[29], as its latency is primarily determined by the data transfer time
+of reading the output states from memory.
+
+2.2
+
+Device Clusters and Interconnections
+
+To achieve high serving throughput and accommodate the large
+model size, LLMs are often deployed on a cluster of devices. The
+devices are connected in a tree-based network topology, which is
+one of the most popular topologies for node deployment. The memory bandwidth and latency is uniform within each level. Figure 1
+illustrates an example of a commonly used two-level device cluster.
+Devices within the same node are typically connected by highbandwidth interconnects like NVLink [26] at level 1, while devices
+across different nodes are connected via inter-node networks such
+as InfiniBand [31] at level 2. In addition to GPUs, ASIC clusters are
+2
+
+APEX: An Extensible and Dynamism-Aware Simulator for Automated Parallel Execution in LLM Serving
+
+Lv.2 Interconnection
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+LLM Configuration
+
+Parallel Templates
+
+Lv. 1 Interconnection
+
+Device Cluster
+Configuration
+
+Device 7
+
+Device 6
+
+Device 5
+
+Device 4
+
+Device 3
+
+Device 2
+
+Device 1
+
+Device 0
+
+Node 0
+
+Lv. 1 Interconnection
+
+Request Traces
+
+Node 1
+
+Profiling Results
+(Section 3.5)
+
+LLM Serving Simulator
+(Section 3.4)
+
+Parallel
+Execution Plans
+
+Batching Module
+(Section 3.3)
+
+Intermediate Data
+
+System Data
+
+Plan 1
+[2DP+2TP+2PP]
+E2E Latency: 226 sec.
+TTFT: 47 ms
+TPOT: 21 ms
+
+…
+
+Input Data
+
+also emerging, such as TPU and Gaudi clusters [19, 23]. These clusters also utilize tree-based network topologies for interconnection
+and can be abstracted similarly as GPU clusters [8].
+
+Simulation Reports
+Output Data
+
+Figure 2: System overview of APEX
+model replicas like DP. Yet, TP incurs high collective communication overhead, such as AllReduce, which is prohibitively expensive
+for interconnection networks with limited bandwidth like PCIe.
+Expert Parallelism (EP): EP [38] is a special type of parallelism for
+Mixture of Experts (MoE) models [6]. EP deploys different experts
+across various devices. For MoE models, only a subset of experts
+are activated for each input token. Thus, EP can result in workload
+imbalance and resource under-utilization if none of the experts on
+the device are activated; while this can be avoided by adopting TP,
+where each device is assigned with a partition of all the experts, EP
+incurs a lower communication overhead than TP.
+Each parallelism has its own pros and cons, tradeing-off between computation, memory efficiency, collective communication
+overhead, etc. Thus, it’s non-trivial to determine the optimal parallel execution plan, especially given that the parallelisms can be
+adopted in a hybrid manner. Heuristic plans are typically adopted
+for simplicity, such as applying TP to clusters with high-bandwidth
+interconnections like NVLink [26], and applying PP to clusters without such networks [34, 43]. APEX aims to evaluate the complex
+trade-offs among parallelism techniques to find optimal parallel
+execution plans that outperform heuristic approaches.
+
+LLM Serving and Iteration-Level Batching
+
+LLMs are often hosted by service providers in the cloud [27]. Users
+send requests to these providers through APIs or chatbots and
+then receive responses generated by the LLMs. For LLM serving,
+it is critical to achieve both low latency and high throughput: low
+latency is necessary to meet service-level objectives, while high
+throughput enables service providers to serve a large number of
+users simultaneously. Due to the auto-regressive nature of LLMs,
+the lengths of the generated responses can vary significantly. Consequently, the commonly used static batching leads to suboptimal
+performance in LLM serving, as all the batched requests need to
+wait for the longest response to be generated to proceed to batch
+new requests. To overcome this inefficiency, iteration-level batching
+[45] is proposed. Iteration-level batching continuously schedules
+newly arrived request(s) into the existing batch whenever GPU
+memory becomes available, rather than waiting for all the requests
+to be completed. Iteration-level batching significantly improves the
+serving throughput and is widely adopted in state-of-the-art LLM
+serving systems [2, 24, 36, 52].
+
+2.4
+
+(Section 3.2)
+
+Active requests
+
+Figure 1: An example two-level device cluster. Memory bandwidth and latency are uniform within the same level.
+
+2.3
+
+Parallel Execution
+Plan Generator
+
+LLM Parallelisms
+
+2.5
+
+LLM is often served with multiple devices (Figure 1), and various
+approaches have been proposed to parallelize LLM on the cluster.
+We discuss several representative and widely-used parallelisms.
+Data Parallelism (DP): In DP [28], the model is replicated across
+multiple devices, and input requests are divided into mini-batches,
+each processed independently by a replica. This approach avoids
+communication overhead during execution, but comes at the cost of
+increased memory usage due to model replication, thereby reducing
+available memory for batching requests.
+Pipeline Parallelism (PP): PP [17, 35] divides the model in a
+layer-wise fashion. Each model partition consists of a subset of
+layers, and each subset of layers forms a pipeline stage. The input
+requests are split into micro-batches to flow through the pipeline
+stages. PP requires point-to-point (p2p) communications between
+the pipeline stages. In addition, PP suffers from pipeline stalls when
+the execution time of each stage is unbalanced.
+Tensor Parallelism (TP): TP [41] divides the model in an intralayer fashion, which splits individual layers across multiple devices. TP does not suffer from load imbalance like PP or produces
+
+LLM Quantizations
+
+Quantization is an essential technique for achieving performant
+LLM serving, as it reduces both memory and computation overhead.
+Various methods have been proposed to quantize one or more of
+the following components to lower precision while preserving high
+accuracy: (1) model weights, (2) activations, and (3) KV cache. For
+example, AWQ [29] quantizes the model weights, and KVQuant
+[29] focuses on quantizing the KV cache. State-of-the-art LLM serving systems like vLLM [24] and TensorRT-LLM [36] also support
+W8A8 quantization, which quantizes both the model weights and
+activations to FP8 format. Given the diversity of quantization methods, it is essential to flexibly support various techniques to find an
+optimal parallel execution plan for LLM serving systems.
+
+3 APEX Simulator Design
+3.1 System Overview
+We depict the workflow of APEX in Figure 2. User-provided input
+data is shown in yellow-colored boxes, and built-in system data is
+represented by red-colored cylinders. Given an LLM and a device
+3
+
+LLM Conf
+
+Parallel Te
+
+Device
+Configu
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+Lin et al.
+
+s
+
+Parallel Execution
+Plan Generator
+
+are
+LLM Configuration
+
+IR Converter
+
+Transformer IR
+
+Attention
+Cell
+
+Atten.
+Head
+
+Block
+
+Parallel Templates
+
+PP]
+sec.
+
+Parallel Scheme
+Generator
+
+GPT
+
+Input Activation
+
+Parallel
+Schemes
+
+…
+
+Multi-H
+Atten
+
+Atten.
+Head
+
+Task
+
+Multi-L
+Percep
+
+Feedforward
+Cell
+
+×N
+Device Cluster
+Configuration
+
+Device Mapper
+
+Output Activation
+
+Parallel
+Execution Plans
+
+Figure 4: Transformer IR represents LLMs in a canonical way
+
+ports
+
+without network topology information. Next, the Device Mapper
+assigns logical devices to physical devices, generating executable
+parallel execution plans, which serve as inputs for the Batching
+Module. This two-stage mapping approach (first to the logical and
+then to physical device cluster) reduces the design complexity. We
+discuss each module in detail below.
+
+Figure 3: The Parallel Execution Plan Generator produces
+plans that map a given LLM onto the target cluster using
+distinct parallelization strategies
+cluster, APEX generates multiple parallel execution plans using
+built-in Parallel Templates. Each generated executon plan represents a distinct strategy for mapping the LLM across the cluster.
+The Batching Module takes these generated plans and a trace of
+requests as inputs, dynamically generating the processing batch
+based on request arrival time and resource constraints. Specifically,
+the Batching Module determines, at each iteration, whether a request should be added to or removed from the processing batch
+and reports the active requests to the LLM Serving Simulator; the
+Simulator then uses profiling results to estimate execution time and
+energy consumption for processing the active requests, while also
+tracking system metrics such as time to first token (TTFT), time per
+output token (TPOT), P95 latency, among others. Once all requests
+are processed, the simulator generates a simulation report for each
+parallel execution plan. APEX can optimize towards different objectives by selecting the most suitable execution plan based on a
+parametrizable target metric: It can optimize for energy-efficiency
+by minimizing energy per inference, or can prioritize throughput
+by reducing end-to-end latency, enabling flexible adaptation to diverse system goals. Suppose that we aim to find the latency-optimal
+plan for serving Llama-3.1 70B on a cluster with 8 Nvidia H100
+GPUs. APEX first generates multiple execution plans, such as 8-way
+tensor parallelism, or a 4-way tensor parallelism combined with
+2-way pipeline parallelism. Next, it utilizes a trace of requests as
+input for simulation, such as the Azure LLM Traces [37]. APEX
+simulates iteration-level batching to organize arriving requests into
+the processing batch. Finally, the LLM Serving Simulator estimates
+the execution time of each plan and select the one with the lowest
+end-to-end latency for serving Llama-3.1 70B on the cluster.
+
+3.2
+
+3.2.1 IR Converter and Transformer IR. The Plan Generator converts an LLM into Transformer IR, a canonical representation of
+transformer-based models, as illustrated in Figure 4. We develop
+an IR converter that parses an LLM’s configuration file, extracting
+parameters such as the number of attention heads and layers, and
+translates the model into Transformer IR. In Transformer IR, an
+LLM is represented as a chain of cells, where each cell corresponds
+to key transformer operations, such as multi-head attention or the
+feedforward network. For example, GPT-3 [5] can be represented
+as a sequence of multi-head attention (MHA) cells and multi-layer
+perceptron (MLP) cells, while Llama-3.1 [12] is modeled as a chain
+of group query attention (GQA) cells [3] and SwiGLU cells [40].
+Each cell consists of multiple tasks, such as individual attention
+heads in an MHA cell or experts in a mixture-of-experts (MoE) cell.
+Given that LLMs typically consist of repeated structures, we define
+the smallest set of nonrepetitive adjacent cells as a block. Using
+Transformer IR, an LLM is uniformly represented as multiple identical block, where each block consists of cells, and each cell contains
+multiple tasks. Transformer IR abstracts an LLM by focusing solely
+on key operations like MHA and MLP, while omitting operations
+like tokenization and position embeddings, which are less relevant
+for model parallelization. By focusing on key operations and leveraging the repetitive nature of LLMs through blocks, Transformer
+IR reduces both the search space and the simulation runtime for
+APEX. Furthermore, Transformer IR serves as a foundation for developing our Parallel Templates, which we describe in the following
+subsection.
+
+Parallel Execution Plan Generator
+
+3.2.2 Parallel Templates and Parallel Schemes Generator. We develop Parallel Templates to generate parallel execution plans for
+LLM serving. Given the wide variety of LLMs, exhaustively designing templates for each model is impractical. Instead, we develop our
+Parallel Templates based on the Transformer IR, which provides a
+unified abstraction of LLMs. This approach enables the developed
+templates to support a broad range of models rather than being
+tailored to specific ones. Figure 5 illustrates examples of our templates. Each cell type is associated with a pre-defined template that
+specifies how it is parallelized across multiple devices. For instance,
+if tensor parallelism (TP) is applied to both the multi-head attention
+
+In this section, we describe the details of the Parallel Execution
+Plan Generator, which constructs various parallel execution plans
+to map the input LLM onto the target device cluster. The workflow of the Plan Generator is illustrated in Figure 3. The process
+begins by converting the input LLM into Transformer IR, an intermediate representation that provides a canonical abstraction
+for transformer-based models. Using this representation, the Plan
+Generator produces multiple parallel schemes based on the Parallel Templates. A parallel scheme maps the model onto a logical
+device cluster [47], a virtual overlay that abstracts hardware details
+4
+
+APEX: An Extensible and Dynamism-Aware Simulator for Automated Parallel Execution in LLM Serving
+Device 0
+
+Device 1
+
+Device 0
+
+Device 1
+
+½ MHA
+
+½ MHA
+
+½ MHA
+
+½ MHA
+
+AllReduce
+½ MLP
+
+½ MLP
+
+All-to-All
+MLP
+Replica 0
+
+MLP
+Replica 1
+
+Algorithm 1 Parallel Scheme Generation
+
+Input Activation
+
+𝐻/D
+Heads
+Device 1
+
+…
+
+1: Input: LLM (in Transformer IR), Parallel Templates
+2: Output: parallel_schemes
+3: 𝑛 = num_of_devices_in_cluster
+4: for 𝑚𝑜𝑑𝑒𝑙_𝐷𝑃 = 1, 2, ..., 𝑛: do
+⊲ model-level DP
+5:
+𝑚 = 𝑛 ÷ 𝑚𝑜𝑑𝑒𝑙_𝐷𝑃
+⊲ 𝑚 = num_repica_devices
+6:
+for 𝑠𝑡𝑎𝑔𝑒 = 1, 2, .., 𝑚 do
+⊲ inter-layer parallelism
+7:
+𝑠 = 𝑚 ÷ 𝑠𝑡𝑎𝑔𝑒
+⊲ 𝑠 = num_stage_devices
+8:
+for cell ∈ LLM.block do
+9:
+for 𝑐𝑒𝑙𝑙_𝐷𝑃 = 1, 2, ..., 𝑠: do
+⊲ cell-level DP
+10:
+𝑐 = 𝑠 ÷ 𝑐𝑒𝑙𝑙_𝐷𝑃
+⊲ 𝑐 = num_cell_devices
+11:
+task_mapping = templates(cell, c)
+12:
+cell_schemes.append(task_mapping)
+
+𝐻/D
+Heads
+Device D
+
+Resharding collective
+Sync. collective
+
+AllReduce
+
+AllGather
+
+Output Activation
+
+(a). MHA (TP=2), MLP (TP=2)
+
+(b). MHA (TP=2), MLP (DP=2)
+
+(c). Parallel Template for MHA
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+Figure 5: Examples of APEX’s Parallel Templates for two devices. The parameterized templates can extend to D devices.
+
+13:
+14:
+15:
+
+(MHA) cell and the multi-layer perceptron (MLP) cell, as shown
+in Figure 5 (a), tasks (e.g., attention heads) are evenly distributed
+across devices. Beyond task distribution, Parallel Templates also
+manage collective communication between adjacent cells. In Figure 5 (a), an AllReduce operation synchronizes data between cells,
+similar to the approach in Megatron-LM [41]. In Figure 5 (b), 2-way
+data parallelism (DP) is applied to the MLP cell, while no DP is
+applied to the MHA cell, leading to distinct model partitioning.
+Consequently, All-to-All and AllGather operations are performed
+for tensor resharding. While Figures 5 (a) and (b) depict simplified
+examples using two devices, Parallel Templates are fully parameterized to support any number of devices, as in Figure 5 (c), where
+𝐻 attention heads are evenly distributed across 𝐷 devices.
+Given Parallel Templates and an LLM represented in Transformer
+IR, the Parallel Scheme Generator constructs parallel schemes that
+map the LLM onto a logical device cluster [47] using different combinations of parallelism techniques. A logical device cluster is a
+virtual overlay that specifies the number of devices in a cluster without considering network topology. As a result, a parallel scheme
+defines the parallelism applied to Transformer IR cells and their
+collective communications (e.g., Figure 5 (a), (b)) without assigning
+the cells to specific physical devices. Introducing logical device
+clusters simplifies design complexity by decoupling Parallel Templates from the hierarchical network topology of physical clusters;
+the Device Mapper later handles physical mappings. The Parallel Scheme Generator follows a hierarchical top-down approach,
+starting with coarse-grained model-level parallelism and progressively refining to fine-grained cell-level parallelism. As detailed in
+Algorithm 1, the Generator first selects the degree of model-level
+data parallelism (i.e., number of model replicas) and partitions the
+cluster accordingly. APEX enforces even partitioning, restricting
+parallelism choices to divisors of the total number of devices. Next,
+the Generator determines the number of pipeline stages within
+each replica, again ensuring even partitioning. Finally, it assigns
+cell-level data parallelism and applies Parallel Templates to generate task mappings. If a cell’s data parallelism degree is lower than
+the number of assigned devices, intra-layer parallelism (e.g., tensor
+or expert parallelism) is applied. For instance, if four devices are assigned to a cell with two replicas, each replica receives two devices,
+and tensor parallelism is applied to parallelize the cell replica across
+the two devices. Lastly, for each pair of adjacent cells, the Generator
+inserts collective communication operations for synchronization
+and tensor resharding. Now that various parallel schemes have been
+
+16:
+
+for 𝑟 in 0,..., len(LLM.block.cells): do
+reshard = get_reshard_collective(cell_schemes, 𝑟 )
+stage_schemes.append(cell_schemes, reshard)
+parallel_schemes.append(stage_schemes)
+
+generated for the target model, the logical devices can be mapped
+to physical devices, producing executable parallel execution plans;
+we discuss the physical device mapping in the following subsection.
+3.2.3 Device Mapper. The Device Mapper takes the parallel schemes
+and the device cluster configuration as input, and assigns logical
+devices cluster to the physical device cluster, producing parallel
+execution plans. While the parallel schemes are generated in a
+top-down approach, the Device Mapper operates in a bottom-up
+manner. Specifically, the logical devices are first mapped to physical
+devices connected at the bottom level of the cluster, such as Level 1
+in Figure 1; if the number of logical devices exceeds the available
+physical devices at the current level, the mapping extends to the
+next higher level to include additional physical devices. Since lowerlevel connections generally offer higher bandwidth (e.g., NVLink
+in Level 1), the Device Mapper prioritizes mapping logical devices
+assigned to the same cell, as fine-grained parallelism (e.g., tensor
+parallelism) often incurs expensive collective communication (e.g.,
+AllReduce). Next, the Device Mapper maps logical devices assigned
+to the same pipeline stage, followed by those assigned to the same
+model replica, progressing through increasingly coarse-grained
+parallelisms. This bottom-up approach ensures that logical devices
+with higher communication demands are mapped to lower-level
+physical connections with greater bandwidth, while those with
+lower communication overhead are placed at higher levels. Once
+the mapping is completed, we obtain multiple parallel execution
+plans, each describing a distinct strategy for parallelizing the input
+LLM on the target cluster. Next, these plans are evaluated using the
+Batching Module and the LLM Serving Simulator.
+
+3.3
+
+Batching Module
+
+The Batching Module takes the parallel execution plans and a trace
+of requests as inputs, and simulates LLM serving system using
+iteration-level batching [45]. Request traces are often collected from
+online services like Azure LLM Inference traces [37], and each
+request comprises three key attributes: context length, generation
+length, and arrival time. As mentioned in Section 2.3, iteration-level
+batching greedily adds arriving requests to the processing batch
+whenever memory permits. Therefore, the Batching Module tracks
+5
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+Lin et al.
+
+Table 1: Detail of the request traces used for evaluation
+
+memory usage and request arrival times to determine whether new
+requests can be added to the processing batch. It maintains an active
+request list that tracks requests that are in the processing batch and
+the length of their generated tokens. When a request reaches its
+generation length, it is removed from the batch, freeing memory
+for new requests. In each iteration, one token is generated per
+active request, and the active request list is sent to the LLM Serving
+Simulator (Section 3.4) to estimate the execution time and energy
+consumption of that iteration. Due to the greedy nature of iterationlevel batching, the Batching Module may add requests that exceed
+memory capacity, as it does not pre-allocate enough memory for
+the KV cache of generated tokens. In such cases, the most recently
+added requests and their tokens are temporarily removed to free
+memory for earlier requests to complete.
+
+3.4
+
+Context Lengths
+
+Generation Lengths
+
+# of requests
+
+Summarization
+Creation
+
+2742.11±944.33
+
+172.22±73.17
+
+1188
+
+306.82±81.03
+
+1128.34±419.64
+
+Chat
+
+512
+
+73.32±148.65
+
+189.47±174.18
+
+1024
+
+operation-level profiling, measuring key transformer operations
+such as multi-head attention and general matrix multiplication.
+Since these operations are fundamental to transformer models, this
+approach allows APEX to support various LLMs without requiring
+per-model profiling. The profiling is performed across various context lengths, attention heads, hidden dimensions, etc. Additionally,
+the profiler measures collective communication overheads, including AllReduce, ReduceScatter, etc., across different data transfer
+sizes, device counts, and number of nodes. By covering a wide range
+of computation and communication configurations, the profiling
+results facilitate accurate estimation of execution time and energy
+consumption across different LLMs, device clusters, and parallel
+execution plans. Notably, profiling is a one-time cost when porting
+to a new cluster and can be amortized across multiple simulations.
+
+LLM Serving Simulator
+
+The LLM Serving Simulator estimates the execution time and energy consumption for each iteration based on active requests from
+the Batching Module and Profiling Results. The Profiling Results
+provide execution times and energy consumptions for key operations such as multi-head attention under various configurations
+(e.g., number of attention heads, feature dimensions). If a specific
+data point is missing, the Simulator applies linear interpolation
+between the nearest profiling data points. We discuss the profiling process in detail in the next subsection and focus here on the
+Simulator’s execution process. The Simulator estimates the time to
+process the requests in the active request list. For requests in prefill
+stage, execution time is estimated by querying the profiling results
+with the full context length, as the entire sequence is processed
+in parallel. For requests in decode stage, only the current token
+is processed, reducing the effective context length to one. If there
+are 𝑛 decode requests, execution time is estimated using context
+length 𝑛, since all decode requests (each with an effective context
+length of one) are processed in parallel. The Simulator estimates
+energy consumption in a similar fashion by querying the profiling
+results for the energy consumed by each operation. To reduce simulation overhead, the Simulator leverages the repetitive structure of
+LLMs by simulating only a single Transformer block, which is the
+smallest set of non-repetitive cells of a LLM (Section 3.2.1). APEX
+then extrapolates the results to estimate the execution time and
+energy consumption of the full model. For example, the execution
+time of the iteration is extrapolated by taking the maximum across
+all pipeline stages, since the latency is determined by the slowest
+pipeline stage. In contrast, energy consumption is computed as the
+sum across all stages, as all devices contribute to energy usage. The
+Simulator also tracks key LLM serving metrics such as time to first
+token, time per output token, P95 latency, Model FLOPs Utilization,
+and Model Bandwidth Utilization; these metrics allow APEX to
+evaluate the parallel execution plans comprehensively and pick an
+optimal plan based on a user’s desired metric(s).
+
+3.5
+
+Traces
+
+4 Experimental Results
+4.1 Experimental Setup
+To evaluate APEX, we choose a broad range of LLMs and datasets
+with distinct workloads. We discuss the setup details below.
+Models: For evaluation, we choose four state-of-the-art LLMs:
+Llama-3.1-70B-Instruct, Llama-3.1-405B-Instruct [12], Mistral-LargeInstruct (123B) [21], and Mixtral 8x22B-Instruct [22]; This covers
+a myriad of LLMs in different sizes and also a Mixture-of-Expert
+(MoE) model. While the models use half-precision (FP16) by default,
+we also test cases where the model is quantized to FP8 format.
+Datasets: We prepared three sets of request traces derived from
+distinct datasets: a paper summarization dataset [9], a news abstract summarization dataset [13], and a conversational dataset,
+LMSYS-Chat-1M [48]. These datasets represent three distinct workloads. The paper summarization [9] exemplifies a prefill-intensive
+workload, which has a long context length and short generation
+length. To create a generation-intensive workload with short context and long generation lengths, we modify the news abstract
+summarization dataset [13] by appending the following prompt:
+“Generate a long story using the provided abstract." This prompts the
+LLM to produce a long story from a short abstract, resulting in a
+generation-intensive workload. The LMSYS-Chat-1M [48] dataset
+collects real-world conversations between users and LLMs. Most requests in this dataset feature short context and generation lengths,
+representing a lightweight conversational workload. We randomly
+subsampled between 512 and 1188 requests from each dataset to
+produce our request traces. We refer to these traces as Summarization (paper summarization), Creation (news generation), and Chat
+(LMSYS-Chat-1M) in the following sections. We assume a Poisson
+distribution [10] for request arrival times. Details of the request
+traces are listed in Table 1.
+Hardware Platform and Serving Systems: We run APEX simulation using an Intel Xeon 6530 CPU and validated the simulation
+
+Profiling Results
+
+The profiling results are collected offline and used as system data
+(Figure 2) during simulation. An Offline Profiler collects platformspecific performance data, which is used by the LLM Serving Simulator to estimate execution time and energy consumption. Instead of profiling each LLM exhaustively, the Profiler performs
+6
+
+APEX: An Extensible and Dynamism-Aware Simulator for Automated Parallel Execution in LLM Serving
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+Table 2: APEX simulation results: End-to-end latency (seconds). APEX demonstrates its ability to identify optimal parallel
+execution plans, achieving superior serving performance compared to heuristic baseline plans.
+Traces
+
+Model
+Llama-3.1-70B
+
+Summarization
+
+Mistral-Large
+Mixtral-8x22B
+Llama-3.1-70B
+
+Creation
+
+Mistral-Large
+Mixtral-8x22B
+Llama-3.1-70B
+
+Chat
+
+Mistral-Large
+Mixtral-8x22B
+
+Arrival Rate
+
+Baseline
+
+Feasible Optimal
+
+APEX Optimal
+
+0.25
+0.5
+0.25
+0.5
+0.25
+0.5
+0.25
+0.5
+0.25
+0.5
+0.25
+0.5
+0.25
+0.5
+0.25
+0.5
+0.25
+0.5
+
+1998.82 (1×)
+1565.11 (1×)
+2210.05 (1×)
+1683.00 (1×)
+2005.06 (1×)
+1618.54 (1×)
+4027.70 (1×)
+1869.45 (1×)
+3561.55 (1×)
+2560.70 (1×)
+2645.79 (1×)
+1393.19 (1×)
+1622.48 (1×)
+1344.42 (1×)
+2041.91 (1×)
+1594.74 (1×)
+1938.26 (1×)
+1507.11 (1×)
+
+1340.99 (1.49×)
+1225.38 (1.28×)
+1624.17 (1.36×)
+1483.38 (1.14×)
+1753.79 (1.14×)
+1473.79 (1.10×)
+2301.54 (1.75×)
+1639.87 (1.14×)
+2268.50 (1.57×)
+2016.30 (1.27×)
+2593.91 (1.02×)
+1386.16 (1.01×)
+1118.85 (1.45×)
+1021.09 (1.32×)
+1423.44 (1.43×)
+1356.52 (1.18×)
+1658.22 (1.17×)
+1380.34 (1.09×)
+
+1175.09 (1.70×)
+1140.19 (1.37×)
+1514.19 (1.46×)
+1420.98 (1.18×)
+859.83 (2.33×)
+856.84 (1.89×)
+1945.75 (2.07×)
+1133.05 (1.65×)
+1496.45 (2.38×)
+1313.18 (1.95×)
+1496.45 (1.77×)
+1035.62 (1.35×)
+824.43 (1.97×)
+808.96 (1.66×)
+1182.75 (1.73×)
+1102.20 (1.45×)
+575.12 (3.37×)
+567.53 (2.66×)
+
+results against the actual performance of LLM serving on a GPU
+cluster. We deployed vLLM [24] v0.6.0 and SGLang v0.4.5 [49] to
+configure LLM online servers on three GPU clusters: (1) a Singlenode H100 cluster equipped with 8 Nvidia H100 SXM GPUs, each
+with 80 GB of GPU memory, (2) a Multi-node H100 Cluster consisting of two nodes, each with 8 Nvidia H100 SXM GPUs, and (3) a
+H200 Cluster (single-node) that has 8 Nvidia H200 SXM GPUs.
+
+4.2
+
+LLMs. We also conduct experiments using two different arrival
+rates for the requests, assuming a Poisson distribution [10]. To explore different quantization formats, we quantize the Mistral-Large
+model using FP8 for the KV cache, as well as the weights and activations (i.e., W8A8). APEX identifies optimal parallel execution plans
+for both dense and sparse LLMs (i.e, MoE models), and the Feasible
+Optimal plans consistently deliver performance improvement over
+the baseline, achieving up to 1.75× speedup in terms of end-to-end
+serving latency. Furthermore, assuming cell-level data parallelism
+is supported, APEX Optimal Plans achieve speedups of up to 3.37×.
+In this experiment, we demonstrate APEX is able to identify an
+optimal parallel execution plan that improves LLM serving latency
+under various LLMs and request traces. The identified optimal plans
+consist of various combinations of data, pipeline, and tensor parallelism, effectively balancing the trade-offs of various factors (e.g.,
+compute, memory, network traffic) to outperform the baseline plan,
+which only relies on tensor parallelism. While the optimal plans
+are different from task to task, we observe that incorporating data
+parallelism (DP) often yields performance benefits. Many of the
+identified optimal plans set the degree of DP to 2. Existing LLM
+serving systems often overlook DP, assuming it is prohibitively
+memory-intensive. Instead, our results demonstrate that trading
+memory efficiency for reduced communication overhead can lead
+to performance improvements. We also observe that the Feasible
+Optimal plan of Mixtral-8x22B shows only marginal improvement
+over the baseline on the Creation trace. This is due to the dominating role of memory utilization in this setup, leaving fewer trade-offs
+available for performance improvement. Specifically, Mixtral-8x22B,
+with its 141B parameters, heavily utilizes memory resources, and
+the Creation traces’s generation-intensive nature further increases
+memory demands due to extensive KV caching. Under these conditions, the baseline plan, which adopts pure tensor parallelism,
+performs well owing to its high memory efficiency. Nevertheless,
+the APEX Optimal plan still manages to deliver a 1.77× speedup by
+enabling cell-level DP.
+
+Evaluation of APEX’s prediction
+
+In this experiment, we address the following research question:
+Can APEX improve LLM serving performance by identifying
+optimal parallel execution plans? For evaluation, we design
+multiple tasks, with each task comprising an LLM, request trace,
+and arrival rate. We run APEX simulation for each task and compare
+the end-to-end serving latency of the following three plans:
+1. Baseline plan: We follow the commonly-used heuristics [34, 43],
+which applies tensor parallelism within the same node and pipeline
+parallelism across nodes.
+2. APEX Optimal plan: APEX identifies an optimal plan for each
+task. However, APEX’s search space extends beyond the capabilities
+of current LLM serving systems, including advanced features like
+cell-level data parallelism. As a result, an execution plan may not be
+fully supported by existing LLM serving systems. Still, we include
+the results to showcase the potential performance gains that can be
+achieved by supporting a broader range of parallelism techniques.
+3. Feasible Optimal plan: This is the optimal plan identified by
+APEX under the constraint that only parallelism techniques supported by current LLM serving systems are used. Due to the reduced
+search space, the feasible optimal plan may achieve lower performance compared to the unconstrained APEX Optimal plan.
+4.2.1 Single-Node H100 cluster. We first evaluate APEX on a singlenode cluster with 8 H100 GPUs and show the experimental results
+in Table 2. We experiment with the three request traces and three
+7
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+Lin et al.
+
+Table 3: End-to-End latency (sec.). APEX identifies optimal
+execution plans for different clusters
+Model & Cluster
+
+Traces
+
+Baseline
+
+APEX Optimal
+
+Llama-3.1-405B
+(Multi-Node H100)
+
+Summ.
+Creation
+Chat
+
+4077.88
+2314.25
+2645.89
+
+2519.12 (1.62×)
+1229.14 (1.88×)
+1710.10 (1.55×)
+
+Llama-3.1-70B
+(H200)
+
+Summ.
+Creation
+Chat
+
+1433.21
+1128.66
+1189.00
+
+897.95 (1.60×)
+667.85 (1.69×)
+536.74 (2.22×)
+
+Mistral-Large
+(H200)
+
+Summ.
+Creation
+Chat
+
+1595.24
+1389.19
+1515.41
+
+1174.79 (1.36×)
+776.08 (1.79×)
+961.59 (1.56×)
+
+Mixtral-8x22B
+(H200)
+
+Summ.
+Creation
+Chat
+
+1540.42
+1380.75
+1380.76
+
+706.06 (2.18×)
+993.34 (1.39×)
+500.32 (2.76×)
+
+Table 4: APEX identifies plans optimized toward energy
+Traces
+
+Exe. Plans
+(GPU Freq., GHz)
+
+Energy
+(KJ)
+
+TTFT
+(ms)
+
+TPOT
+(ms)
+
+Summ.
+
+Latency opt. (2.0)
+Energy opt. (2.0)
+Energy opt. (0.8)
+
+4.095
+3.293
+2.265
+
+788.67
+992.69
+1485.94
+
+32.06
+26.89
+33.62
+
+Creation
+
+Latency opt. (2.0)
+Energy opt. (2.0)
+Energy opt. (0.8)
+
+8.388
+8.277
+5.016
+
+44.67
+54.59
+75.70
+
+18.83
+20.63
+34.59
+
+generally yield better energy efficiency than the baseline plans due
+to shorter runtime. However, latency-optimal plans are not necessarily energy-optimal. We observe that energy efficiency varies
+across operations of different input sizes, and some operations consume disproportionately more energy; investigating the underlying
+cause of this phenomenon is beyond the scope of this work, and we
+instead focus on leveraging the collected profiling results to identify energy-efficient execution plans. APEX evaluates the energy
+consumption across various parallel execution plans and identifies
+the energy-optimal plan. Reported in the second rows of Table 4,
+energy-optimal plans reduce energy consumption by up to 19%
+compared to latency-optimal plans. For systems with more relaxed
+SLOs, service providers may further reduce energy consumption
+by lowering GPU frequency. In the third rows of Table 4, APEX
+identifies optimal plans under 0.8 GHz of GPU frequency, reducing
+energy consumption by 45% and 41% on the Summarization and
+Creation traces, respectively. While this results in increased TTFT
+(up to 1.9×) and TPOT (up to 1.8×), such increases may still be
+acceptable in practice, for instance, when the TPOT requirement is
+50 ms. These results show that APEX enables service providers to
+make informed trade-offs between latency and energy efficiency.
+
+4.2.2 Multi-Node H100 Cluster. Next, we evaluate APEX on a twonode cluster, each node contains 8 NVIDIA H100 SXM GPUs, identical to the setup in Section 4.2.1. We use Llama-3.1-405B, one of
+the largest publicly available LLMs for evaluation on this cluster.
+Results are presented in the first row of Table 3. Due to space constraints, we report only the Baseline Plan and APEX Optimal Plan
+under an arrival rate of 0.5. Experimental results show that APEX
+consistently identifies execution plans that outperform the baseline,
+achieving speedups ranging from 1.55× to 1.88×. These findings
+demonstrate APEX’s ability to scale effectively to multi-node clusters and extremely large models, continuing to identify performant
+execution plans under increased system complexity.
+4.2.3 H200 Cluster. We also evaluate APEX on a cluster with 8
+NVIDIA H200 GPUs. Compared to the H100 (80 GB HBM), the H200
+offers the same compute and peak performance but with increased
+memory capacity (141 GB HBM). This expanded memory enables
+the H200 cluster to explore a larger design space, allowing for more
+flexible trade-offs between parallelism strategies. As shown in last
+three rows of Table 3, APEX finds simulation plans that lead to up
+to 2.76× speedup compared to the baseline plan. Notably, APEX
+recommends different optimal plans for the H200 and H100 clusters
+under the same experimental setup. For instance, when serving the
+Summarization trace with the Mistral-Large model, APEX suggests
+2-way data parallelism for H100, and 4-way data parallelism plan
+for H200. While the H200 plan incurs higher memory overhead, it
+reduces communication overhead, making the trade-off favorable
+due to the H200’s larger memory capacity.
+
+4.3
+
+Evaluation of Simulation Fidelity
+
+In this experiment, we address the following research question:
+Can APEX provide high-fidelity simulation for LLM serving?
+While we demonstrate in Section 4.2 that APEX can identify optimal
+parallel execution plans that enhance LLM serving performance, it
+is also essential to verify the fidelity of its simulation results. We
+evaluate the simulation fidelity from two perspectives. First, under
+a fixed number of devices, we assess whether APEX can accurately
+predict the performance improvement of an optimal plan compared
+to a baseline plan. Second, for a given execution plan, we evaluate
+whether APEX can reliably predict performance improvements
+when scaling across different numbers of devices. We show the
+experimental results in Figure 6 and Figure 7.
+For the first experiment set, we compare the predicted speedup
+of Feasible Optimal plans with the actual speedup achieved on the
+device cluster (Figure 6). We use vLLM [24] to serve Llama-3.170B and Mistral-Large, and use SGLang [49] for Mixtral-8x22B as
+vLLM does not support expert parallelism (EP) at the time of our
+experiments. APEX achieves accurate predictions, with an average
+relative error of 10.7%. The main discrepancy lies in the predictions for Mixtral-8x22B. APEX estimates that applying EP would
+outperform tensor parallelism (TP) due to the lower overhead of
+
+4.2.4 Optimize Towards Energy Efficiency. For service providers,
+latency is not the only metric that matters. Rather than minimizing inference time at all costs, providers are typically required to
+meet specific service-level objectives (SLOs), allowing room to optimize other metrics as long as the SLOs are satisfied. One critical
+metric is energy consumption, which directly impacts both operational costs and carbon emissions. APEX supports optimizing
+for energy consumption by profiling not only execution time but
+also the energy usage of operations. We demonstrate this capability in Table 4, which presents results for serving a Llama-3.1-70B
+model on a cluster with 8 H100 GPUs. The first rows report latencyoptimal plans (i.e., the APEX Optimal Plans in Table 2), which
+8
+
+APEX: An Extensible and Dynamism-Aware Simulator for Automated Parallel Execution in LLM Serving
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+5%
+
+2
+
+9%
+3%
+
+1.6
+
+6%
+
+5%
+
+Sim. time (sec.)
+
+Speedup over the baseline
+
+2.4
+
+8%
+28%
+
+1.2
+
+17%
+
+15%
+
+0.8
+0.4
+
+Summ. Creation Chat
+
+Summ. Creation Chat
+
+Summ. Creation Chat
+
+Llama-3.1-70B
+
+Mistral-Large
+
+Mixtral-8x22B
+
+Predicted Speedup (APEX)
+
+4.4
+
+Actual Speedup
+
+2
+
+4
+
+8
+APEX
+
+Llama-Creation
+
+30
+
+10
+0
+2
+
+4
+
+8
+
+4
+
+8
+
+Mistral-Creation
+
+40
+30
+20
+
+50
+40
+30
+20
+10
+0
+
+Actual
+
+Mistral-Summarization
+
+2
+
+Actual
+50
+40
+30
+20
+10
+0
+
+20
+
+40
+30
+20
+10
+0
+
+50
+40
+30
+20
+10
+0
+
+Actual
+
+0
+
+APEX
+
+10
+
+APEX
+
+20
+
+60
+50
+40
+30
+20
+10
+0
+
+Actual
+
+Llama-Summarization
+
+Actual
+
+APEX
+
+10
+16
+
+32B
+1 node
+2 GPUs
+
+70B
+1 node
+4 GPUs
+
+123B
+1 node
+8 GPUs
+
+32
+
+64
+
+128
+
+405B
+4 nodes
+32 GPUs
+256
+
+512
+
+1120B
+8 nodes
+64 GPUs
+1024
+
+Model size (biliion parameters)
+
+10
+0
+2
+
+4
+
+Evaluation of Efficiency
+
+We evaluate the efficiency of APEX by comparing the APEX simulation time with the actual execution time on the device cluster.
+Evaluating all parallel execution plans across the setups in Table
+2 (i.e., different models, traces, arrival rates) takes approximately
+160 hours on 8 H100 GPUs. In contrast, the same evaluation is completed in less than 2.5 hours using APEX on a CPU, making it 71×
+faster than the actual deployment. From a cost perspective, running the actual implementation would cost approximately $8,889
+(based on the Azure NC40ads H100 cluster pricing), whereas the
+APEX simulation costs only $7.20 (assuming an Azure D64s v6 CPU
+node). This translates to a 1234.5× cost reduction, demonstrating
+the significant time efficiency and cost-effectiveness of APEX. Obtaining the operation-level profiling results to set up APEX takes
+approximately 40 GPU hours. Yet, this is a one-time cost that can
+be amortized for the same type of device cluster.
+We also evaluate the simulation overhead when scaling to larger
+LLMs on larger device clusters. We use the following example
+models: Qwen2.5-32B, Llama-3.1-70B, Mistral-Large, and Llama3.1-405B. We synthesize a trillion-scale model by scaling the Llama3.1-70B model 16 times; this is done by modifying values in the
+LLM configuration file [18]. As shown in Figure 8, APEX demonstrates high scalability, maintaining a similar simulation overhead
+when scaling from a 32B to a trillion-scale model. This efficiency is
+achieved by leveraging the canonical representation of Transformer
+IR (Section 3.2.1) and the repetitive structure of the transformer
+architecture to reduce the design space. This scalability highlights
+APEX’s potential for future applications, as model sizes continue
+to grow and the cost of actual deployment become more expensive.
+
+Figure 6: Speedup predicted by APEX vs. actual speedup
+achieved. APEX accurately predicts the speedup of adopting an optimal execution plan over the baseline plan.
+
+APEX
+
+100
+
+Figure 8: APEX maintains similar simulation overhead when
+scaling from billion-scale to trillion-scale models
+
+0
+
+30
+
+1000
+
+8
+
+Figure 7: APEX accurately predicts the scalability trend
+across varying numbers of GPUs, as measured by TPOT (ms)
+
+All-to-All communication in EP, compared to the AllReduce operations required in TP. However, when serving with SGLang, we
+observe that TP consistently outperforms EP across experiments.
+A potential reason is that the current implementation of EP may
+not be as well-optimized as TP, leading to higher-than-expected
+overheads during execution.
+For the second experiment set, we evaluate the time per output
+token (TPOT) across different numbers of GPUs using tensor parallelism. We show the results in Figure 7. The APEX prediction results
+are shown as green solid lines, while the actual results are represented by red dotted lines. The high similarity between the two
+lines across all cases demonstrates that APEX accurately captures
+the scalability trend when scaling from 2 GPUs to 8 GPUs across
+various models and request traces. The estimated TPOT (ms) of
+APEX is plotted on the left-hand Y-axis, and the actual TPOT (ms) is
+plotted on the right-hand Y-axis. The actual measured TPOT is consistently higher than the predicted value, as evident from the larger
+values on the right-hand Y-axis compared to the left-hand Y-axis.
+This is because APEX focuses on the overhead of key operations,
+such as attention and feedforward, while omitting the overhead
+of other operations. Nevertheless, APEX accurately captures the
+relative performance differences between various parallel execution
+plans and degrees of parallelism, as demonstrated in Figure 6 and 7.
+This capability enables APEX to effectively evaluate and compare
+different execution plans, thereby identifying an optimal parallel
+execution plan for LLM serving.
+
+4.5
+
+Evaluation of Extensibility
+
+While APEX supports a wide range of models, devices, etc., the
+simulator may still become outdated as new advancements emerge.
+To address this, APEX is designed for extensibility, enabling easy
+adaptation to support the latest developments. We evaluate APEX’s
+extensibility by measuring the overheads to implement a new feature. We use two metrics: (1) programming overhead, measured in
+lines of code required for a feature extension, and (2) implementation time overhead, measured in hours, including time to write and
+execute the code or scripts. We reported the overhead of various
+types of extensions in Table 5 and discuss the details below.
+Extending to New Models APEX can effortlessly support a new
+LLM without additional programming or implementation time by
+requiring only a configuration file [18] of the model. However, for
+LLMs containing unknown transformer cells (Section 3.2.1), such
+as a novel feedforward network, additional effort is needed. The
+primary work involves implementing the Parallel Template (Section
+9
+
+Lin et al.
+
+Implementation Time
+Overhead (Hour)
+
+LLM
+LLM (w/ unknown cells)
+Device cluster
+Batching Mechansim
+Parallelism
+
+0
+50 - 150
+∼20
+∼100
+50 - 200
+
+∼0
+1-2
+6-8
+1-2
+1-2
+
+2000
+
+16
+14
+
+1500
+1000
+
+12
+
+500
+0
+
+10
+4
+8
+12 16 20
+Max. batch size constraint
+
+E2E Latency
+TPOT
+2500
+2000
+1500
+1000
+500
+
+Mistral-Large
+
+0
+
+20
+18
+16
+14
+12
+10
+
+4
+8
+12
+16
+20
+Max. batch size constraint
+
+Figure 9: APEX can simulate with various maximum batch
+size constraints and suggest adjustments to meet SLOs.
+
+3.2.2) for the new cells. For evaluation, we measured the effort to
+support SwiGLU cells [40] used in the Llama-3.1 models.
+Extending to New Device Cluster APEX can easily adapt to new
+device clusters by providing the device name, memory capacity,
+and interconnection network (e.g., NVLink, PCIe). We evaluated the
+effort required to support a new GPU model. The implementation
+time overhead mainly involves running profiling scripts, which take
+6 to 8 hours. While extending to new devices requires a relatively
+long profiling time, this is a one-time effort that can be amortized.
+Extending to New Batching Mechanism APEX also supports
+new batching mechanisms. While this is not as straightforward as
+supporting a new model or a new device cluster, it can be done
+by modifying the Batching Module (Section 3.3). APEX adopts
+contiguous batching [24, 49] by default. We evaluate the overhead
+of extending to support a Sarathi-Serve-style [2] batching, which
+performs chunked prefill to better interleave prefill and decode
+requests. This extension is done by adding a new variable, chunk
+size, to the Batching Module and a counter to each request to ensure
+all prefill chunks are completed before moving to the decode stage.
+Extending to New Parallelism The overhead of extending to
+new parallelisms depends on the specific parallelism being added.
+For example, supporting a new intra-layer parallelism is analogous
+to supporting a new transformer cell, as it requires adding a new
+Parallel Template. Similarly, Fully Sharded Data Parallelism (FSDP)
+can be integrated into APEX by extending the existing DP implementation, incorporating additional collective communications and
+adjusting memory usage for the sharded model storage.
+
+4.6
+
+Llama-3.1-70B
+
+E2E latency (sec.)
+
+Programming Overhead
+(Lines of Code)
+
+E2E latency (sec.)
+
+Extension Type
+
+2500
+
+TPOT (ms)
+
+Table 5: Evaluating the overhead of extending APEX
+
+TPOT (ms)
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+this trade-off, as shown in Figure 9, where setting the batch size
+constraint to 4 leads to degraded end-to-end serving latency.
+
+5
+
+Related Work
+
+LLM Serving Systems: With the emergence of LLMs, numerous
+LLM serving systems have been proposed [2, 24, 36, 37, 45, 52]. Each
+system introduces innovations to address key challenges in LLM
+serving. Orca [45] introduced iteration-level batching, significantly
+improving serving throughput. This technique has since become a
+standard in LLM serving systems. vLLM [24] proposed PagedAttention, an efficient method to manage KV cache memory usage,
+enabling more concurrent request batching. DistServe and Splitwise [37, 52] disaggregate the prefill and decode stages, processing
+stage separately (e.g., using different clusters, applying different
+optimizations) for better serving performance. While these systems
+allow users to manually specify the degree of parallelisms, they do
+not provide guidance on determining these configurations. APEX
+complements these works by automatically identifying optimal
+plans, which can be used to configure these serving systems.
+Configuration Searching Tools: LLM-Pilot [25] proposes a predictive model to help users select the most cost-effective hardware
+for serving LLMs. DynamoLLM [42] proposes a framework to automatically reconfigure the cluster to optimize the energy efficiency
+of LLM serving. However, both LLM-Pilot and DynamoLLM only
+consider tensor parallelism and can be further enhanced by incorporating hybrid parallelisms, as supported by APEX. Calculon
+[20] introduces a performance model to identify optimal execution
+plans for LLM training, while vTrain [4] and ASTRA-sim [39] adopt
+simulator-based approaches to achieve the same goal. Nevertheless, these solutions are tailored to training workloads and do not
+address the unique challenges of LLM serving, particularly the dynamism introduced by iteration-level batching. LLMServingSim [7]
+and Vidur [1] are the few frameworks designed for LLM serving.
+Yet, LLMServingSim primarily focuses on NPUs and Processing-inMemory architectures, and it relies on their corresponding hardware simulators to estimate execution times. In contrast, APEX
+utilizes operation-level profiling data to estimate execution time
+and does not rely on other hardware simulators. Vidur requires a
+model onboarding step before simulation, which involves parsing
+the operations within the target LLM and profiling them. APEX
+bypasses this requirement by capturing the key operations of LLMs
+and utilizing pre-collected profiling results, allowing simulations
+to start immediately with amortized profiling costs. In addition,
+neither LLMServingSim nor Vidur supports energy-aware optimization, a critical requirement for LLM service providers. They
+also lack support for emerging LLM serving needs, such as Mixtureof-Experts models, quantization formats, and multi-node clusters.
+
+Beyond Identifying Optimal Execution Plan
+
+The high simulation fidelity makes APEX applicable to other use
+cases beyond identifing optimal execution plans. For example, APEX
+can help service providers meet various service-level objectives
+(SLOs), such as maintaining a target time per output token (TPOT).
+A common strategy to meet latency requirements is to adjust the
+batch size by setting a maximum batch size constraint. APEX begins
+by simulating a subset of requests to determine an upper bound for
+the batch size, denoted as 𝑚. It then divides this upper bound into
+𝑛 segments and simulates the request traces with various batch
+𝑛×𝑚
+size constraints, ranging from 1×𝑚
+𝑛 to 𝑛 , where 𝑛 is determined
+heuristically. Figure 9 illustrates two examples using the Llama3.1-70B and Mistral-Large models on the Creation trace. Suppose a
+service provider aims to reduce TPOT to meet an SLO. Based on
+APEX’s results, they can estimate the required adjustment to the
+batch size constraint. For instance, reducing the maximum batch
+size from 16 to 8 yields a TPOT improvement of 18% for Llama
+and 14% for Mistral. However, overly restricting the maximum
+batch size may negatively affect performance; APEX also captures
+10
+
+APEX: An Extensible and Dynamism-Aware Simulator for Automated Parallel Execution in LLM Serving
+
+6
+
+Conlusion
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+Danielle Pintz, Danny Livshits, David Esiobu, Dhruv Choudhary, Dhruv Mahajan,
+Diego Garcia-Olano, Diego Perino, Dieuwke Hupkes, Egor Lakomkin, Ehab AlBadawy, Elina Lobanova, Emily Dinan, Eric Michael Smith, Filip Radenovic, Frank
+Zhang, Gabriel Synnaeve, Gabrielle Lee, Georgia Lewis Anderson, Graeme Nail,
+Gregoire Mialon, Guan Pang, Guillem Cucurell, Hailey Nguyen, Hannah Korevaar, Hu Xu, Hugo Touvron, Iliyan Zarov, Imanol Arrieta Ibarra, Isabel Kloumann,
+Ishan Misra, Ivan Evtimov, Jade Copet, Jaewon Lee, Jan Geffert, Jana Vranes,
+Jason Park, Jay Mahadeokar, Jeet Shah, Jelmer van der Linde, Jennifer Billock,
+Jenny Hong, Jenya Lee, Jeremy Fu, Jianfeng Chi, Jianyu Huang, Jiawen Liu, Jie
+Wang, Jiecao Yu, Joanna Bitton, Joe Spisak, Jongsoo Park, Joseph Rocca, Joshua
+Johnstun, Joshua Saxe, Junteng Jia, Kalyan Vasuden Alwala, Kartikeya Upasani,
+Kate Plawiak, Ke Li, Kenneth Heafield, Kevin Stone, Khalid El-Arini, Krithika
+Iyer, Kshitiz Malik, Kuenley Chiu, Kunal Bhalla, Lauren Rantala-Yeary, Laurens
+van der Maaten, Lawrence Chen, Liang Tan, Liz Jenkins, Louis Martin, Lovish
+Madaan, Lubo Malo, Lukas Blecher, Lukas Landzaat, Luke de Oliveira, Madeline Muzzi, Mahesh Pasupuleti, Mannat Singh, Manohar Paluri, Marcin Kardas,
+Mathew Oldham, Mathieu Rita, Maya Pavlova, Melanie Kambadur, Mike Lewis,
+Min Si, Mitesh Kumar Singh, Mona Hassan, Naman Goyal, Narjes Torabi, Nikolay
+Bashlykov, Nikolay Bogoychev, Niladri Chatterji, Olivier Duchenne, Onur Çelebi,
+Patrick Alrassy, Pengchuan Zhang, Pengwei Li, Petar Vasic, Peter Weng, Prajjwal
+Bhargava, Pratik Dubal, Praveen Krishnan, Punit Singh Koura, Puxin Xu, Qing
+He, Qingxiao Dong, Ragavan Srinivasan, Raj Ganapathy, Ramon Calderer, Ricardo Silveira Cabral, Robert Stojnic, Roberta Raileanu, Rohit Girdhar, Rohit Patel,
+Romain Sauvestre, Ronnie Polidoro, Roshan Sumbaly, Ross Taylor, Ruan Silva,
+Rui Hou, Rui Wang, Saghar Hosseini, Sahana Chennabasappa, Sanjay Singh, Sean
+Bell, Seohyun Sonia Kim, Sergey Edunov, Shaoliang Nie, Sharan Narang, Sharath
+Raparthy, Sheng Shen, Shengye Wan, Shruti Bhosale, Shun Zhang, Simon Vandenhende, Soumya Batra, Spencer Whitman, Sten Sootla, Stephane Collot, Suchin
+Gururangan, Sydney Borodinsky, Tamar Herman, Tara Fowler, Tarek Sheasha,
+Thomas Georgiou, Thomas Scialom, Tobias Speckbacher, Todor Mihaylov, Tong
+Xiao, Ujjwal Karn, Vedanuj Goswami, Vibhor Gupta, Vignesh Ramanathan, Viktor Kerkez, Vincent Gonguet, Virginie Do, Vish Vogeti, Vladan Petrovic, Weiwei
+Chu, Wenhan Xiong, Wenyin Fu, Whitney Meers, Xavier Martinet, Xiaodong
+Wang, Xiaoqing Ellen Tan, Xinfeng Xie, Xuchao Jia, Xuewei Wang, Yaelle Goldschlag, Yashesh Gaur, Yasmine Babaei, Yi Wen, Yiwen Song, Yuchen Zhang, Yue
+Li, Yuning Mao, Zacharie Delpierre Coudert, Zheng Yan, Zhengxing Chen, Zoe
+Papakipos, Aaditya Singh, Aaron Grattafiori, Abha Jain, Adam Kelsey, Adam
+Shajnfeld, Adithya Gangidi, Adolfo Victoria, Ahuva Goldstand, Ajay Menon,
+Ajay Sharma, Alex Boesenberg, Alex Vaughan, Alexei Baevski, Allie Feinstein,
+Amanda Kallet, Amit Sangani, Anam Yunus, Andrei Lupu, Andres Alvarado,
+Andrew Caples, Andrew Gu, Andrew Ho, Andrew Poulton, Andrew Ryan, Ankit
+Ramchandani, Annie Franco, Aparajita Saraf, Arkabandhu Chowdhury, Ashley
+Gabriel, Ashwin Bharambe, Assaf Eisenman, Azadeh Yazdan, Beau James, Ben
+Maurer, Benjamin Leonhardi, Bernie Huang, Beth Loyd, Beto De Paola, Bhargavi
+Paranjape, Bing Liu, Bo Wu, Boyu Ni, Braden Hancock, Bram Wasti, Brandon
+Spence, Brani Stojkovic, Brian Gamido, Britt Montalvo, Carl Parker, Carly Burton, Catalina Mejia, Changhan Wang, Changkyu Kim, Chao Zhou, Chester Hu,
+Ching-Hsiang Chu, Chris Cai, Chris Tindal, Christoph Feichtenhofer, Damon
+Civin, Dana Beaty, Daniel Kreymer, Daniel Li, Danny Wyatt, David Adkins, David
+Xu, Davide Testuggine, Delia David, Devi Parikh, Diana Liskovich, Didem Foss,
+Dingkang Wang, Duc Le, Dustin Holland, Edward Dowling, Eissa Jamil, Elaine
+Montgomery, Eleonora Presani, Emily Hahn, Emily Wood, Erik Brinkman, Esteban Arcaute, Evan Dunbar, Evan Smothers, Fei Sun, Felix Kreuk, Feng Tian,
+Firat Ozgenel, Francesco Caggioni, Francisco Guzmán, Frank Kanayet, Frank
+Seide, Gabriela Medina Florez, Gabriella Schwarz, Gada Badeer, Georgia Swee,
+Gil Halpern, Govind Thattai, Grant Herman, Grigory Sizov, Guangyi, Zhang,
+Guna Lakshminarayanan, Hamid Shojanazeri, Han Zou, Hannah Wang, Hanwen
+Zha, Haroun Habeeb, Harrison Rudolph, Helen Suk, Henry Aspegren, Hunter
+Goldman, Ibrahim Damlaj, Igor Molybog, Igor Tufanov, Irina-Elena Veliche, Itai
+Gat, Jake Weissman, James Geboski, James Kohli, Japhet Asher, Jean-Baptiste
+Gaya, Jeff Marcus, Jeff Tang, Jennifer Chan, Jenny Zhen, Jeremy Reizenstein,
+Jeremy Teboul, Jessica Zhong, Jian Jin, Jingyi Yang, Joe Cummings, Jon Carvill,
+Jon Shepard, Jonathan McPhie, Jonathan Torres, Josh Ginsburg, Junjie Wang, Kai
+Wu, Kam Hou U, Karan Saxena, Karthik Prasad, Kartikay Khandelwal, Katayoun
+Zand, Kathy Matosich, Kaushik Veeraraghavan, Kelly Michelena, Keqian Li, Kun
+Huang, Kunal Chawla, Kushal Lakhotia, Kyle Huang, Lailin Chen, Lakshya Garg,
+Lavender A, Leandro Silva, Lee Bell, Lei Zhang, Liangpeng Guo, Licheng Yu,
+Liron Moshkovich, Luca Wehrstedt, Madian Khabsa, Manav Avalani, Manish
+Bhatt, Maria Tsimpoukelli, Martynas Mankus, Matan Hasson, Matthew Lennie,
+Matthias Reso, Maxim Groshev, Maxim Naumov, Maya Lathi, Meghan Keneally,
+Michael L. Seltzer, Michal Valko, Michelle Restrepo, Mihir Patel, Mik Vyatskov,
+Mikayel Samvelyan, Mike Clark, Mike Macey, Mike Wang, Miquel Jubert Hermoso, Mo Metanat, Mohammad Rastegari, Munish Bansal, Nandhini Santhanam,
+Natascha Parks, Natasha White, Navyata Bawa, Nayan Singhal, Nick Egebo,
+Nicolas Usunier, Nikolay Pavlovich Laptev, Ning Dong, Ning Zhang, Norman
+Cheng, Oleg Chernoguz, Olivia Hart, Omkar Salpekar, Ozlem Kalinli, Parkin Kent,
+Parth Parekh, Paul Saab, Pavan Balaji, Pedro Rittner, Philip Bontrager, Pierre
+Roux, Piotr Dollar, Polina Zvyagina, Prashant Ratanchandani, Pritish Yuvraj, Qian
+
+In this work, we developed APEX, an extensible and dynamismaware simulator for LLM serving. We evaluated APEX across various LLMs and distinct workloads, demonstrating its high-fidelity
+simulation with only a 10.7% relative error on the average. APEX
+successfully identified latency-optimal execution plans that achieve
+up to 3.37× speedup compared to heuristic plans, and also energyoptimal plans that reduce energy consumption by up to 45% compared to latency-optimal plans. The simulation proved highly efficient, providing a 71× speedup and 1234× greater cost-effectiveness
+than deployment on actual hardware. APEX maintained a similar
+simulation overhead when scaling from billion-scale to trillion-scale
+models. While APEX already supports a broad range of LLMs, we
+further demonstrated its ease of extensibility to accommodate new
+models, device clusters, batching algorithms, and parallelisms. In
+the future, we plan to extend APEX to support multimodal LLMs,
+which will involve incorporating parallel execution plans for encoders handling modalities such as vision and audio.
+
+References
+[1] Amey Agrawal, Nitin Kedia, Jayashree Mohan, Ashish Panwar, Nipun Kwatra,
+Bhargav Gulavani, Ramachandran Ramjee, and Alexey Tumanov. 2024. VIDUR:
+A LARGE-SCALE SIMULATION FRAMEWORK FOR LLM INFERENCE. In Proceedings of Machine Learning and Systems.
+[2] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra,
+Bhargav S Gulavani, Alexey Tumanov, and Ramachandran Ramjee. 2024. Taming
+Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve. Proceedings
+of 18th USENIX Symposium on Operating Systems Design and Implementation,
+2024, Santa Clara (2024).
+[3] Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico
+Lebrón, and Sumit Sanghai. 2023. GQA: Training Generalized Multi-Query
+Transformer Models from Multi-Head Checkpoints. arXiv:2305.13245 [cs.CL]
+https://arxiv.org/abs/2305.13245
+[4] Jehyeon Bang, Yujeong Choi, Myeongwoo Kim, Yongdeok Kim, and Minsoo
+Rhu. 2024. vTrain: A Simulation Framework for Evaluating Cost-effective and
+Compute-optimal Large Language Model Training. In 57th IEEE/ACM International Symposium on Microarchitecture (MICRO).
+[5] Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan,
+Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda
+Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan,
+Rewon Child, Aditya Ramesh, Daniel M. Ziegler, Jeffrey Wu, Clemens Winter,
+Christopher Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin
+Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya
+Sutskever, and Dario Amodei. 2020. Language Models are Few-Shot Learners.
+arXiv:2005.14165 [cs.CL] https://arxiv.org/abs/2005.14165
+[6] Weilin Cai, Juyong Jiang, Fan Wang, Jing Tang, Sunghun Kim, and Jiayi Huang.
+2024. A survey on mixture of experts. arXiv preprint arXiv:2407.06204 (2024).
+[7] Jaehong Cho, Minsu Kim, Hyunmin Choi, Guseul Heo, and Jongse Park. 2024.
+LLMServingSim: A HW/SW Co-Simulation Infrastructure for LLM Inference
+Serving at Scale. arXiv:2408.05499 [cs.DC]
+[8] Jack Choquette. 2023. NVIDIA Hopper H100 GPU: Scaling Performance. IEEE
+Micro (2023).
+[9] Arman Cohan, Franck Dernoncourt, Doo Soon Kim, Trung Bui, Seokhwan Kim,
+Walter Chang, and Nazli Goharian. 2018. A Discourse-Aware Attention Model
+for Abstractive Summarization of Long Documents. In Proceedings of the 2018
+Conference of the North American Chapter of the Association for Computational
+Linguistics: Human Language Technologies, Volume 2 (Short Papers).
+[10] Prem C Consul and Gaurav C Jain. 1973. A generalization of the Poisson distribution. Technometrics 15, 4 (1973), 791–799.
+[11] Jiangfei Duan, Xiuhong Li, Ping Xu, Xingcheng Zhang, Shengen Yan, Yun Liang,
+and Dahua Lin. 2024. Proteus: Simulating the Performance of Distributed DNN
+Training . IEEE Transactions on Parallel & Distributed Systems (2024).
+[12] Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Amy Yang, Angela
+Fan, Anirudh Goyal, Anthony Hartshorn, Aobo Yang, Archi Mitra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark, Arun Rao, Aston Zhang, Aurelien
+Rodriguez, Austen Gregerson, Ava Spataru, Baptiste Roziere, Bethany Biron, Binh
+Tang, Bobbie Chern, Charlotte Caucheteux, Chaya Nayak, Chloe Bi, Chris Marra,
+Chris McConnell, Christian Keller, Christophe Touret, Chunyang Wu, Corinne
+Wong, Cristian Canton Ferrer, Cyrus Nikolaidis, Damien Allonsius, Daniel Song,
+11
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+Lin et al.
+
+[27] Baolin Li, Yankai Jiang, Vijay Gadepally, and Devesh Tiwari. 2024. LLM Inference
+Serving: Survey of Recent Advances and Opportunities. arXiv:2407.12391 [cs.DC]
+[28] Shen Li, Yanli Zhao, Rohan Varma, Omkar Salpekar, Pieter Noordhuis, Teng Li,
+Adam Paszke, Jeff Smith, Brian Vaughan, Pritam Damania, and Soumith Chintala.
+2020. PyTorch distributed: experiences on accelerating data parallel training.
+Proc. VLDB Endow. (2020).
+[29] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen
+Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. 2024. AWQ:
+Activation-aware Weight Quantization for On-Device LLM Compression and
+Acceleration. Proceedings of Machine Learning and Systems (2024).
+[30] Hao Liu, Matei Zaharia, and Pieter Abbeel. 2023. Ring Attention with Blockwise
+Transformers for Near-Infinite Context. arXiv:2310.01889 [cs.CL] https://arxiv.
+org/abs/2310.01889
+[31] Peini Liu and Jordi Guitart. 2022. Performance characterization of containerization for HPC workloads on InfiniBand clusters: an empirical study. Cluster
+Computing (2022).
+[32] Mary M Lucas, Justin Yang, Jon K Pomeroy, and Christopher C Yang. 2024.
+Reasoning with large language models for medical question answering. Journal
+of the American Medical Informatics Association (2024).
+[33] Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Hongyi Jin, Tianqi
+Chen, and Zhihao Jia. 2023. Towards Efficient Generative Large Language Model
+Serving: A Survey from Algorithms to Systems. arXiv:2312.15234 [cs.LG] https:
+//arxiv.org/abs/2312.15234
+[34] Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Zeyu Wang,
+Zhengxin Zhang, Rae Ying Yee Wong, Alan Zhu, Lijie Yang, Xiaoxiang Shi,
+Chunan Shi, Zhuoming Chen, Daiyaan Arfeen, Reyna Abhyankar, and Zhihao
+Jia. 2024. SpecInfer: Accelerating Large Language Model Serving with Treebased Speculative Inference and Verification. In Proceedings of the 29th ACM
+International Conference on Architectural Support for Programming Languages and
+Operating Systems, Volume 3.
+[35] Deepak Narayanan, Aaron Harlap, Amar Phanishayee, Vivek Seshadri, Nikhil R.
+Devanur, Gregory R. Ganger, Phillip B. Gibbons, and Matei Zaharia. 2019.
+PipeDream: generalized pipeline parallelism for DNN training. In Proceedings of
+the 27th ACM Symposium on Operating Systems Principles.
+[36] NVIDIA. 2024. TensorRT-LLM [Online]. https://nvidia.github.io/TensorRTLLM/overview.html. Accessed: 2024-11-13.
+[37] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Inigo Goiri, Saeed
+Maleki, and Ricardo Bianchini. 2024. Splitwise: Efficient Generative LLM Inference Using Phase Splitting . In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA).
+[38] Samyam Rajbhandari, Conglong Li, Zhewei Yao, Minjia Zhang, Reza Yazdani
+Aminabadi, Ammar Ahmad Awan, Jeff Rasley, and Yuxiong He. 2022. DeepSpeedMoE: Advancing Mixture-of-Experts Inference and Training to Power NextGeneration AI Scale. In Proceedings of the 39th International Conference on Machine
+Learning.
+[39] Saeed Rashidi, Srinivas Sridharan, Sudarshan Srinivasan, and Tushar Krishna.
+2020. ASTRA-SIM: Enabling SW/HW Co-Design Exploration for Distributed
+DL Training Platforms. In 2020 IEEE International Symposium on Performance
+Analysis of Systems and Software (ISPASS). 81–92.
+GLU Variants Improve Transformer.
+[40] Noam Shazeer. 2020.
+arXiv:2002.05202 [cs.LG] https://arxiv.org/abs/2002.05202
+[41] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper,
+and Bryan Catanzaro. 2020. Megatron-LM: Training Multi-Billion Parameter
+Language Models Using Model Parallelism. arXiv:1909.08053 [cs.CL]
+[42] Jovan Stojkovic, Chaojie Zhang, Inigo Goiri, Josep Torrellas, and Esha Choukse.
+2025. DynamoLLM: Designing LLM Inference Clusters for Performance and
+Energy Efficiency . In 2025 IEEE International Symposium on High Performance
+Computer Architecture (HPCA).
+[43] vLLM. v0.6.0. Distributed Inference and Serving [Online]. https://docs.vllm.ai/
+en/v0.6.0/serving/distributed_serving.html. Accessed: 2024-11-12.
+[44] Qi Wang, Jindong Li, Shiqi Wang, Qianli Xing, Runliang Niu, He Kong,
+Rui Li, Guodong Long, Yi Chang, and Chengqi Zhang. 2024. Towards
+Next-Generation LLM-based Recommender Systems: A Survey and Beyond.
+arXiv:2410.19744 [cs.IR]
+[45] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and ByungGon Chun. 2022. Orca: A Distributed Serving System for Transformer-Based
+Generative Models. In 16th USENIX Symposium on Operating Systems Design and
+Implementation (OSDI 22).
+[46] Geoffrey X. Yu, Yubo Gao, Pavel Golikov, and Gennady Pekhimenko. 2021. Habitat: A Runtime-Based Computational Performance Predictor for Deep Neural
+Network Training. In 2021 USENIX Annual Technical Conference (USENIX ATC
+21).
+[47] Hanyu Zhao, Zhenhua Han, Zhi Yang, Quanlu Zhang, Fan Yang, Lidong Zhou,
+Mao Yang, Francis C.M. Lau, Yuqi Wang, Yifan Xiong, and Bin Wang. 2020.
+HiveD: Sharing a GPU Cluster for Deep Learning with Guarantees. In 14th
+USENIX Symposium on Operating Systems Design and Implementation (OSDI 20).
+[48] Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Tianle Li, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, Zhuohan Li, Zi Lin, Eric P. Xing, Joseph E. Gonzalez,
+
+Liang, Rachad Alao, Rachel Rodriguez, Rafi Ayub, Raghotham Murthy, Raghu
+Nayani, Rahul Mitra, Raymond Li, Rebekkah Hogan, Robin Battey, Rocky Wang,
+Rohan Maheswari, Russ Howes, Ruty Rinott, Sai Jayesh Bondu, Samyak Datta,
+Sara Chugh, Sara Hunt, Sargun Dhillon, Sasha Sidorov, Satadru Pan, Saurabh
+Verma, Seiji Yamamoto, Sharadh Ramaswamy, Shaun Lindsay, Shaun Lindsay,
+Sheng Feng, Shenghao Lin, Shengxin Cindy Zha, Shiva Shankar, Shuqiang Zhang,
+Shuqiang Zhang, Sinong Wang, Sneha Agarwal, Soji Sajuyigbe, Soumith Chintala, Stephanie Max, Stephen Chen, Steve Kehoe, Steve Satterfield, Sudarshan
+Govindaprasad, Sumit Gupta, Sungmin Cho, Sunny Virk, Suraj Subramanian,
+Sy Choudhury, Sydney Goldman, Tal Remez, Tamar Glaser, Tamara Best, Thilo
+Kohler, Thomas Robinson, Tianhe Li, Tianjun Zhang, Tim Matthews, Timothy
+Chou, Tzook Shaked, Varun Vontimitta, Victoria Ajayi, Victoria Montanez, Vijai
+Mohan, Vinay Satish Kumar, Vishal Mangla, Vítor Albiero, Vlad Ionescu, Vlad
+Poenaru, Vlad Tiberiu Mihailescu, Vladimir Ivanov, Wei Li, Wenchen Wang,
+Wenwen Jiang, Wes Bouaziz, Will Constable, Xiaocheng Tang, Xiaofang Wang,
+Xiaojian Wu, Xiaolan Wang, Xide Xia, Xilun Wu, Xinbo Gao, Yanjun Chen, Ye
+Hu, Ye Jia, Ye Qi, Yenda Li, Yilin Zhang, Ying Zhang, Yossi Adi, Youngjin Nam,
+Yu, Wang, Yuchen Hao, Yundi Qian, Yuzi He, Zach Rait, Zachary DeVito, Zef
+Rosnbrick, Zhaoduo Wen, Zhenyu Yang, and Zhiwei Zhao. 2024. The Llama 3
+Herd of Models. arXiv:2407.21783 [cs.AI] https://arxiv.org/abs/2407.21783
+[13] Alexander Fabbri, Irene Li, Tianwei She, Suyi Li, and Dragomir Radev. 2019. MultiNews: A Large-Scale Multi-Document Summarization Dataset and Abstractive
+Hierarchical Model. In Proceedings of the 57th Annual Meeting of the Association
+for Computational Linguistics.
+[14] Sarah Fakhoury, Aaditya Naik, Georgios Sakkas, Saikat Chakraborty, and Shuvendu K. Lahiri. 2024. LLM-Based Test-Driven Interactive Code Generation:
+User Study and Empirical Evaluation. IEEE Transactions on Software Engineering
+(2024).
+[15] Karol Gregor, Ivo Danihelka, Andriy Mnih, Charles Blundell, and Daan Wierstra.
+2014. Deep autoregressive networks. In International Conference on Machine
+Learning. PMLR, 1242–1250.
+[16] Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W Mahoney,
+Yakun Sophia Shao, Kurt Keutzer, and Amir Gholami. 2024. Kvquant: Towards 10
+million context length llm inference with kv cache quantization. arXiv preprint
+arXiv:2401.18079 (2024).
+[17] Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Dehao Chen, Mia
+Chen, HyoukJoong Lee, Jiquan Ngiam, Quoc V Le, Yonghui Wu, and zhifeng
+Chen. 2019. GPipe: Efficient Training of Giant Neural Networks using Pipeline
+Parallelism. In Advances in Neural Information Processing Systems.
+[18] Huggingface. 2025. Configuration. https://huggingface.co/docs/transformers/en/
+main_classes/configuration.
+[19] Intel. 2024. Intel Gaudi 3 AI Accelerator. In Technical White Paper.
+[20] Mikhail Isaev, Nic Mcdonald, Larry Dennison, and Richard Vuduc. 2023. Calculon:
+a methodology and tool for high-level co-design of systems and large language
+models. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis.
+[21] Albert Q. Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Florian Bressand, Gianna Lengyel,
+Guillaume Lample, Lucile Saulnier, Lélio Renard Lavaud, Marie-Anne Lachaux,
+Pierre Stock, Teven Le Scao, Thibaut Lavril, Thomas Wang, Timothée Lacroix,
+and William El Sayed. 2023. Mistral 7B. arXiv:2310.06825 [cs.CL] https:
+//arxiv.org/abs/2310.06825
+[22] Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche
+Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou
+Hanna, Florian Bressand, Gianna Lengyel, Guillaume Bour, Guillaume Lample,
+Lélio Renard Lavaud, Lucile Saulnier, Marie-Anne Lachaux, Pierre Stock, Sandeep
+Subramanian, Sophia Yang, Szymon Antoniak, Teven Le Scao, Théophile Gervet,
+Thibaut Lavril, Thomas Wang, Timothée Lacroix, and William El Sayed. 2024.
+Mixtral of Experts. arXiv:2401.04088 [cs.LG] https://arxiv.org/abs/2401.04088
+[23] Norm Jouppi, George Kurian, Sheng Li, Peter Ma, Rahul Nagarajan, Lifeng Nai,
+Nishant Patil, Suvinay Subramanian, Andy Swing, Brian Towles, Clifford Young,
+Xiang Zhou, Zongwei Zhou, and David A Patterson. 2023. TPU v4: An Optically
+Reconfigurable Supercomputer for Machine Learning with Hardware Support
+for Embeddings. In Proceedings of the 50th Annual International Symposium on
+Computer Architecture.
+[24] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng,
+Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient
+Memory Management for Large Language Model Serving with PagedAttention.
+In Proceedings of the 29th Symposium on Operating Systems Principles.
+[25] Malgorzata Lazuka, Andreea Anghel, and Thomas Parnell. 2024. LLM-Pilot:
+Characterize and Optimize Performance of your LLM Inference Services. In
+Proceedings of the International Conference for High Performance Computing,
+Networking, Storage, and Analysis.
+[26] Ang Li, Shuaiwen Leon Song, Jieyang Chen, Jiajia Li, Xu Liu, Nathan R. Tallent,
+and Kevin J. Barker. 2020. Evaluating Modern GPU Interconnect: PCIe, NVLink,
+NV-SLI, NVSwitch and GPUDirect. IEEE Transactions on Parallel and Distributed
+Systems (2020).
+12
+
+APEX: An Extensible and Dynamism-Aware Simulator for Automated Parallel Execution in LLM Serving
+
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+
+[52] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin
+Jin, and Hao Zhang. 2024. DistServe: Disaggregating Prefill and Decoding for
+Goodput-optimized Large Language Model Serving. Proceedings of 18th USENIX
+Symposium on Operating Systems Design and Implementation, 2024, Santa Clara
+(2024).
+[53] Hao Zhou, Chengming Hu, Ye Yuan, Yufei Cui, Yili Jin, Can Chen, Haolun
+Wu, Dun Yuan, Li Jiang, Di Wu, Xue Liu, Charlie Zhang, Xianbin Wang, and
+Jiangchuan Liu. 2024. Large Language Model (LLM) for Telecommunications:
+A Comprehensive Survey on Principles, Key Techniques, and Opportunities.
+arXiv:2405.10825 [eess.SY]
+[54] Yuchen Zhuang, Yue Yu, Kuan Wang, Haotian Sun, and Chao Zhang. 2023.
+ToolQA: A Dataset for LLM Question Answering with External Tools. In Advances
+in Neural Information Processing Systems.
+
+Ion Stoica, and Hao Zhang. 2024. LMSYS-Chat-1M: A Large-Scale Real-World
+LLM Conversation Dataset. arXiv:2309.11998 [cs.CL]
+[49] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang,
+Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez,
+Clark Barrett, and Ying Sheng. 2024. SGLang: Efficient Execution of Structured
+Language Model Programs. arXiv:2312.07104 [cs.AI]
+[50] Li Zhong and Zilong Wang. 2024. Can LLM Replace Stack Overflow? A Study on
+Robustness and Reliability of Large Language Model Code Generation. Proceedings of the AAAI Conference on Artificial Intelligence 38 (2024).
+[51] Ruizhe Zhong, Xingbo Du, Shixiong Kai, Zhentao Tang, Siyuan Xu, Hui-Ling
+Zhen, Jianye Hao, Qiang Xu, Mingxuan Yuan, and Junchi Yan. 2023. LLM4EDA:
+Emerging Progress in Large Language Models for Electronic Design Automation.
+arXiv:2401.12224 [cs.AR]
+
+13
+
+

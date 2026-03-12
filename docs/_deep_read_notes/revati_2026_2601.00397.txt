@@ -1,0 +1,1778 @@
+R EVATI: Transparent GPU-Free Time-Warp Emulation for LLM Serving
+Amey Agrawal∗ , Mayank Yadav∗ , Sukrit Kumar† , Anirudha Agrawal† , Garv Ghai† ,
+Souradeep Bera, Elton Pinto, Sirish Gambhira, Mohammad Adain, Kasra Sohrab,
+Chus Antonanzas, and Alexey Tumanov
+
+arXiv:2601.00397v1 [cs.DC] 1 Jan 2026
+
+Georgia Institute of Technology
+
+Benchmark Runner
+(e.g. GenAI-Perf)
+
+Abstract
+
+Time Jump
+Requests
+
+Deploying LLMs efficiently requires testing hundreds
+of serving configurations, but evaluating each one on a
+GPU cluster takes hours and costs thousands of dollars.
+Discrete-event simulators are faster and cheaper, but they
+require re-implementing the serving system’s control
+logic — a burden that compounds as frameworks evolve.
+We present R EVATI, a time-warp emulator that enables
+performance modeling by directly executing real serving
+system code at simulation-like speed. The system intercepts CUDA API calls to virtualize device management,
+allowing serving frameworks to run without physical
+GPUs. Instead of executing GPU kernels, it performs
+time jumps – fast-forwarding virtual time by predicted
+kernel durations. We propose a coordination protocol that
+synchronizes these jumps across distributed processes
+while preserving causality. On vLLM and SGLang, R E VATI achieves <5% prediction error across multiple models and parallelism configurations, while running 5-17×
+faster than real GPU execution.
+SPP-1
+
+SPP-0
+
+SPP-1
+
+TP-0
+
+TP-0
+
+TP-0
+
+TP-0
+
+5 Dispatch
+Batch
+
+Replica Controller
+3
+
+Batch Scheduler
+
+Reque
+
+6 Partial Prefill
+
+Get Least
+
+4 Slack Prefill
+
+Batch Packer
+
+Update
+Batch
+
+Constraint
+
+Limitations of Current Approaches. To address this
+challenge, the community has developed discrete-event
+simulators [4, 12, 20] that can cheaply model serving
+performance. Simulators offer compelling benefits: they
+run orders of magnitude faster than real execution and
+are easy to modify for prototyping new policies and optimization. However, they require re-implementing all
+the core system components including the scheduler,
+memory allocator, and request dispatcher, etc. This approached worked when systems were simple: modeling
+vLLM’s original continuous batching scheduler took less
+than 150 lines to implement in Vidur [4]. However, today LLM engines include complex features like prefilldecode disaggregation [10, 23–25, 32] and distributed
+prefix caching [10, 23] with implementations spanning
+tens of thousands of lines of code. Moreover, with thousands of commits per year from hundreds of contributors,
+inference serving systems are evolving at a rapid pace,
+causing simulators to perpetually lag behind with surmounting maintenance burden.
+
+Return Generated Tokens 7
+
+1 Add New Request
+
+Client Interface
+
+1
+
+GPU Emulator
+CUDA API Mocking
+
+4 Check Runtime
+
+Runtime Predictor
+
+Prefill Priority Queue
+
+Request
+
+TimeKeeper
+Virtual Clock Coordination
+
+Figure 1: Discrete-event simulators must re-implement
+the entire control-flow and scheduling logic of serving
+systems, as a result, the rapid advancements in LLM
+inference render these simulators perpetually outdated.
+Rolo
+Time Keeper
+R EVATI entirely eliminates this
+problem
+by directly running the serving systems in a emulated environment.
+
+KVP-1
+
+SPP-0
+
+LD_PRELOAD
+Interception
+
+Revati Emulation Environment
+
+3D Parallel Execution Engine
+
+KVP-0
+
+Virtual Time
+Updates
+
+Inference Engine
+(e.g. vLLM, SGLang)
+
+Response
+
+Introduction
+
+LLM inference increasingly dominates AI costs. To manage these costs, operators need to tune a vast set of configuration knobs, including, various parallelization strategies, caching policies, and scheduling algorithms [4, 31].
+These knobs must be tuned for each model, workload and
+hardware platform as they evolve over time. Finding the
+optimal deployment configuration through trial-and-error
+end-to-end evaluation is prohibitively slow and expensive. Evaluating even a single configuration on a GPU
+cluster can take several hours and cost thousands of dollars in compute [4]. This bottlenecks both production
+deployment and systems research.
+
+Key Insight. Serving systems spend most of their execution time waiting for GPU computation, not making
+control decisions. The CPU control plane (scheduling,
+
+∗† Denote equal contribution levels. Revati is a mythological char-
+
+acter who features in one of the earliest fictional tales of time dilation.
+
+1
+
+Timeline
+
+Ad , Bd
+
+GPU Work (19.97ms)
+CPU
+Work
+
+Predicted Time
+(20.59ms)
+
+CPU
+Work
+
+GPU Work (30.02ms)
+
+TBT with
+prefill interference
+
+Decodes for A, B
+
+Orca
+
+Ad , Bd, Cd,
+
+Ad , BDiscrete-Event
+Cp, Dp, Ad, Bd
+R EVATI
+Simulators
+d
+
+VD LS1 AP FT TS LS2
+
+FasterTransformer
+
+C, D enter
+
+System Properties
+Direct System Emulation
+Serving System Agnostic
+Minimal Maintenance Overhead
+
+Revati
+Virtual Time
+Revati
+Wall Clock Time
+
+10-20x Speed Up via Time Acceleration
+
+CPU Work
+CPU
+Work
+
+Ad , Bd, Cd, D
+
+Dp
+
+TBT without
+prefill interference
+
+Real Execution
+Wall Clock Time
+
+k (28.73ms)
+
+Cp
+
+C, D enter
+
+Time
+
+CPU
+Work
+
+CPU
+Work
+
+CPU
+Work
+
+Decodes for A, B st
+
+vLLM
+
+C, D enter
+
+GPU Work
+
+Modeling Domain
+Continuous Batching
+Chunked Prefill
+Prefix Caching
+Hierarchical Caching
+PD Disaggregation
+DP Attention
+MoE / Expert Parallel
+
+Skipped-over Time
+
+Figure 2: Time Accelerated Emulation. LLM inference
+engines try to maximize the GPU computation (red);
+while keeping the CPU overhead (blue) as minimal as
+possible. R EVATI exploits this property by skipping GPU
+operations in wall clock time while preserving the causal
+semantics of the application using virtual time semantics.
+This allows us to obtain an order of magnitude acceleration without sacrificing on fidelity.
+
+✓
+✓
+✓
+
+Ad , Bd
+
+Ad , Bd
+
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+
+Ad , Bd
+
+Ad , Bd
+
+Bd
+
+× × × × × ×
+A exits
+× × × × × ×
+× × ×Sarathi-Serve
+× ×
+C,×D enter
+✓
+✓
+×
+×
+×
+×
+×
+
+Ad , Bd, Cp1
+
+✓
+✓
+×
+×
+×
+×
+×
+
+✓
+✓
+×
+×
+×
+×
+✓
+
+Ad , Bd, Cp2
+
+✓
+✓
+×
+×
+✓
+✓
+✓
+
+Bd, Cd, Dp1
+
+A exits✓
+✓
+
+✓
+✓
+×
+✓
+×
+×
+
+✓
+✓
+✓
+✓
+✓
+✓
+
+Table 1: Comparison of LLM inference modeling approaches. Discrete-event simulators require manual reimplementation of features, creating maintenance burden.
+Older simulators like Vidur (VD) [4], LLMServingSim
+(LS1) [12], and APEX (AP) [20] lack critical modern
+features. Newer simulators like Frontier (FT) [13], TokenSim (TS) [29], and LLMServingSim2.0 (LS2) [11]
+fill these gaps but face similar maintenance challenges as
+their predecessors.
+
+batching, memory management) executes in microseconds, while GPU operations take tens of milliseconds
+accounting for more than 90% of execution time. Moreover, the control flow logic is largely decoupled from
+the output of GPU computation. This separation enables
+a radical alternative: run the real serving system while
+skipping GPU waits through virtual time advancement.
+We call this Time-Warp Emulation.
+
+This paper makes the following contributions:
+• We present R EVATI, a time-warp emulator that models serving system performance at simulation-like
+speed without re-implementing system logic.
+
+Our Approach. R EVATI executes actual serving frameworks like vLLM or SGLang with GPU operations replaced by virtual time jumps. When a worker prepares
+to execute a batch, it asks: “How long would this take
+on H100?”. Using the predicted duration, it requests a
+time jump from a central Timekeeper that coordinates
+virtual time across all processes. The Timekeeper ensures
+all processes advance together while preserving causality: if worker A needs 15ms and worker B needs 25ms,
+the system advances by 15ms first. A CUDA emulation
+layer transparently intercepts GPU calls, presenting virtual devices to the serving framework while bypassing
+actual execution. This allows us to directly execute the
+serving system’s code without need for actual GPUs in
+accelerated virtual time.
+
+• We develop a virtual time protocol that coordinates
+time jumps across distributed processes while preserving causality.
+• We evaluate R EVATI on vLLM and SGLang, achieving <5% prediction error while running 5–17×
+faster than real GPU execution.
+
+2
+
+Background & Motivation
+
+Performance modeling is essential for the efficient deployment of LLM serving systems because real-world
+experimentation on GPU clusters is prohibitively expensive. However, existing simulator-based approaches
+struggle to maintain fidelity as serving systems evolve
+due to lagging feature parity. This section characterizes
+the configuration optimization challenge and illustrates
+why discrete-event simulation fails to meet the needs of
+modern serving infrastructure.
+
+By running an unchanged control plane, R EVATI automatically captures complex system behaviors without
+requiring manual modeling. Complex features like adaptive batching, multi-tiered prefix cache management, PD
+disaggregation, etc. work out of the box. R EVATI poses a
+minimal maintenance overhead with less than 25 lines of
+change required to onboard a serving system. This combination of speed, cost-effectiveness, and ease of adoption
+enables rapid exploration of optimal deployment configurations and accelerates both the development and
+adoption of state-of-the-art LLM inference techniques.
+
+2.1
+
+Configuration Optimization Problem
+
+Modern LLM serving systems expose vast configuration
+spaces. Consider deploying Qwen3-235B-A22B [30]:
+operators must select the tensor parallelism (TP) degree (1-8), number of pipeline parallelism (PP) stages
+2
+
+Ae
+
+Prefills for C, D sta
+Bd
+
+Cp
+
+B exits
+No stalls
+Bd, Cd, Dp2
+
+B exits
+
+…
+
+(1-8), expert parallelism (EP) degree (1-8), maximum
+batch size (1-256), chunked prefill size (256-8192 tokens), KV cache eviction policy (LRU, LFU, cost-aware),
+routing policy (round-robin, sticky, cache-aware), and
+disaggregation strategy (co-located vs. separate prefill/decode) [6, 25, 32] — yielding a large configuration
+space. Prior research has shown that tuning configuration choices in accordance with model and workload
+characteristics can improve throughput by 3-5× [4, 32].
+For instance, Mitra et al. [22] show that serving Llama70B with PD disaggregation [24, 32] can provide 1.8×
+throughput improvement over co-location [5] for RAGlike, prefill-heavy workloads (16K input tokens, 2K output tokens). Yet for decode-heavy workloads (2K input,
+8K output), they find that disaggregation provides minimal benefit (<10% throughput gain) and can even reduce
+performance due to KV cache transfer overhead and dynamic shift in traffic patterns.
+To effectively deploy these systems, operators evaluate these configurations on representative workloads and
+pick those that satisfy their latency requirements while
+providing maximal throughput. Evaluating each configuration requires around 2-4 hours of profiling to collect
+statistically significant tail latency characteristics across
+request load levels [4]. For a 64-GPU cluster at current cloud pricing ($2.50-$7 per GPU-hour for an H100),
+evaluating just 100 configurations takes 12,800-25,600
+GPU-hours, costing $32,000-$179,200 USD. These factors make broader exploration of the design space economically and practically infeasible, forcing practitioners
+to resort to rule-of-thumb heuristics.
+
+2.2
+
+model. For instance, Vidur modeled the original vLLM
+scheduler in ∼150 lines of code. Today, production control planes exceed tens of thousands of lines of code
+[26, 28] with complex logic for implementing features
+like hierarchical prefix caching and disaggregated execution. Capturing the nuanced performance characteristics
+of these features requires an unwieldy amount of engineering effort. Any deviation in the simulator’s logic
+from the ground truth leads to critical inaccuracies in
+performance prediction.
+Framework Specificity. Simulators also struggle with
+generality because serving frameworks often make fundamentally different implementation choices for the same
+feature. For instance, while both vLLM and SGLang implement the batching policy described in Sarathi-Serve
+[5] at high-level, they critically differ in their implementation. vLLM adopts both chunked-prefills as well as mixed
+batching (combining prefill and decode requests in a single batch), whereas SGLang by default doesn’t perform
+mixed batching and resorts to a prefill prioritizing policy.
+This difference leads to divergent latency characteristics
+that a generic implementation would fail to capture. We
+observe such differences in other features too, such as
+prefix caching, disaggregated execution, etc. For example,
+Hierarchical cache in vLLM (using LMCache [3]) uses a
+write-through policy, where every cache element written
+to GPU is also immediately written to lower tiers (CPU,
+NVMe, etc.). SGLang, on the other hand, adopts a writethrough-selective policy that asynchronously copies data
+only on the first cache hit.
+To model this landscape accurately, researchers are
+forced to build and maintain separate, specialized simulators for each major framework: Vidur [4] is modeled
+after Sarathi-Serve [5], and LLMServingSim2.0 [11] is
+modeled after vLLM. This approach both limits flexibility and increases engineering effort required to construct
+these simulators.
+
+Discrete-Event Simulators
+
+To reduce the cost of evaluating a configuration, researchers have developed Discrete-Event Simulators
+(DES) [4, 11–13, 20, 29]. These simulators provide a
+cheap and fast way to model the performance of a serving system without the need for expensive hardware.
+These tools operate by manually re-implementing the
+serving system’s control logic – schedulers, memory allocators, and request routers – within a simplified simulation framework. A performance model predicts GPU
+execution time for the batch. The simulator advances its
+clock by this predicted duration and processes the next
+event. By eliminating physical GPU execution, simulators achieve up to an order of magnitude speedups over
+real-time without requiring hardware.
+
+2.3
+
+Maintenance Burden. The engineering overhead of
+building a DES is exacerbated by the breakneck pace of
+LLM server evolution. vLLM alone has received over
+2,800 commits from hundreds of contributors in the
+first half of 2025 [28]. Each commit has the potential to
+invalidate the modeling assumptions of a simulator. As a
+result, simulators like Vidur and LLMServingSim have
+historically fallen behind shortly after release. There
+have been attempts to bridge this gap — Frontier [13]
+and LLMServingSim2.0 [11] have extended the past
+generation of simulators with modern features like prefix
+caching and PD disaggregation. However, even these
+efforts are destined to face the inevitable maintainability
+challenge as the field progresses.
+
+Limitations of Simulators
+
+Semantic Gap. The re-implementation effort inevitably
+introduces subtle differences between the simulator and
+actual system behavior. Early systems were tractable to
+3
+
+vLLM
+
+Takeaway: Existing discrete-event simulation approaches face a perpetual maintenance burden. We need
+a fundamentally new runtime modeling approach that
+does not require manual re-implementation of the serving
+engine logic.
+
+3
+
+Time-Accelerated Emulation
+
+To address the limitations of discrete-event simulation,
+we propose a new modeling paradigm: Time-Accelerated
+Emulation. Instead of re-implementing the serving system’s logic, this approach allows us to the directly execute unmodified LLM engine, providing high fidelity
+performance modeling while retaining the speed and costeffectiveness of simulation. This section outlines the key
+building blocks that enable this approach.
+
+3.1
+
+SGLang
+
+Time (s)
+
+GPU Time
+30
+CPU Time
+25
+20
+15
+10
+5
+0 Qwen-30B-A3B Llama-70B
+
+Qwen-30B-A3B Llama-70B
+
+Figure 3: CPU vs GPU execution time. GPU execution
+time dominates serving latency. The low CPU overhead
+(5-10%) creates the opportunity for order-of-magnitude
+speedup via time acceleration.
+(as in Maya’s offline emulation approach), Request A
+completes instantly at t ≈ 0. When Request B arrives
+at t = 200ms, the system perceives an idle GPU and an
+empty queue. The temporal overlap is lost, the batching
+pattern changes completely, and the modeling diverges
+from reality.
+
+Transparent Device Virtualization
+
+A recent work in deep learning training performance
+modeling, Maya [31], has demonstrated the viability of
+transparent device emulation. By intercepting CUDA
+API calls via LD_PRELOAD, it is possible to create “virtual
+devices” to model the runtime of the workload without
+need for physical GPUs. Maya achieves this by building a
+two-step pipeline, first, the workload is executed with the
+virtual device. This run produces a trace of all the CUDA
+API invocations made by the workload. A simulator then
+replays the trace, predicting the runtime of each operation
+before finally outputting an end-to-end runtime estimate.
+Applying this technique to inference serving promises
+to allow direct execution of unmodified serving system
+code – fundamentally eliminating the primary limitations
+of discrete-event simulation, providing a path toward
+robust and maintainable runtime modeling for modern
+LLM serving systems.
+
+A Strawman Approach. To preserve temporal semantics, the emulator must force the control plane to experience the passage of time. A naive but correct approach
+is to mimic GPU latency by sleeping for the predicted
+duration of the kernel. If a batch is predicted to take 500
+ms, the emulator blocks the CPU thread for 500 ms. This
+restores fidelity: during the 500 ms sleep for Request A,
+the wall clock advances. Request B arrives at t = 200
+ms as scheduled, but now finds the worker “busy” (sleeping). The scheduler correctly queues B, preserving the
+system’s state dynamics and resource contention exactly
+as they would appear on real hardware.
+While sleep-based emulation guarantees correctness,
+it is prohibitively slow. Evaluating a 2-hour trace would
+require 2 hours of real time. For configuration searches
+requiring thousands of evaluations, this real-time constraint renders the approach impractical. We refer to this
+strawman approach as Sleep-Based Emulation.
+
+3.2 Temporal Semantics in Online Serving
+Unfortunately, unlike training workloads which are typically offline, inference is an online process where request
+arrival timing fundamentally alters control flow. Ignoring
+GPU execution time breaks these temporal semantics,
+leading to incorrect batching decisions.
+For instance, suppose we have two requests, A and
+B, that both require 500 ms for prefill. Request A arrives at t = 0, and Request B arrives at t = 200 ms. In
+a real system, the scheduler would begin processing A;
+when B arrives 200 ms later, the GPU is still busy with
+A. B would be added to the queue, and the scheduler
+would eventually schedule B once prefill for request A
+is completed – perhaps batching B’s prefill with A’s subsequent decode steps. However, if we simply trace the
+GPU without accounting for GPU execution in real-time
+
+3.3
+
+Key Insight: Time Acceleration
+
+The strawman emulation approach pays wall-clock cost
+identical to full GPU execution. However, a closer look
+at the design of inference engines reveals an opportunity:
+these systems are engineered to maximize GPU utilization while keeping CPU overhead minimal. Figure 3
+quantifies this observation. We process 100 requests in
+offline mode (all requests available at start) and measure
+execution time under two conditions – normal GPU execution and GPU-skip mode where all GPU execution
+is bypassed via emulation. The CPU time represents the
+critical-path control-plane overhead, while GPU time
+captures actual kernel execution. Across both vLLM and
+SGLang, GPU computation accounts for 90-95% of total
+4
+
+Time Jump
+Requests
+
+LD_PRELOAD
+Interception
+
+Virtual Time
+Updates
+
+GPU Emulator
+CUDA API Mocking
+Rolo Emulation Environment
+
+execution time, with CPU overhead remaining minimal
+regardless of model size or serving framework. Consequently, the system spends the vast majority of wall-clock
+time simply waiting for GPU computations to complete.
+Furthermore, crucially, the control plane’s logic does
+not depend on the values computed by the GPU. Schedulers operate on logical abstractions (requests, batches,
+memory blocks), while GPU workers perform physical computation without making control flow decisions1 .
+These properties naturally yield a path to a critical optimization: instead of sleeping during the 85-95% of time
+the system is idle, we can potentially jump virtual time
+to accelerate emulation.
+
+Benchmark Runner
+Request
+Dispatcher
+
+SPP-0
+
+SPP-1
+
+TP-0
+
+TP-0
+
+TP-0
+
+5 Dispatch
+Batch
+
+6
+
+3
+
+Get Least
+4 Slack Prefill
+
+4 Check Runtime
+Constraint
+
+Runtime Predictor
+
+Tackling Causality. While the concept of time-jumping
+is straightforward in principle, implementing it in a distributed serving system introduces a fundamental challenge with respect to causality. In a serving system, multiple independent processes (the batch scheduler, workers, and the request load generator) operate concurrently.
+Each process has its own view of the next event. For example, a worker may be ready to jump 50 ms to simulate
+batch execution, while the load generator is scheduled to
+inject a new request in 10 ms.
+If the worker unilaterally advances its local clock by
+50 ms, it would effectively “step over” the arrival of the
+new request. In the virtual timeline, the request arrives
+after the batch completes, whereas in reality, it would
+have arrived during execution, potentially altering the
+scheduler’s decision for the subsequent batch. This violation of causality leads to incorrect queuing behavior and
+invalid latency measurements.
+Return Generated Tokens 7
+
+1 Add New Request
+
+GPU
+Worker
+Time jump to
+batch completion
+
+Observer Process
+
+Figure 4: Coordinating virtual time across processes.
+The benchmark runner and inference engine run as separate processes, each containing actors (blue) that request
+time jumps and observers (pink) that receive time updates. Timekeeper coordinates jump requests and broadcasts consistent offsets.
+Rolo Time Keeper
+
+Batch Packer
+
+Update
+Batch
+
+Prefill Priority Queue
+
+Offset Update
+Broadcast
+
+Actor Process
+
+Replica Controller
+
+Batch Scheduler
+
+Reque
+Partial Prefill
+
+Request
+Scheduler
+
+TimeKeeper
+
+KVP-1
+
+SPP-1
+
+TP-0
+
+Output
+Processor
+
+Time jump to
+next request
+
+3D Parallel Execution Engine
+
+KVP-0
+
+SPP-0
+
+Inference Engine
+
+Client Interface
+
+Request
+
+nents operate in real-time, and we need to transparently
+accelerate time without introducing any additional overhead. For instance, the Chandy-Misra-Bryant [7, 8] algorithm requires each simulation worker to send a null
+message to each peer with the next lookahead time. The
+simulator needs to be able to control the event scheduling
+to implement this approach. In this paper, we propose an
+approach to enable time acceleration without violating
+causality in emulation systems.
+
+Response
+
+4
+
+R EVATI: System Design
+
+R EVATI bridges the gap between parallel distributed
+event-driven simulation and emulation approaches
+through Time-Warp Emulation. Realizing this paradigm
+requires resolving the tension between the asynchronous
+nature of distributed serving systems and the strict causality required for accurate modeling. The rest of this section details the design of R EVATI and how it addresses
+challenges related to time virtualization.
+
+Time Acceleration in the Literature. This is a classic
+problem, widely studied in the distributed event simulator literature. Optimistic approaches [17, 18] allow different processes to advance their clocks independently.
+When a causality violation is detected, the process state
+is rolled back to the last consistent checkpoint. However,
+this approach is infeasible for emulation because serving
+systems cannot be rolled back. In contrast, conservative
+approaches [7–9] are more amenable to emulation. These
+approaches require every process in the system to agree
+on a common lookahead time within which execution
+can safely be advanced without violating causality.
+While there have been several implementations of conservative time acceleration discussed in literature for
+discrete-event simulation [7–9], none are directly applicable to emulation. In an event driven simulator, the event
+loop has direct control over causality of events. In contrast, in emulation systems, all the distributed compo-
+
+4.1
+
+Overview
+
+Process Model. Running a performance evaluation for a
+LLM serving system involves two main pieces: a benchmark runner, which submits requests, and the LLM inference engine, which processes these requests (Figure 4).
+These components map to two temporal roles in R E VATI’s execution model. Actors have deterministic plans
+and know when their future actions will complete. For instance, the benchmark runner’s request dispatcher knows
+when to dispatch each new request (e.g., at t=100ms,
+t=250ms), and the inference engine’s GPU workers know
+when batch execution will finish. These processes actively drive virtual time forward. Observers are purely
+reactive and respond to events as they occur. The benchmark runner’s output processor and the inference engine’s
+request scheduler are two such examples.
+
+1 Note: In real deployments, the request termination is determined by
+the generation of EOS tokens. However, for performance modeling purposes, it is a common practice to run each request for a predetermined
+number of tokens by running specific sampling parameters.
+
+5
+
+TimeKeeper
+
+CUDA API Mocking
+Rolo Emulation Environment
+
+Actor Process
+
+Observer Process
+
+100ms Jump
+requested
+
+System Architecture. R EVATI comprises two main
+components: the Timekeeper, which synchronizes virtual time across distributed components and manages time jumps to accelerate execution, and the
+Device Emulation Layer, which transparently intercepts and models GPU operations without requiring physical hardware.
+Integrating these pieces with R EVATI involves patching every Actor in the system to make time jumps when
+possible. The benchmark runner must be modified to
+make time jumps between request dispatches. Similarly,
+the GPU workers of the inference engine need to jump
+over GPU batch executions. Combined, these take up
+about 50 lines of code for vLLM and SGLang. Device
+Emulation Layer is loaded via LD_PRELOAD to intercept
+any device management calls separate from GPU kernel dispatches. When execution begins, Actors submit
+concurrent time jump requests to the Timekeeper— the
+benchmark runner requesting a jump to the next request
+arrival, GPU workers requesting jumps over their batch
+execution durations. The Timekeeper computes the minimum target across all Actors, advances the global virtual
+clock to that point, and broadcasts the update. Actors
+whose targets have been reached return immediately. Actors with further targets remain blocked and resubmit in
+subsequent barrier rounds. Observers query virtual time
+asynchronously to timestamp events without participating in this coordination.
+SPP-1
+
+SPP-0
+
+SPP-1
+
+TP-0
+
+TP-0
+
+TP-0
+
+TP-0
+
+Batch
+
+Reque
+
+3
+
+Get Least
+
+4 Slack Prefill
+
+TimeKeeper
+Wall Clock Time
+
+Wait for
+Actor 2
+
+Jump
+
+Jump
+
+All jumps
+completed
+
+Figure 5: Barrier-based time synchronization. When
+actors request different jump durations, Timekeeper advances to the minimum safe offset. Here, Actor 1 requests
+a 100ms time jump at t = 0. Before performing the jump,
+Timekeeper waits for all actors to publish their safe offRolo Time Keeper
+sets. When Actor 2 requests a 30ms jump at t = 20, the
+barrier resolves and Timekeeper advances time by 30ms.
+Actor 1 still has 50ms remaining, so it requeues a jump
+request for the remainder. Actor 1’s original 100ms jump
+is thus processed in two chunks, with total wall clock
+time of just 50ms.
+
+Batch Packer
+
+Update
+Batch
+
+4 Check Runtime
+Constraint
+
+Runtime Predictor
+
+Prefill Priority Queue
+
+Return Generated Tokens 7
+
+1 Add New Request
+
+Client Interface
+
+Request
+
+4.2
+
+20ms Jump
+requested
+
+Actor 2
+Virtual Time
+
+Replica Controller
+
+Batch Scheduler
+
+6 Partial Prefill
+
+100ms Jump
+completed
+
+KVP-1
+
+SPP-0
+
+5 Dispatch
+
+Requeue jump for
+remaining 50ms
+
+30ms Jump
+requested
+
+3D Parallel Execution Engine
+
+KVP-0
+
+Barrier Resolves
+offset + 30
+
+Actor 1
+Virtual Time
+
+Response
+
+4.2.1
+
+Virtual Time Protocol
+
+Coordinating virtual time across distributed processes requires a protocol that preserves causality without controlling process execution. This section presents R EVATI’s
+barrier-based protocol and analyzes its correctness properties.
+Design Constraints. Adapting virtual time to real-time
+emulation introduces three constraints absent in traditional discrete-event simulators:
+• No rollback. Optimistic approaches like Time
+Warp [17, 18] speculatively advance time and rollback
+on causality violations. Since we execute real system
+code with irreversible side effects—network messages
+sent, data structures modified—this approach is infeasible.
+• No event scheduling control. Conservative protocols
+like Chandy-Misra-Bryant [8] assume the simulator
+controls event processing order. Our processes run
+asynchronously in wall-clock time; the protocol must
+coordinate time advancement without controlling execution.
+• Graceful degradation. When coordination fails (stragglers, network delays), the system must remain correct,
+potentially sacrificing speed but never producing invalid results.
+
+Timekeeper
+
+The Timekeeper is a service that manages virtual time
+across connected clients. It exposes a T IME J UMP (∆t)
+API that allows clients to request time jumps and receive
+clock updates. We classify clients of the Timekeeper as either Actors or Observers. Actors are active drivers of the
+simulation that process operations with predictable durations and must actively request virtual time advancement.
+Observers are reactive components that consume virtual
+time to timestamp events but do not block its progression.
+This distinction allows R EVATI to minimize coordination
+overhead by requiring synchronization only from Actors, while enabling integration with serving frameworks
+through minimal code changes.
+To ensure scalability, the architecture separates the
+request path from the update path. Actors submit time
+jump requests individually to the Timekeeper via a reliable channel (fan-in). The Timekeeper disseminates clock
+updates to all clients simultaneously via a broadcast channel (fan-out). This asymmetry allows the Timekeeper to
+update hundreds of distributed workers with constant serialization cost per round, preventing bottlenecks during
+high-frequency barrier resolutions.
+
+Virtual Time Representation. R EVATI maintains a
+global virtual clock as an offset from wall-clock time:
+tvirtual = twall + offset
+
+(1)
+
+Initially offset = 0, so virtual time equals wall time. As
+Actors request time jumps, the Timekeeper increases the
+offset, causing virtual time to advance faster than wall
+6
+
+Algorithm 1 Client: TimeJump(∆t)
+
+Algorithm 2 Server: ProcessTimeJumpRequests()
+
+Require: ∆t > 0: virtual time to advance (ms)
+1: ttarget ← G ET V IRTUALT IME() + ∆t
+▷ Compute absolute target once
+2: while G ET V IRTUALT IME() < ttarget do
+3:
+S END T IME J UMP R EQUEST(ttarget )
+▷ Request advance to target
+4:
+WAIT F OR ACK()
+5:
+tremaining ← ttarget − G ET V IRTUALT IME()
+6:
+if tremaining > 0 then
+7:
+WAIT F OR C LOCK U PDATE(tremaining )
+▷ Block until broadcast or timeout
+8:
+end if
+9: end while
+
+Require: numActors: number of registered actors
+/ o f f set ← 0
+1: pending ← 0,
+▷ Initialize pending requests and virtual offset
+2: while true do
+3:
+(c,ttarget ) ← R ECEIVE R EQUEST()
+4:
+pending[c] ← ttarget
+▷ Store request for client c
+5:
+if |pending| = numActors then
+▷ All actors at barrier—advance virtual time
+6:
+tmin ← min{t : t ∈ pending}
+▷ Minimum target preserves causality
+7:
+if G ET WALLT IME() < tmin then
+8:
+twall ← G ET WALLT IME()
+9:
+o f f set ← max(o f f set,tmin − twall )
+10:
+B ROADCAST C LOCK U PDATE(o f f set)
+▷ Notify all clients
+11:
+end if
+12:
+pending ← 0/
+▷ Reset for next round
+13:
+end if
+14: end while
+
+time. This representation allows Observers to query virtual time without coordination—they simply read the
+current offset and add wall time.
+Barrier-Based Coordination. When an Actor calls
+T IME J UMP(∆t), it computes its target virtual time and
+sends a request to the Timekeeper. The Timekeeper collects requests from all Actors, then advances virtual
+time to the minimum requested target. This minimumadvancement rule ensures no Actor jumps past its intended time, preserving causality. For example, if one
+worker needs 50ms to process its batch while another
+needs 10ms, advancing each independently would break
+causality: an Actor at virtual time t = 1000 could observe
+events from an Actor still at t = 500. Algorithm 2 shows
+the server-side protocol.
+A single T IME J UMP call may span multiple barrier
+rounds. Consider two workers: WA calls T IME J UMP(50),
+WB calls T IME J UMP(10). The Timekeeper computes tmin
+from WB ’s target and advances by 10ms. WB ’s call returns.
+WA remains in its loop—virtual time has advanced but
+not to WA ’s target—and re-requests in the next barrier
+round. Algorithm 1 shows the client-side protocol. The
+client computes its target time once (line 1), then loops
+until virtual time reaches this target. Each iteration sends
+the target to the Timekeeper, receives acknowledgment,
+and waits for a clock update broadcast with a timeout
+equal to the remaining virtual time needed.
+
+deadlock; it can only lose acceleration.
+Handling Message Jitter. Real-time emulation must
+account for network delays and CPU scheduling jitter.
+Consider this scenario: the inference server generates a
+token at wall time tw =100ms and virtual time tv =3400ms.
+The benchmark runner receives it promptly and records
+tv =3400ms. The server then processes the next batch
+(20ms predicted), updating virtual time to tv =3420ms
+at tw =101ms. Due to network delay, the runner reads
+the next token at tw =102.5ms. Meanwhile, the server
+completes another batch and updates to tv =3450ms at
+tw =102ms. When the runner queries virtual time at
+tw =102.5ms, it observes 3450ms instead of 3420ms—an
+inaccurate latency measurement.
+Attaching virtual timestamps to messages as soon as
+they are produced would eliminate this ambiguity. While
+accurate, this approach also requires significant changes
+(a few hundred lines) to the serving engine. For easier
+integration, R EVATI also offers a bounded-jitter model:
+assuming messages are received within J time of transmission, inserting a J-duration cooldown between consecutive time jumps prevents Observers from reading
+stale virtual times. We find that J ≈ 500µs suffices in
+most practical settings.
+
+Graceful Degradation. The timeout in Algorithm 1 ensures correctness under failures. If the broadcast never
+arrives—due to network issues or a stalled Actor—the
+wait times out after tremaining wall-clock milliseconds. At
+that point, wall time has advanced by tremaining , and since
+tvirtual = twall +offset, virtual time has also advanced. The
+loop condition succeeds, and T IME J UMP returns.
+The operation completes correctly but at wall-clock
+speed. In the worst case, R EVATI degenerates to sleepbased emulation—slow but never incorrect. This property guarantees R EVATI cannot produce invalid results or
+
+4.3
+
+Device Emulation Layer
+
+Serving frameworks are deeply integrated with CUDA
+and NCCL. Modifying all call sites would require invasive per-framework changes, undermining R EVATI’s
+7
+
+Llama-8B
+
+Qwen-30B-A3B
+
+Llama-70B
+
+Baseline
+
+Revati
+
+0.8
+
+0.8
+
+0.8
+
+0.6
+
+0.6
+
+0.6
+
+0.6
+
+0.4
+
+0.4
+
+0.4
+
+0.2
+
+0.2
+
+0.2
+
+0.0 0.0
+
+0.0
+
+0.0 0.0
+
+0.4
+
+0.8
+
+1.2
+
+1.6
+
+CDF
+
+1.0
+
+0.8
+
+CDF
+
+1.0
+
+CDF
+
+1.0
+
+CDF
+
+1.0
+
+15
+
+30
+
+45
+
+60
+
+Time to First Token (s)
+Time Per Output Token (ms)
+(a) vLLM
+
+0.4
+0.2
+
+0.4
+
+0.8
+
+1.2
+
+1.6
+
+0.0 0
+
+40
+
+80
+
+120
+
+160
+
+Time to First Token (s)
+Time Per Output Token (ms)
+(b) SGLang
+
+Figure 6: End-to-end accuracy. R EVATI (dashed) closely matches real execution (solid) for both TTFT and TPOT
+distributions across three model configurations. Prediction error remains below 5% even at tail.
+20
+
+vLLM
+SGLang
+
+Speedup
+
+15
+
+13x
+10x
+
+10
+5
+
+these buffers. To tackle this, R EVATI bifurcates allocations into two categories. Metadata buffers – small allocations (below 4MB by default) potentially used for control
+decisions – are backed by real host memory and their
+operations execute faithfully. Compute buffers – large
+allocations for KV caches and weights – receive virtual
+pointers with no physical backing and their operations
+become no-ops with durations estimated by the runtime
+predictor. This model relies on compute buffers never
+being read by the CPU. To enforce this invariant, R E VATI raises a fatal exception if the application attempts to
+read from a virtual compute buffer rather than returning
+garbage values. A successful emulation run thus guarantees the control plane never operated on phantom data.
+
+18x
+
+5x
+
+7x
+
+7x
+
+0 Llama-8B Qwen-30B-A3B Llama-70B
+
+Model
+
+Figure 7: End-to-end speedup. R EVATI achieves 5-17×
+speedup on vLLM and 6-12× on SGLang compared to
+real on GPU execution.
+transparency goal. The Device Emulation Layer adapts
+Maya’s [31] transparent device virtualization to intercept
+and emulate CUDA API calls for inference workloads.
+Unmodified framework code executes while believing it
+has access to target hardware. In addition to maintaining
+transparency, this approach enables evaluation at scales
+beyond available resources. For example, a researcher
+who wants to perform evaluations on a 128-GPU H200
+cluster, but doesn’t have access to such hardware can simply configure R EVATI to emulate the desired hardware.
+However, performing emulation in real-time (as opposed to Maya’s offline approach) introduces some
+unique challenges that we discuss below.
+
+4.4
+
+Runtime Prediction
+
+R EVATI provides a pluggable interface supporting both
+analytical and profiling-based runtime predictors. By default, we extend Vidur’s [4] operator-level models with
+support for Mixture-of-Experts routing, fused attention
+variants, and optimized all-reduce collectives. The predictor accepts batch composition (prefill count, decode
+count, sequence lengths) and target hardware spec, returning an estimated duration.
+
+Preserving Distributed Dependencies. In distributed
+serving (pipeline parallelism, tensor parallelism), NCCL
+collectives enforce causal dependencies—stage i+1 cannot proceed until stage i completes ncclSend. Without actual GPU execution, R EVATI must block emulated
+stage i+1 until emulated stage i reaches the corresponding send. We convert NCCL collectives into barrier synchronization points across participating workers, preserving temporal ordering without data transfer.
+
+5
+
+Implementation
+
+The Timekeeper server and client library comprise ∼800
+lines of C++, with Python bindings for framework integration. The device emulator adds ∼6000 lines of C++.
+LLM server patches total fewer than 50 lines each for
+vLLM and SGLang. The messaging layer uses ZeroMQ
+for low-latency communication. The Timekeeper server
+employs a multi-threaded architecture: a dedicated I/O
+thread handles serialization and socket operations, and
+a background thread manages the barrier state and timejump logic. This separation ensures high-frequency requests do not block barrier resolution.
+
+Split-State Memory Model. Unlike training workloads,
+serving systems often use GPU channels for controlplane communication. SGLang, for instance, broadcasts
+batch composition via NCCL. Pure black-box emulation
+would break this because the CPU expects valid data in
+8
+
+20ms
+40ms
+0.8
+
+0.6
+
+0.6
+
+0.4
+
+0.4
+
+0.2
+0.0
+
+0.2
+0.0
+
+0.3
+
+0.6
+
+0.9
+
+TTFT (s)
+
+1.2
+
+0.0
+
+20
+
+40
+
+60
+
+TPOT (ms)
+
+0.2
+
+0.1
+
+0.1
+0.5 1
+
+2
+
+QPS
+
+4
+
+8
+
+0.0
+
+0.5 1
+
+2
+
+QPS
+
+4
+
+8
+
+Figure 9: Accuracy with varying request rate. R EVATI
+accurately models both the median and tail latency trends
+across varying request arrival rates.
+30
+25
+20
+15
+10
+5 4x
+0 5
+
+Speedup
+
+Evaluation
+
+In this section, we present a comprehensive evaluation
+of R EVATI to demonstrate its fidelity in simulating LLM
+inference performance.
+
+27x
+17x
+9x
+
+10
+
+20
+
+40
+
+Batch Duration (ms)
+
+• Accuracy: How accurately does R EVATI predict
+end-to-end inference latency across varying model
+sizes, and deployment configurations?
+
+30
+25
+20
+16x 17x 14x
+15
+12x 12x
+10
+5
+0 0.5 1 2 4 8
+
+QPS
+
+Figure 10: Speedup with varying parameters. R EVATI
+consistently maintains high speed up across varying batch
+durations and request rates.
+
+• Efficiency: Can R EVATI effectively accelerate evaluations compared to the strawman approach?
+
+6.1
+
+0.2
+
+80
+
+P90
+
+0.3
+
+Baseline
+Revati
+
+0.0
+0
+
+Figure 8: Accuracy with Varying batch durations. R E VATI (dashed) matches sleep-based emulation (solid)
+across all batch durations.
+
+6
+
+P50
+
+0.3
+
+CDF
+
+1.0
+
+0.8
+
+CDF
+
+1.0
+
+Baseline
+Revati
+
+TTFT (s)
+
+5ms
+10ms
+
+Accuracy. Figure 6 compares the latency distributions
+predicted by R EVATI (dashed) against real execution
+(solid). Across all model sizes and both serving engines,
+R EVATI closely tracks the baseline Time-to-first-token
+(TTFT) and Time-per-output-token (TPOT) distributions.
+The predicted latencies match near identically across the
+CDF with median prediction error below 5%. By directly
+executing serving engines, R EVATI is able to accurately
+model minute details in the scheduling policies of these
+systems. We observe that though both the systems exhibit similar TTFT performance, SGLang suffers from a
+significantly worse tail when it comes to decode TPOT –
+this is because, SGLang does not perform mixed batching
+by default, though it performs chunked prefills.
+
+Experimental Setup
+
+Models and Inference Systems. We conduct profiling
+and simulation across a spectrum of model sizes to ensure generalization. Specifically, we evaluate the performance of our system across 2 dense models (Llama-3.18B & Llama-3.1-70B), and one sparse model (Qwen330B-A3B). We set the tensor parallel degrees to one and
+four for Llama-3.1-8B and Llama-3.1-70B respectively.
+We run Qwen3-30B-A3B with expert parallel degree of
+two. To evaluate the generality of the system, we perform
+experimentation across two different serving engines –
+vLLM [28] and SGLang [26]. To ensure a consistent comparison, we enable chunked prefill with mixed batching
+across all settings with chunk size 512.
+Hardware. We perform our evaluations on a machine
+with 4 H200 GPUs featuring a fully connected NVLink
+fabric with a 128 core AMD 9334 EPYC CPU and
+756GB memory.
+
+Speedup. As shown in Figure 7 R EVATI achieves over
+an order of magnitude speedups across both vLLM and
+SGLang over real execution due to its time acceleration
+protocol. Note that as models get larger and the GPU
+execution time increases, we obtain higher speed ups
+with peak performance for Llama-3.1-70B.
+
+6.2
+
+6.3
+
+End-to-end Evaluations
+
+Ablation Experiments
+
+To understand how workload characteristics affect R E VATI’s performance, we conduct various ablation studies.
+
+We evaluate R EVATI’s accuracy and speedup on end-toend inference benchmarks across two production serving
+engines (vLLM and SGLang), three model configurations
+(Llama-3.1-8B, Llama-3.1-70B, and Qwen3-30B-A3B),
+using the ShareGPT dataset and Poisson arrival.
+
+Varying Batch Durations. First, we evaluate how accurately and efficiently R EVATI can operate if the model
+size and hardware changes. We mimic this by using static
+9
+
+batch time predictions of varying durations between 5
+and 40 ms. We compare our performance against the
+naive sleep-based approach, where GPU workers simply
+sleep for the batch duration instead of performing time
+jumps.
+As shown in Figure 8, R EVATI produces highly accurate TTFT and TPOT distributions with less than 5%
+error. As we increase the batch duration, we obtain higher
+speedup — going up to 27× at batch runtime of 40ms.
+This is a direct consequence of R EVATI’s ability to skip
+over GPU compute wait times.
+
+computation. Both share the insight that applications can
+operate in virtual time decoupled from wall-clock time,
+but the mechanisms differ substantially. Network emulators intercept system calls and scale delays; R EVATI
+coordinates distributed processes through explicit barrier
+synchronization to maintain causality across time jumps.
+
+8
+
+Towards Fully Transparent Emulation. R EVATI requires a minimal (∼50 line) patch per framework to
+invoke time jumps. However, this introduces a natural
+question: could we eliminate this requirement entirely
+through kernel-level interception, as Maya does for training? However, there are two challenges with this approach. First, modern inference systems have frameworkspecific implementations for certain complex operations
+like flash attention, MoE routing. Predicting their runtime
+from kernel API signatures alone would require complex
+reverse-engineering of framework internals – introducing
+maintenance burden that R EVATI aims to avoid. More
+recently, there have been attempts to directly estimate the
+runtime of GPU kernels from their source code and input
+parameters [19, 21] – this direction has the promise of
+allowing fully transparent emulation in future.
+
+Varying Arrival Rates. Another interesting aspect of the
+workload which could directly affect the accuracy and
+efficacy of virtual time advancement protocol is the request arrival rate. Figure 9 shows R EVATI’s performance
+on request arrival rate varying between 0.5 and 8 queries
+per second (QPS). To exclude any errors introduced due
+to the runtime predictor, we run this experiment with a
+fixed batch time of 20 ms and compare against the sleepbased baseline. The system maintains less than 5% error
+in TTFT predictions across the board.
+As the arrival rate increases, we observe slight reduction in speed up. This is because at higher arrival rates the
+system operates with larger batch sizes, which results in
+higher CPU work for batch formation and bookkeeping.
+However, since this overhead is relatively small (typically
+< 200µs) compared to batch execution time, R EVATI sustains over an order of magnitude speedup even at high
+request load.
+
+7
+
+Discussion
+
+Speed of Light Execution. The systems community has
+been striving hard to minimize the CPU overheads in
+serving systems to maximize the GPU utilization. This
+is becoming increasingly important as GPUs become
+faster and more capable over generations. Recently, there
+have been multiple efforts to implement highly efficient
+executions in C++ and Rust [1, 2] instead of the traditional Python implementations. Existing frameworks like
+SGLang have also started to recently migrate critical segments of their codebase like the prefix cache tree to C++
+to achieve this goal [26]. Interestingly, this raises the
+question: what maximum acceleration can we achieve
+with R EVATI? As the emulation speeds up, we expect to
+encounter more interesting challenges and bottlenecks in
+the system – for instance, the tokenization/detokenization
+steps could add non-trivial overheads etc. We hope to explore these challenges in future work.
+
+Related Work
+
+Virtual Time in Distributed Simulation. Jefferson’s
+Time Warp [17,18] pioneered optimistic virtual time: processes advance speculatively and rollback on causality
+violations. Chandy-Misra [7, 8] introduced conservative
+protocols where processes exchange lookahead information to advance safely. Both assume the simulator controls event scheduling. R EVATI operates under a different
+constraint: processes run asynchronously in wall-clock
+time with real side effects that cannot be rolled back.
+Our barrier-based protocol adapts conservative principles
+to this setting, using minimum-target advancement to
+preserve causality while timeouts ensure graceful degradation to real-time execution.
+
+9
+
+Time Dilation for Network Emulation. Time dilation [14, 15, 27] slows virtual time to make physical hardware appear faster—a 1 Gbps NIC can emulate 10 Gbps
+by running applications at 10× slower virtual time. Tools
+like DieCast [14], ModelNet [27], and Mininet [16] use
+this technique for network testing at scale. R EVATI inverts this relationship: rather than slowing time to amplify
+hardware capability, we accelerate time to skip over GPU
+
+Conclusion
+
+The rapid evolution of LLM serving systems has rendered traditional discrete-event simulation unsustainable.
+The gap between a simulator’s model and frontier-grade
+serving systems is simply too expensive to bridge manually. R EVATI eliminates this gap entirely by cheap and
+accurate runtime modeling directly on top of original
+serving frameworks. We show that the transparent device emulation layer, combined with the barrier-based
+10
+
+virtual time protocol, can enable accurate runtime modeling (<5% error) while concurrently achieving an order
+of magnitude speedup over physical execution.
+
+[11] Jaehong Cho, Hyunmin Choi, and Jongse Park.
+Llmservingsim2.0: A unified simulator for heterogeneous hardware and serving techniques in llm
+infrastructure. IEEE Computer Architecture Letters, 24(2):361–364, July 2025.
+
+References
+
+[12] Jaehong Cho, Minsu Kim, Hyunmin Choi, Guseul
+Heo, and Jongse Park. Llmservingsim: A hw/sw cosimulation infrastructure for llm inference serving
+at scale. In 2024 IEEE International Symposium on
+Workload Characterization (IISWC), pages 15–29.
+IEEE, 2024.
+
+[1] ggml-org/llama.cpp: Llm inference in C/C++ —
+github.com. https://github.com/ggml-org/
+llama.cpp.
+[2] Huggingface text generation inference: github.
+https://github.com/huggingface/textgeneration-inference.
+
+[13] Yicheng Feng, Xin Tan, Kin Hang Sew, Yimin
+Jiang, Yibo Zhu, and Hong Xu. Frontier: Simulating the next generation of llm inference systems,
+2025.
+
+[3] LM Cache: Supercharge Your LLM with the
+Fastest KV Cache Layer. https://github.com/
+LMCache/LMCache.
+
+[14] Diwaker Gupta, Kashi Venkatesh Vishwanath, Marvin McNett, Amin Vahdat, Ken Yocum, Alex Snoeren, and Geoffrey M Voelker. Diecast: Testing
+distributed systems with an accurate scale model.
+ACM Transactions on Computer Systems (TOCS),
+29(2):1–48, 2011.
+
+[4] Amey Agrawal, Nitin Kedia, Jayashree Mohan,
+Ashish Panwar, Nipun Kwatra, Bhargav S Gulavani, Ramachandran Ramjee, and Alexey Tumanov.
+Vidur: A Large-Scale Simulation Framework For
+LLM Inference. MLSys, 2024.
+
+[15] Diwaker Gupta, Kenneth Yocum, Marvin McNett,
+Alex C. Snoeren, Amin Vahdat, and Geoffrey M.
+Voelker. To infinity and beyond: time warped network emulation. In Proceedings of the Twentieth
+ACM Symposium on Operating Systems Principles,
+SOSP ’05, page 1–2, New York, NY, USA, 2005.
+Association for Computing Machinery.
+
+[5] Amey Agrawal, Nitin Kedia, Ashish Panwar,
+Jayashree Mohan, Nipun Kwatra, Bhargav S Gulavani, Alexey Tumanov, and Ramachandran Ramjee.
+Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve. OSDI, 2024.
+[6] Amey Agrawal, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S. Gulavani, and Ramachandran Ramjee. SARATHI: Efficient LLM
+Inference by Piggybacking Decodes with Chunked
+Prefills, 2023.
+
+[16] Nikhil Handigol, Brandon Heller, Vimalkumar
+Jeyakumar, Bob Lantz, and Nick McKeown. Reproducible network experiments using containerbased emulation. In Proceedings of the 8th International Conference on Emerging Networking Experiments and Technologies, CoNEXT ’12, page
+253–264, New York, NY, USA, 2012. Association
+for Computing Machinery.
+
+[7] Randal R Bryant. Simulation of packet communication architecture computer systems. 1977.
+[8] K. Mani Chandy and Jayadev Misra. Asynchronous
+distributed simulation via a sequence of parallel computations. Communications of the ACM,
+24(4):198–206, 1981.
+
+[17] David Jefferson, Brian Beckman, Frederick
+Wieland, Leo Blume, and Mike DiLoreto. Time
+warp operating system. In Proceedings of the
+eleventh ACM Symposium on Operating systems
+principles, pages 77–93, 1987.
+
+[9] K. Mani Chandy and Jayadev Misra. Distributed
+simulation: A case study in design and verification
+of distributed programs. IEEE Transactions on
+software engineering, (5):440–452, 2006.
+
+[18] David R. Jefferson. Virtual time. ACM Trans.
+Program. Lang. Syst., 7(3):404–425, July 1985.
+[19] Seonho Lee, Amar Phanishayee, and Divya Mahajan. Forecasting gpu performance for deep learning
+training and inference. In Proceedings of the 30th
+ACM International Conference on Architectural
+Support for Programming Languages and Operating Systems, Volume 1, ASPLOS ’25, page 493–508.
+ACM, March 2025.
+
+[10] Yihua Cheng, Yuhan Liu, Jiayi Yao, Yuwei An,
+Xiaokun Chen, Shaoting Feng, Yuyang Huang,
+Samuel Shen, Kuntai Du, and Junchen Jiang.
+Lmcache: An efficient kv cache layer for
+enterprise-scale llm inference. arXiv preprint
+arXiv:2510.09665, 2025.
+11
+
+[20] Yi-Chien Lin, Woosuk Kwon, Ronald Pineda, and
+Fanny Nina Paravecino. Apex: An extensible
+and dynamism-aware simulator for automated parallel execution in llm serving. arXiv preprint
+arXiv:2411.17651, 2024.
+
+[30] An Yang, Anfeng Li, Baosong Yang, Beichen
+Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang
+Gao, Chengen Huang, Chenxu Lv, et al. Qwen3
+technical report. arXiv preprint arXiv:2505.09388,
+2025.
+
+[21] Charith Mendis, Alex Renda, Saman Amarasinghe,
+and Michael Carbin. Ithemal: Accurate, portable
+and fast basic block throughput estimation using
+deep neural networks, 2019.
+
+[31] Srihas Yarlagadda, Amey Agrawal, Elton Pinto,
+Hakesh Darapaneni, Mitali Meratwal, Shivam Mittal, Pranavi Bajjuri, Srinivas Sridharan, and Alexey
+Tumanov. Maya: Optimizing deep learning training workloads using emulated virtual accelerators.
+arXiv preprint arXiv:2503.20191, 2025.
+
+[22] Tiyasa Mitra, Ritika Borkar, Nidhi Bhatia, Ramon
+Matas, Shivam Raj, Dheevatsa Mudigere, Ritchie
+Zhao, Maximilian Golub, Arpan Dutta, Sailaja
+Madduri, et al. Beyond the buzz: A pragmatic
+take on inference disaggregation. arXiv preprint
+arXiv:2506.05508, 2025.
+
+[32] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo
+Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, and Hao
+Zhang. {DistServe}: Disaggregating prefill and decoding for goodput-optimized large language model
+serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24),
+pages 193–210, 2024.
+
+[23] NVIDIA Corporation. Dynamo: A datacenter scale
+distributed inference serving framework. https:
+//github.com/ai-dynamo/dynamo, 2025. Accessed: October 29, 2025.
+[24] Pratyush Patel, Esha Choukse, Chaojie Zhang,
+Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. Splitwise: Efficient generative llm
+inference using phase splitting. In 2024 ACM/IEEE
+51st Annual International Symposium on Computer
+Architecture (ISCA), pages 118–132. IEEE, 2024.
+[25] Ruoyu Qin, Zheming Li, Weiran He, Mingxing
+Zhang, Yongwei Wu, and Xinran Xu Weimin Zheng.
+Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving, 2024.
+[26] SGL Project. SGLang: A fast serving framework
+for large language models and vision-language
+models. https://github.com/sgl-project/
+sglang, 2025. Accessed: 2025-10-29.
+[27] Amin Vahdat, Ken Yocum, Kevin Walsh, Priya
+Mahadevan, Dejan Kostić, Jeff Chase, and David
+Becker. Scalability and accuracy in a large-scale
+network emulator. SIGOPS Oper. Syst. Rev.,
+36(SI):271–284, December 2003.
+[28] vLLM Project. vLLM: Easy, fast, and cheap
+LLM serving for everyone. https://github.com/
+vllm-project/vllm.
+[29] Feiyang Wu, Zhuohang Bian, Guoyang Duan,
+Tianle Xu, Junchi Wu, Teng Ma, Yongqiang Yao,
+Ruihao Gong, and Youwei Zhuo. Tokensim: Enabling hardware and software exploration for large
+language model inference systems, 2025.
+12
+
+
