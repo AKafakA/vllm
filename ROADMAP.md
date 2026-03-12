@@ -96,18 +96,18 @@ vllm-emulator/
 - **Commit ID:** e567315
 - **Status:** ✅ DONE
 
-#### P0.3: Profile Pack System
+#### P0.3: Profile Pack System ✅ DONE
 - **Task:** Define and implement profile pack loading
 - **Acceptance:**
   - Can load JSON profile pack
   - Schema validation works
   - Example profile packs created
 - **Deliverables:**
-  1. `vllm_emulator/profile/loader.py`
-  2. `vllm_emulator/profile/validator.py`
-  3. Example profiles in `examples/profiles/`
+  1. `vllm_emulator/profile/loader.py` ✅
+  2. `vllm_emulator/profile/validator.py` ✅
+  3. Example profiles in `examples/profiles/` ✅
 - **Commit ID:** TBD
-- **Status:** NOT_STARTED
+- **Status:** ✅ DONE
 
 #### P0.4: Profile Generation Scripts - REQUIRED ✅ DONE
 - **Task:** Create profiling scripts to generate profile packs from real GPU runs
@@ -129,24 +129,32 @@ vllm-emulator/
 
 **Note:** Category C (Offload) and D (Network) are marked as OPTIONAL. They can be added in Phase 2+ if needed.
 
-#### P1.1: GPU Cost Oracle (Category B) - REQUIRED
+#### P1.1: GPU Cost Oracle (Category B) - REQUIRED ✅ DONE
 - **Component:** `vllm/v1/worker/gpu_worker.py`
 - **Hook Point:** `Worker.execute_model()` (line 582)
 - **Design:**
   - Oracle Hook at Worker level
   - Profile: prefill (prompt_tokens), decode (active_seqs)
+  - Batch-level estimation (not per-request)
+  - Supports two blocking modes: online (default) and offline (REVATI-like)
 - **Acceptance:**
-  - [ ] Oracle interface defined
-  - [ ] Can load profile pack
-  - [ ] Prefill latency = f(prompt_tokens)
-  - [ ] Decode latency = f(active_seqs)
-  - [ ] Can fallback to real execution
+  - [x] Oracle interface defined
+  - [x] Can load profile pack
+  - [x] Prefill latency = f(prompt_tokens)
+  - [x] Decode latency = f(active_seqs)
+  - [x] Can fallback to real execution
+  - [x] Batch-level timing (not per-request)
+  - [x] Online blocking mode: time.sleep() for real-time simulation
+  - [x] Offline mode: no blocking (virtual time)
+  - [x] Warning for LLM.generate + online mode
 - **Deliverables:**
-  1. `vllm_emulator/oracle/base.py` - Base interface
-  2. `vllm_emulator/oracle/gpu_cost_oracle.py`
-  3. `vllm_emulator/hooks/gpu_hook.py`
-- **Commit ID:** TBD
-- **Status:** NOT_STARTED
+  1. `vllm_emulator/oracle/base.py` - Base interface ✅
+  2. `vllm_emulator/oracle/gpu_cost_oracle.py` ✅
+  3. `vllm_emulator/hooks/gpu_hook.py` ✅
+  4. `tests/unit/test_gpu_cost_oracle.py` ✅
+  5. `vllm/entrypoints/llm.py` - Warning for offline path ✅
+- **Commit ID:** 4ea9e32
+- **Status:** ✅ DONE
 
 #### P1.2: Offload Cost Oracle (Category C) - OPTIONAL
 - **Component:** `vllm/v1/kv_offload/`
@@ -192,12 +200,12 @@ vllm-emulator/
 - **Deliverables:**
   1. `vllm_emulator/oracle/network_cost_oracle.py`
   2. `vllm_emulator/hooks/network_hook.py`
-- **Commit
-- **Status ID:** TBD:** NOT_STARTED.5: Advanced 2
+- **Commit ID:** TBD
+- **Status:** NOT_STARTED
 
 ---
 
-### Phase Features (Before Workshop Paper)
+### Phase 2: Advanced Features (Before Workshop Paper)
 
 **Rationale:** Complete these before writing workshop paper to allow testing rounds before testbed expires (March 24, 2026).
 
@@ -239,32 +247,80 @@ vllm-emulator/
 
 ### Phase 3: Integration & Testing (P2)
 
-#### P2.1: CLI Integration
+#### P2.1: CLI Integration ✅ DONE
 - **Task:** Add CLI flags for emulator mode
 - **Acceptance:**
-  - `--emulator-mode` flag works
-  - `--profile-pack` flag works
-  - Help text updated
+  - [x] `--emulator-mode` flag works (online/offline)
+  - [x] `--profile-pack` flag works
+  - [x] Help text updated (EmulatorConfig argument group)
+  - [x] Environment variable fallback (VLLM_EMULATOR_BLOCKING_MODE, VLLM_EMULATOR_PROFILE_PACK)
+  - [x] CLI flags propagate to env vars for worker processes
+  - [x] Validation: --emulator-mode requires --profile-pack
 - **Deliverables:**
-  1. CLI flag integration
-  2. Environment variable support
-- **Commit ID:** TBD
-- **Status:** NOT_STARTED
+  1. `vllm/engine/arg_utils.py` - EngineArgs.emulator_mode, profile_pack fields + _resolve_emulator_args() ✅
+  2. `vllm/entrypoints/openai/cli_args.py` - Validation in validate_parsed_serve_args() ✅
+- **Commit ID:** 4ea9e32
+- **Status:** ✅ DONE
 
-#### P2.2: Testing Infrastructure
-- **Task:** Build A/B comparison pipeline
+#### P2.2: Testing Infrastructure (MVP) ✅ DONE
+- **Task:** Build A/B comparison pipeline and integration tests
 - **Acceptance:**
-  - Can run real vs emulated comparison
-  - Error metrics calculated
-  - Reports generated
+  - [x] Oracle hook integration tests (env var init, fake output, enable/disable)
+  - [x] Online blocking mode tested (time.sleep for estimated latency)
+  - [x] Offline mode tested (no blocking / virtual time)
+  - [x] Latency interpolation error < 15% threshold validated
+  - [x] Boundary clamping, monotonicity, round-trip tests
+  - [x] A/B comparison harness with accuracy report
 - **Deliverables:**
-  1. `tests/integration/test_ab_comparison.py`
-  2. Accuracy test scripts
-  3. Test profile packs
-- **Commit ID:** TBD
-- **Status:** NOT_STARTED
+  1. `tests/integration/test_oracle_hook.py` - Hook integration tests (14 tests) ✅
+  2. `tests/integration/test_timing_accuracy.py` - Accuracy validation (21 tests) ✅
+  3. `tests/integration/ab_comparison_harness.py` - A/B comparison script ✅
+- **Commit ID:** 4ea9e32
+- **Status:** ✅ DONE
 
-#### P2.3: Documentation
+---
+
+### Test Plan (P1.1 - GPU Cost Oracle)
+
+**Unit Tests:**
+- `tests/unit/test_gpu_cost_oracle.py` - Oracle interpolation ✅ (exists)
+- Profile pack validation tests
+
+**Integration Tests:**
+1. **Oracle Hook Integration** (`tests/integration/test_oracle_hook.py`)
+   - Enable via env vars: `VLLM_EMULATOR_ENABLE_ORACLE=1`, `VLLM_EMULATOR_PROFILE_PACK=<path>`
+   - Verify fake output is returned when enabled
+   - Verify `time.sleep()` blocks for estimated latency
+   - Verify fallback to real execution when disabled
+
+2. **Timing Accuracy Test** (`tests/integration/test_timing_accuracy.py`)
+   - Run emulator with known profile pack
+   - Compare emulated latency vs profile pack values
+   - Target: <15% error on decode path
+
+3. **Continue Batching Test** (`tests/integration/test_continue_batching.py`)
+   - Submit multiple requests with delays
+   - Verify scheduler correctly waits for batch completion
+   - Verify pending requests are properly queued
+
+**Test Commands:**
+```bash
+# Unit tests
+uv run pytest tests/unit/test_gpu_cost_oracle.py -v
+
+# Integration tests (require GPU)
+VLLM_EMULATOR_ENABLE_ORACLE=1 \
+VLLM_EMULATOR_PROFILE_PACK=examples/profiles/a100-sxm-80gb.json \
+uv run pytest tests/integration/ -v
+
+# Online mode (default): blocking for real-time simulation
+VLLM_EMULATOR_BLOCKING_MODE=online
+
+# Offline mode: no blocking (for LLM.generate batch inference)
+VLLM_EMULATOR_BLOCKING_MODE=offline
+```
+
+#### P2.3: Documentation ✅ DONE
 - **Task:** Complete user documentation
 - **Acceptance:**
   - User guide complete
@@ -274,7 +330,7 @@ vllm-emulator/
   1. `docs/user-guide.md`
   2. `docs/api.md`
   3. `examples/`
-- **Commit ID:** TBD
+- **Commit ID:** 0e7c026
 - **Status:** NOT_STARTED
 
 #### P2.4: Workshop Paper
@@ -326,8 +382,62 @@ vllm-emulator/
 
 ---
 
-## 8. Next Steps
+## 9. Next Steps
 
-1. [ ] Review and approve RFC design
-2. [ ] Start P0.2 (Platform Plugin)
-3. [ ] Continue with roadmap tasks
+1. [x] Review and approve RFC design
+2. [x] P0.1-P0.4: Foundation complete
+3. [x] P1.1: GPU Cost Oracle complete (with timing simulation)
+4. [x] P2.1: CLI Integration
+5. [x] P2.2: Testing Infrastructure (run integration tests)
+6. [ ] Continue with remaining roadmap tasks
+
+### Quick Start (P1.1)
+```bash
+# Enable emulator mode (default: online blocking)
+export VLLM_EMULATOR_ENABLE_ORACLE=1
+export VLLM_EMULATOR_PROFILE_PACK=examples/profiles/a100-sxm-80gb.json
+
+# For online serving (default): block for estimated latency
+# VLLM_EMULATOR_BLOCKING_MODE=online  # (default)
+
+# For offline batch inference: no blocking (faster)
+export VLLM_EMULATOR_BLOCKING_MODE=offline
+
+# Run vLLM as normal
+```
+
+---
+
+## Workshop + vLLM Patch Scope (Q1-Q2 2026)
+
+**Target:** Workshop paper + vLLM upstream patch
+
+**Scope:**
+- ✅ Online serving simulation (real-time blocking)
+- ✅ Offline mode (REVATI-like, virtual time)
+- ✅ GPU Cost Oracle (Category B)
+- ✅ Chunked prefill support
+- ❌ PD separation (defer to full paper)
+- ❌ KV Offload Oracle (defer)
+- ❌ Network Oracle (defer)
+
+**Timeline:**
+1. Week 1: Integration tests + accuracy validation
+2. Week 2: CLI integration + polish
+3. Week 3: Paper writing
+4. Week 4: vLLM patch submission
+
+---
+
+## Full Paper Scope (Q3-Q4 2026, post-CARA)
+
+**Target:** Full paper (MLSys/SOSP/OSDI)
+
+**Scope (extension):**
+- +KV Offload Oracle (Category C)
+- +Network Oracle (Category D)  
+- +PD separation support
+- +SGLang version
+- +Extensive evaluation (multiple models, workloads, policies)
+
+**Trigger:** CARA testing window (est. ~2 months)
