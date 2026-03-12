@@ -156,9 +156,9 @@ vllm-emulator/
 - **Commit ID:** 4ea9e32
 - **Status:** ✅ DONE
 
-#### P1.2: Offload Cost Oracle (Category C) - OPTIONAL
+#### P1.2: Offload Cost Oracle (Category C)
 - **Component:** `vllm/v1/kv_offload/`
-- **Status:** OPTIONAL - Can be added in Phase 2 if needed
+- **Status:** REQUIRED for KV offload timing fidelity (dependency of P2.5.3)
 - **Hook Points:**
   - `OffloadingManager.lookup()` (abstract.py)
   - `OffloadingWorker.transfer_async()` (worker.py)
@@ -180,7 +180,7 @@ vllm-emulator/
 
 #### P1.3: Network Cost Oracle (Category D) - OPTIONAL
 - **Component:** `vllm/distributed/device_communicators/`, `kv_transfer/`
-- **Status:** OPTIONAL - Most research uses single-GPU, can be added later if needed
+- **Status:** OPTIONAL unless multi-node/network emulation is required (dependency for multi-node P2.5.x)
 - **Hook Points:**
   - `cuda_communicator.all_reduce()` (line 130)
   - `cuda_communicator.send()` (line 240)
@@ -223,6 +223,7 @@ vllm-emulator/
 
 #### P2.5.2: Prefill/Decode Separation Support
 - **Task:** Add support for PD separation (vLLM v1 engine)
+- **Dependency:** can be implemented independently of P1.2/P1.3
 - **Acceptance:**
   - Can profile prefill and decode separately
   - Can emulate PD-separated scheduling
@@ -235,6 +236,7 @@ vllm-emulator/
 
 #### P2.5.3: KV Cache Offload Integration
 - **Task:** Integrate KV offload cost modeling
+- **Dependency:** requires P1.2 Offload Cost Oracle for realistic timing
 - **Acceptance:**
   - Accurate offload/recall timing
   - Works with profile packs
