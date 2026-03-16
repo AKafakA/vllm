@@ -112,7 +112,7 @@ vllm-emulator/
 - **Commit ID:** 4ea9e32
 - **Status:** ✅ DONE
 
-#### P1.2: Offload Cost Oracle (Category C) 📅 SCHEDULED
+#### P1.2: Offload Cost Oracle (Category C) ✅ DONE
 - **Component:** `vllm/v1/kv_offload/`
 - **Hook Points:**
   - `OffloadingManager.lookup()` 
@@ -127,7 +127,7 @@ vllm-emulator/
 - **Status:** NOT_STARTED
 - **Scheduled:** March 14, 2026 (Tomorrow)
 
-#### P1.3: Network Cost Oracle (Category D) 📅 SCHEDULED
+#### P1.3: Network Cost Oracle (Category D) ✅ DONE
 - **Component:** `vllm/distributed/device_communicators/`, `kv_transfer/`
 - **Hook Points:**
   - `cuda_communicator.all_reduce()`
@@ -270,6 +270,6 @@ export VLLM_EMULATOR_BLOCKING_MODE=offline
 - [x] P2.2: Testing Infrastructure complete
 - [x] P2.3: Documentation complete
 - [x] P2.5.2: PD Separation complete
-- [ ] Mar 14: P1.2 Offload Cost Oracle
-- [ ] Mar 15: P1.3 Network Cost Oracle
+- [x] Mar 14: P1.2 Offload Cost Oracle
+- [x] Mar 15: P1.3 Network Cost Oracle
 - [ ] P2.4: Workshop Paper
