@@ -6,6 +6,21 @@ from dataclasses import dataclass
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.abstract import LoadStoreSpec
 
+# Optional emulator hook - lazy import to avoid hard dependency
+_EMULATOR_OFFLOAD_HOOK_MODULE = None
+
+
+def _get_emulator_offload_hook():
+    """Lazy import emulator offload hook to avoid hard dependency."""
+    global _EMULATOR_OFFLOAD_HOOK_MODULE
+    if _EMULATOR_OFFLOAD_HOOK_MODULE is None:
+        try:
+            from vllm_emulator.hooks import OffloadWorkerHook
+            _EMULATOR_OFFLOAD_HOOK_MODULE = OffloadWorkerHook
+        except ImportError:
+            _EMULATOR_OFFLOAD_HOOK_MODULE = False
+    return _EMULATOR_OFFLOAD_HOOK_MODULE if _EMULATOR_OFFLOAD_HOOK_MODULE else None
+
 # a single transfer spec (src_blocks_spec, dst_blocks_spec)
 TransferSpec = tuple[LoadStoreSpec, LoadStoreSpec]
 # transfers are forwarded to workers by (src_medium, dst_medium)
@@ -92,6 +107,20 @@ class OffloadingWorker:
         self.handlers: set[OffloadingHandler] = set()
         self.transfer_type_to_handler: dict[TransferType, OffloadingHandler] = {}
 
+        # Optional emulator hook for offload cost estimation (lazy loaded)
+        self._emulator_hook = None
+        self._emulator_finished: list[TransferResult] = []
+        hook_cls = _get_emulator_offload_hook()
+        if hook_cls is not None:
+            try:
+                self._emulator_hook = hook_cls(self)
+            except Exception as e:
+                logger.warning(
+                    "Failed to initialize emulator offload hook: %r",
+                    e,
+                    exc_info=True,
+                )
+
     def register_handler(
         self,
         src_cls: type[LoadStoreSpec],
@@ -124,6 +153,25 @@ class OffloadingWorker:
             True if transfer was submitted successfully.
         """
         src, dst = spec
+
+        # Emulator mode: use oracle to estimate transfer cost
+        # instead of running real transfers
+        if (self._emulator_hook is not None
+                and self._emulator_hook.is_enabled):
+            cost = self._emulator_hook.estimate_transfer_cost(src, dst)
+            logger.debug(
+                "Emulator offload oracle: job=%d lookup=%.2fus "
+                "transfer=%.2fus total=%.2fus",
+                job_id,
+                cost["lookup_latency_us"],
+                cost["transfer_latency_us"],
+                cost["total_estimated_us"],
+            )
+            self._emulator_hook.apply_oracle_delay(src, dst)
+            # Record as immediately finished
+            self._emulator_finished.append((job_id, True))
+            return True
+
         transfer_type = (src.medium(), dst.medium())
         handler = self.transfer_type_to_handler.get(transfer_type)
         assert handler is not None
@@ -153,6 +201,10 @@ class OffloadingWorker:
             A list of TransferResults
         """
         finished = []
+        # Collect emulator-simulated completions
+        if self._emulator_finished:
+            finished.extend(self._emulator_finished)
+            self._emulator_finished.clear()
         for handler in self.handlers:
             finished.extend(handler.get_finished())
         return finished

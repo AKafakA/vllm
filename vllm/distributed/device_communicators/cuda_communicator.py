@@ -21,6 +21,25 @@ from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
 
+# Optional emulator hook - lazy import to avoid hard dependency
+_EMULATOR_NETWORK_HOOK = None
+_EMULATOR_NETWORK_HOOK_LOADED = False
+
+
+def _get_emulator_network_hook():
+    """Lazy import and cache the emulator network hook singleton."""
+    global _EMULATOR_NETWORK_HOOK, _EMULATOR_NETWORK_HOOK_LOADED
+    if not _EMULATOR_NETWORK_HOOK_LOADED:
+        _EMULATOR_NETWORK_HOOK_LOADED = True
+        try:
+            from vllm_emulator.hooks import get_network_hook
+            hook = get_network_hook()
+            if hook.is_enabled:
+                _EMULATOR_NETWORK_HOOK = hook
+        except ImportError:
+            pass
+    return _EMULATOR_NETWORK_HOOK
+
 
 class CudaCommunicator(DeviceCommunicatorBase):
     def __init__(
@@ -178,6 +197,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
 
     def all_reduce(self, input_):
+        # Emulator mode: simulate all-reduce latency instead of real comm
+        net_hook = _get_emulator_network_hook()
+        if net_hook is not None:
+            num_bytes = input_.nelement() * input_.element_size()
+            net_hook.apply_all_reduce_delay(num_bytes, self.world_size)
+            return input_.clone()
+
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
         if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
@@ -299,6 +325,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
+        # Emulator mode: simulate send latency
+        net_hook = _get_emulator_network_hook()
+        if net_hook is not None:
+            num_bytes = tensor.nelement() * tensor.element_size()
+            net_hook.apply_send_delay(num_bytes)
+            return
+
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
 
@@ -313,6 +346,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
     ) -> torch.Tensor:
         """Receives a tensor from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
+        # Emulator mode: simulate recv latency, return zeroed tensor
+        net_hook = _get_emulator_network_hook()
+        if net_hook is not None:
+            tensor = torch.zeros(size, dtype=dtype, device=self.device)
+            num_bytes = tensor.nelement() * tensor.element_size()
+            net_hook.apply_recv_delay(num_bytes)
+            return tensor
+
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
 

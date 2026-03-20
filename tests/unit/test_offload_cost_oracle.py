@@ -52,10 +52,11 @@ class TestProfileOffloadCostOracle(unittest.TestCase):
 
     def test_lookup_interpolation(self):
         """Test lookup with num_blocks in middle (linear interpolation)."""
-        # Between 1 and 8 blocks: 50% point
+        # Between 1 and 8 blocks: ratio = (4-1)/(8-1) = 3/7
         latency = self.oracle.get_lookup_latency_us(4)
-        # 10 + 0.5 * (50 - 10) = 10 + 20 = 30
-        self.assertAlmostEqual(latency, 30.0, places=1)
+        # 10 + (3/7) * (50 - 10) = 10 + 17.14... = 27.14...
+        expected = 10.0 + (3.0 / 7.0) * 40.0
+        self.assertAlmostEqual(latency, expected, places=1)
 
     def test_lookup_exact_sample(self):
         """Test lookup with num_blocks exactly at a sample point."""
@@ -64,14 +65,15 @@ class TestProfileOffloadCostOracle(unittest.TestCase):
 
     def test_transfer_cpu_to_gpu_interpolation(self):
         """Test CPU->GPU transfer with interpolation."""
-        # Between 1KB and 1MB: ~50% point (524800 bytes)
+        # Between 4096 and 1048576 bytes: ratio = (524288-4096)/(1048576-4096)
         latency = self.oracle.get_transfer_latency_us(
             524288,  # ~512KB
             TransferDirection.CPU_TO_GPU,
             concurrency=1
         )
-        # Linear interpolation: 100 + 0.5 * (5000 - 100) = 100 + 1950 = 2050
-        self.assertAlmostEqual(latency, 2050.0, delta=50)
+        ratio = (524288 - 4096) / (1048576 - 4096)
+        expected = 100.0 + ratio * (5000.0 - 100.0)
+        self.assertAlmostEqual(latency, expected, delta=1.0)
 
     def test_transfer_gpu_to_cpu_different_profile(self):
         """Test GPU->CPU uses different profile than CPU->GPU."""
@@ -98,10 +100,10 @@ class TestProfileOffloadCostOracle(unittest.TestCase):
 
     def test_evict_interpolation(self):
         """Test eviction latency interpolation."""
-        # Between 1 and 8 blocks: ~50% point
+        # Between 1 and 8 blocks: ratio = (4-1)/(8-1) = 3/7
         latency = self.oracle.get_evict_latency_us(4)
-        # 5 + 0.5 * (30 - 5) = 5 + 12.5 = 17.5
-        self.assertAlmostEqual(latency, 17.5, places=1)
+        expected = 5.0 + (3.0 / 7.0) * (30.0 - 5.0)
+        self.assertAlmostEqual(latency, expected, places=1)
 
     def test_empty_profile_defaults(self):
         """Test that empty profile returns default estimates."""

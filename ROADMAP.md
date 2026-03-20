@@ -1,8 +1,8 @@
 # vLLM Emulator Backend - Project Roadmap
 
-**Version:** 3.0
+**Version:** 3.1
 **Created:** 2026-02-26
-**Last Updated:** 2026-03-13
+**Last Updated:** 2026-03-20
 **Status:** Active Development
 
 ---
@@ -115,32 +115,53 @@ vllm-emulator/
 #### P1.2: Offload Cost Oracle (Category C) ✅ DONE
 - **Component:** `vllm/v1/kv_offload/`
 - **Hook Points:**
-  - `OffloadingManager.lookup()` 
-  - `OffloadingWorker.transfer_async()` 
-  - `ops.swap_blocks()`
+  - `OffloadingWorker.transfer_async()` — wired in `vllm/v1/kv_offload/worker/worker.py`
+  - `OffloadingWorker.get_finished()` — emulator-simulated completions
 - **Design:**
   - Oracle Hook for lookup/transfer/evict latency
   - Profile: lookup = f(num_blocks), transfer = f(bytes, direction)
+  - When oracle is active, `transfer_async()` simulates delay and records
+    immediate completion; real handlers are bypassed
 - **Deliverables:**
-  1. `vllm_emulator/oracle/offload_cost_oracle.py`
-  2. `vllm_emulator/hooks/offload_hook.py`
-- **Status:** NOT_STARTED
-- **Scheduled:** March 14, 2026 (Tomorrow)
+  1. `vllm_emulator/oracle/offload_cost_oracle.py` ✅
+  2. `vllm_emulator/hooks/offload_hook.py` ✅
+  3. Integration in `vllm/v1/kv_offload/worker/worker.py` ✅
+  4. `tests/unit/test_offload_cost_oracle.py` ✅
+  5. `tests/integration/test_offload_hook_integration.py` ✅
+- **Status:** ✅ DONE (oracle + hook + vLLM integration)
+- **Completed:** March 20, 2026
+- **Limitations:**
+  - `OffloadingManager.lookup()` and `ops.swap_blocks()` hooks are NOT wired
+    (would require broader refactoring of the manager layer)
+  - Emulator bypasses real CUDA transfers entirely; no partial-transfer modeling
 
 #### P1.3: Network Cost Oracle (Category D) ✅ DONE
 - **Component:** `vllm/distributed/device_communicators/`, `kv_transfer/`
 - **Hook Points:**
-  - `cuda_communicator.all_reduce()`
-  - `cuda_communicator.send()/recv()`
-  - `KVConnectorBase.start_load_kv()`, `save_kv_layer()`
+  - `CudaCommunicator.all_reduce()` — wired in `cuda_communicator.py`
+  - `CudaCommunicator.send()` — wired in `cuda_communicator.py`
+  - `CudaCommunicator.recv()` — wired in `cuda_communicator.py`
 - **Design:**
   - Oracle Hook at Communicator level
   - Per-topology profiles (NVLink, PCIe, IB)
+  - When oracle is active, communication methods simulate delay and return
+    dummy/cloned tensors; real NCCL calls are bypassed
 - **Deliverables:**
-  1. `vllm_emulator/oracle/network_cost_oracle.py`
-  2. `vllm_emulator/hooks/network_hook.py`
-- **Status:** NOT_STARTED
-- **Scheduled:** March 15, 2026 (Day after tomorrow)
+  1. `vllm_emulator/oracle/network_cost_oracle.py` ✅
+  2. `vllm_emulator/hooks/network_hook.py` ✅
+  3. Integration in `vllm/distributed/device_communicators/cuda_communicator.py` ✅
+  4. `tests/unit/test_network_cost_oracle.py` ✅
+  5. `tests/integration/test_network_hook_integration.py` ✅
+- **Status:** ✅ DONE (oracle + hook + vLLM integration)
+- **Completed:** March 20, 2026
+- **Limitations:**
+  - `KVConnectorBase.start_load_kv()` / `save_kv_layer()` hooks NOT wired
+    (KV transfer connector uses a different code path than CudaCommunicator)
+  - `reduce_scatter`, `all_gather`, `broadcast` not hooked (only core
+    all_reduce/send/recv are covered)
+  - Network profile env vars (`VLLM_EMULATOR_ENABLE_NETWORK_ORACLE`, etc.)
+    are separate from the main `VLLM_EMULATOR_ENABLE_ORACLE` flag and not
+    yet wired into CLI arg_utils.py
 
 ---
 
@@ -150,7 +171,7 @@ vllm-emulator/
 |------|--------|-----------|
 | P2.5.1: CUDA Graph Capture | ❌ NOT_STARTED | - |
 | P2.5.2: PD Separation Support | ✅ DONE | 0d4b003 |
-| P2.5.3: KV Offload Integration | ❌ NOT_STARTED | - |
+| P2.5.3: KV Offload Integration | ✅ DONE (partial) | - |
 
 #### P2.5.2: Prefill/Decode Separation Support ✅ DONE
 - **Deliverables:**
@@ -226,9 +247,9 @@ export VLLM_EMULATOR_BLOCKING_MODE=offline
 | Date | Task |
 |------|------|
 | Mar 13, 2026 | Code review + Roadmap update |
-| **Mar 14, 2026** | **P1.2: Offload Cost Oracle** |
-| **Mar 15, 2026** | **P1.3: Network Cost Oracle** |
-| Mar 16-20, 2026 | Integration testing |
+| Mar 14, 2026 | P1.2: Offload Cost Oracle (oracle + hook) |
+| Mar 15, 2026 | P1.3: Network Cost Oracle (oracle + hook) |
+| **Mar 20, 2026** | **P1.2/P1.3: vLLM integration wiring complete** |
 | Mar 21-24, 2026 | Final testing before testbed expiry |
 | Post-expiry | Workshop paper writing |
 

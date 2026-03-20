@@ -6,8 +6,6 @@ import os
 import time
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
-
 from vllm_emulator.oracle import (
     BaseOffloadCostOracle,
     TransferDirection,
