@@ -56,17 +56,19 @@ def test_prefill_interpolation():
 
 
 def test_prefill_below_minimum():
-    """Test prefill lookup below minimum sample."""
+    """Test prefill extrapolation below minimum sample."""
     oracle = ProfileGpuCostOracle(SAMPLE_PROFILE_PACK)
     result = oracle.estimate_prefill_latency_us(64, 1)
-    assert result == 10000  # Should use minimum
+    # Power-law extrapolation: should be less than the 128-token sample
+    assert 0 < result < 10000
 
 
 def test_prefill_above_maximum():
-    """Test prefill lookup above maximum sample."""
+    """Test prefill extrapolation above maximum sample."""
     oracle = ProfileGpuCostOracle(SAMPLE_PROFILE_PACK)
     result = oracle.estimate_prefill_latency_us(4096, 1)
-    assert result == 125000  # Should use maximum
+    # Power-law extrapolation: should be more than the 2048-token sample
+    assert result > 125000
 
 
 def test_decode_exact_match():
@@ -86,17 +88,18 @@ def test_decode_interpolation():
 
 
 def test_decode_below_minimum():
-    """Test decode lookup below minimum sample."""
+    """Test decode returns 0 for 0 active seqs."""
     oracle = ProfileGpuCostOracle(SAMPLE_PROFILE_PACK)
     result = oracle.estimate_decode_latency_us(0)
-    assert result == 500
+    assert result == 0.0
 
 
 def test_decode_above_maximum():
-    """Test decode lookup above maximum sample."""
+    """Test decode extrapolation above maximum sample."""
     oracle = ProfileGpuCostOracle(SAMPLE_PROFILE_PACK)
     result = oracle.estimate_decode_latency_us(64)
-    assert result == 12000
+    # Power-law extrapolation: should be more than the 32-seq sample
+    assert result > 12000
 
 
 def test_base_oracle_is_abstract():

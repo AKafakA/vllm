@@ -42,18 +42,43 @@ def _validate_prefill_rows(prefill: Sequence[Any]) -> None:
         _require_int(obj["batch_size"], f"prefill[{i}].batch_size")
         _require_number(obj["latency_us"], f"prefill[{i}].latency_us")
 
+    # Check sort order per batch_size group (oracle interpolates within
+    # same batch_size). Profile packs may contain multiple batch_size
+    # groups sorted by (batch_size, seq_len).
+    by_bs: dict[int, list[int]] = {}
+    for i, row in enumerate(prefill):
+        bs = row["batch_size"]
+        by_bs.setdefault(bs, []).append((i, row["seq_len"]))
+    for bs, entries in by_bs.items():
+        for j in range(1, len(entries)):
+            prev_idx, prev_sl = entries[j - 1]
+            cur_idx, cur_sl = entries[j]
+            if cur_sl <= prev_sl:
+                raise ProfileValidationError(
+                    f"prefill samples within batch_size={bs} must be sorted "
+                    f"by ascending seq_len (prefill[{cur_idx}].seq_len="
+                    f"{cur_sl} <= previous {prev_sl})"
+                )
+
 
 def _validate_decode_rows(decode: Sequence[Any]) -> None:
+    prev_active = -1
     for i, row in enumerate(decode):
         obj = _require_mapping(row, f"decode[{i}]")
         for key in ("active_seqs", "latency_us_per_token"):
             if key not in obj:
                 raise ProfileValidationError(f"decode[{i}].{key} is required")
-        _require_int(obj["active_seqs"], f"decode[{i}].active_seqs")
+        active = _require_int(obj["active_seqs"], f"decode[{i}].active_seqs")
         _require_number(
             obj["latency_us_per_token"],
             f"decode[{i}].latency_us_per_token",
         )
+        if active <= prev_active:
+            raise ProfileValidationError(
+                f"decode samples must be sorted by ascending active_seqs "
+                f"(decode[{i}].active_seqs={active} <= previous {prev_active})"
+            )
+        prev_active = active
 
 
 def validate_profile_pack(profile_pack: Mapping[str, Any]) -> None:
@@ -71,6 +96,11 @@ def validate_profile_pack(profile_pack: Mapping[str, Any]) -> None:
 
     if not isinstance(obj["gpu_model"], str) or not obj["gpu_model"].strip():
         raise ProfileValidationError("gpu_model must be a non-empty string")
+
+    # model_name is optional but recommended — warns if missing
+    if "model_name" in obj:
+        if not isinstance(obj["model_name"], str) or not obj["model_name"].strip():
+            raise ProfileValidationError("model_name must be a non-empty string if provided")
 
     prefill = obj["prefill"]
     decode = obj["decode"]

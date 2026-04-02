@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,7 @@ class OffloadWorkerHook:
         self._enabled = False
         self._blocking_mode = BLOCKING_MODE_ONLINE
         self._active_transfers = 0
+        self._lock = threading.Lock()
         self._initialize_oracle()
 
     def _initialize_oracle(self) -> None:
@@ -175,21 +177,20 @@ class OffloadWorkerHook:
         if not self.should_use_oracle():
             return False
 
-        # Increment active transfers
-        self._active_transfers += 1
+        with self._lock:
+            self._active_transfers += 1
 
         try:
             cost_estimate = self.estimate_transfer_cost(src_spec, dst_spec)
             total_latency_us = cost_estimate["total_estimated_us"]
 
             if total_latency_us > 0 and self.should_block:
-                # Block for the estimated latency (convert to seconds)
                 time.sleep(total_latency_us / 1e6)
 
             return True
         finally:
-            # Decrement active transfers
-            self._active_transfers = max(0, self._active_transfers - 1)
+            with self._lock:
+                self._active_transfers = max(0, self._active_transfers - 1)
 
 
 def install_offload_worker_hook(

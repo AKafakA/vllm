@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +45,7 @@ class NetworkHook:
         self._blocking_mode = BLOCKING_MODE_ONLINE
         self._topology = self._parse_topology(topology)
         self._active_transfers = 0
+        self._lock = threading.Lock()
         self._initialize_oracle()
 
     def _parse_topology(self, topology_str: str) -> NetworkTopology:
@@ -164,28 +166,32 @@ class NetworkHook:
         if not self.is_enabled:
             return False
 
-        self._active_transfers += 1
+        with self._lock:
+            self._active_transfers += 1
         try:
             latency_us = self.estimate_send_cost(num_bytes)
             if latency_us > 0 and self.should_block:
                 time.sleep(latency_us / 1e6)
             return True
         finally:
-            self._active_transfers = max(0, self._active_transfers - 1)
+            with self._lock:
+                self._active_transfers = max(0, self._active_transfers - 1)
 
     def apply_recv_delay(self, num_bytes: int) -> bool:
         """Apply oracle-estimated delay for recv."""
         if not self.is_enabled:
             return False
 
-        self._active_transfers += 1
+        with self._lock:
+            self._active_transfers += 1
         try:
             latency_us = self.estimate_recv_cost(num_bytes)
             if latency_us > 0 and self.should_block:
                 time.sleep(latency_us / 1e6)
             return True
         finally:
-            self._active_transfers = max(0, self._active_transfers - 1)
+            with self._lock:
+                self._active_transfers = max(0, self._active_transfers - 1)
 
     def apply_kv_transfer_delay(
         self,
@@ -196,14 +202,16 @@ class NetworkHook:
         if not self.is_enabled:
             return False
 
-        self._active_transfers += 1
+        with self._lock:
+            self._active_transfers += 1
         try:
             latency_us = self.estimate_kv_transfer_cost(num_bytes, direction)
             if latency_us > 0 and self.should_block:
                 time.sleep(latency_us / 1e6)
             return True
         finally:
-            self._active_transfers = max(0, self._active_transfers - 1)
+            with self._lock:
+                self._active_transfers = max(0, self._active_transfers - 1)
 
 
 # Global hook instance for module-level installation

@@ -1,6 +1,7 @@
 {
   "version": "1.0",
   "gpu_model": "A100-SXM-80GB",
+  "model_name": "PLACEHOLDER-replace-with-real-profile",
   "prefill": [
     {"seq_len": 128, "batch_size": 1, "latency_us": 15000},
     {"seq_len": 256, "batch_size": 1, "latency_us": 28000},
