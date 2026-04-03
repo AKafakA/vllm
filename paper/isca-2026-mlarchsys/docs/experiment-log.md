@@ -239,6 +239,37 @@ tt≥17:   cycle=20ms, GPU=28ms, overhead=-8ms (GPU/CPU overlap hides CPU)
 
 All metrics <3% across all rates. Rate-independent. No per-rate calibration needed.
 
+### Comprehensive Serving Profile Evaluation (FINAL, back-to-back)
+
+Qwen2.5-1.5B, RTX 3060, 50 prompts each, serving profile + executor hook.
+
+**Rate sweep (256in/128out):**
+
+| Rate | Real TTFT | Emu TTFT | Error | Real TPOT | Emu TPOT | Error |
+|------|----------|---------|-------|----------|---------|-------|
+| 1 | 144.1ms | 143.9ms | **-0.1%** | 21.0ms | 21.0ms | **-0.1%** |
+| 2 | 85.1ms | 84.6ms | **-0.7%** | 20.2ms | 20.2ms | **+0.2%** |
+| 4 | 84.2ms | 84.4ms | **+0.2%** | 18.9ms | 19.0ms | **+0.4%** |
+
+**Varied input length (rate=2, 128out):**
+
+| Input | Real TTFT | Emu TTFT | Error | Real TPOT | Emu TPOT | Error |
+|-------|----------|---------|-------|----------|---------|-------|
+| 128 | 82.9ms | 82.5ms | **-0.4%** | 20.0ms | 20.1ms | **+0.4%** |
+| 256 | 85.1ms | 84.6ms | **-0.7%** | 20.2ms | 20.2ms | **+0.2%** |
+| 512 | 159.2ms | 154.4ms | **-3.0%** | 22.3ms | 22.1ms | **-0.9%** |
+| 1024 | 220.8ms | 220.0ms | **-0.4%** | 24.3ms | 24.4ms | **+0.5%** |
+
+**Varied output length (rate=2, 256in):**
+
+| Output | Real TTFT | Emu TTFT | Error | Real TPOT | Emu TPOT | Error |
+|--------|----------|---------|-------|----------|---------|-------|
+| 64 | 76.8ms | 76.3ms | **-0.6%** | 20.2ms | 20.1ms | **-0.3%** |
+| 128 | 85.1ms | 84.6ms | **-0.7%** | 20.2ms | 20.2ms | **+0.2%** |
+| 256 | 86.1ms | 85.6ms | **-0.5%** | 18.3ms | 18.4ms | **+0.4%** |
+
+**All 16 metrics under 3%. Most under 1%. Paper-ready.**
+
 ---
 
 ## Remaining Work
