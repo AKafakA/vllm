@@ -144,21 +144,40 @@ class ExecuteModelTracer:
 class StepCycleTracer:
     """Records full step-cycle time (schedule + execute + output processing).
 
-    This is Option 1 for calibration: measures the complete
-    _process_engine_step() duration, not just execute_model().
-    The difference between step cycle and execute_model is the
-    per-step CPU overhead.
+    Measures the complete _process_engine_step() duration including
+    scheduling, execute_model, output processing, and detokenization.
+    This captures the real per-step overhead that the GPU-only profile
+    misses, making the emulator rate-independent.
 
     Enabled via VLLM_EMULATOR_TRACE_STEP_CYCLE=1.
     """
 
     def __init__(self, output_path: str = "/tmp/emulator_step_trace.jsonl"):
         self._output_path = output_path
-        self._records: list[float] = []
+        self._records: list[dict[str, Any]] = []
         self._step_count = 0
+        # Stash scheduler output info set before step_fn()
+        self._pending_batch_info: dict[str, Any] | None = None
+
+    def set_batch_info(
+        self,
+        total_tokens: int,
+        num_new_reqs: int,
+        num_decode_seqs: int,
+    ) -> None:
+        """Called before step_fn() with the current batch info."""
+        self._pending_batch_info = {
+            "total_tokens": total_tokens,
+            "num_new_reqs": num_new_reqs,
+            "num_decode_seqs": num_decode_seqs,
+        }
 
     def record_step(self, step_latency_us: float) -> None:
-        self._records.append(step_latency_us)
+        record: dict[str, Any] = {"step_cycle_us": round(step_latency_us, 1)}
+        if self._pending_batch_info:
+            record.update(self._pending_batch_info)
+            self._pending_batch_info = None
+        self._records.append(record)
         self._step_count += 1
         if len(self._records) >= 200:
             self.flush()
@@ -170,8 +189,8 @@ class StepCycleTracer:
         path = Path(self._output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
-            for lat in self._records:
-                f.write(json.dumps({"step_cycle_us": lat}) + "\n")
+            for rec in self._records:
+                f.write(json.dumps(rec) + "\n")
         count = len(self._records)
         self._records.clear()
         print(f"[StepCycleTracer] Flushed {count} step records to {path}")

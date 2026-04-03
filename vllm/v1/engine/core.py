@@ -400,6 +400,8 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+        # Store for step cycle tracer (batch info capture)
+        self._last_scheduler_output = scheduler_output
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -458,6 +460,8 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
+            # Store for step cycle tracer (batch info capture)
+            self._last_scheduler_output = scheduler_output
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -1183,7 +1187,8 @@ class EngineCoreProc(EngineCore):
 
         # Optional: trace full step cycle time (for emulator calibration)
         _step_t0 = None
-        if getattr(self, '_emulator_step_tracer', None) is not None:
+        _step_tracer = getattr(self, '_emulator_step_tracer', None)
+        if _step_tracer is not None:
             _step_t0 = time.perf_counter()
 
         # Step the engine core.
@@ -1194,10 +1199,22 @@ class EngineCoreProc(EngineCore):
         # Post-step hook.
         self.post_step(model_executed)
 
-        # Optional: record full step cycle time
+        # Optional: record full step cycle time with batch context
         if _step_t0 is not None and model_executed:
             step_us = (time.perf_counter() - _step_t0) * 1e6
-            self._emulator_step_tracer.record_step(step_us)
+            so = getattr(self, '_last_scheduler_output', None)
+            if so is not None and so.total_num_scheduled_tokens > 0:
+                new_req_ids = {r.req_id for r in so.scheduled_new_reqs}
+                num_decode = sum(
+                    1 for rid in so.num_scheduled_tokens
+                    if rid not in new_req_ids
+                )
+                _step_tracer.set_batch_info(
+                    total_tokens=so.total_num_scheduled_tokens,
+                    num_new_reqs=len(so.scheduled_new_reqs),
+                    num_decode_seqs=num_decode,
+                )
+            _step_tracer.record_step(step_us)
 
         # If no model execution happened but there are waiting requests
         # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow

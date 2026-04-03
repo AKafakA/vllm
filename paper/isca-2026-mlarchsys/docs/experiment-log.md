@@ -1,0 +1,237 @@
+# vLLM-Emulator Experiment Log
+
+**Started:** 2026-04-02
+**Vast Host:** 2x RTX 3060 12GB, Xeon E5-2680 v4, 64GB RAM, CUDA 13.0
+**Vast Expiry:** 2026-04-04 ~5pm
+**vLLM Version:** 0.18.1 (rebased from v0.18.1 tag)
+**Install Method:** VLLM_USE_PRECOMPILED=1 with official PyPI wheel via VLLM_PRECOMPILED_WHEEL_LOCATION
+
+---
+
+## Terminology
+
+**Emulator modes** (how GPU time is modeled):
+- **Realtime mode**: `time.sleep(predicted_latency)` — wall clock matches predicted GPU time
+- **Accelerated mode**: virtual-time fast-forward, no blocking — like REVATI/Vidur
+
+**vLLM serving modes** (how requests arrive):
+- **Online serving**: `vllm serve` — FastAPI/HTTP, async engine, real-time arrivals
+- **Offline inference**: `LLM()` / `vllm bench throughput` — batch API, all requests at once
+
+These are **orthogonal** — any combination is valid (2×2 matrix).
+
+---
+
+## Final Results (Session 2, v13)
+
+### Data-Independent Sweep Profile Accuracy
+
+| Model | Config | Real tok/s | Emulator tok/s | Error |
+|-------|--------|-----------|---------------|-------|
+| **Qwen2.5-1.5B** | TP=1, 30 prompts, 256in/128out | 2,302 | 2,229 | **-3.2%** ✅ |
+| **Qwen2.5-0.5B** | TP=1, 30 prompts, 256in/128out | ~7,444 | ~7,603 | **~2.1%** ✅ |
+
+Both results use **data-independent sweep profiles** — profiled once, tested on unseen workloads.
+
+---
+
+## Session 1: 2026-04-02 to 2026-04-03
+
+### Infrastructure Setup
+
+**Build Issues:**
+1. Source build with MAX_JOBS=56 → OOM killed Vast host
+2. Source build with MAX_JOBS=2 → 3.5 hours, got stuck in FA2 kernels
+3. VLLM_USE_PRECOMPILED on old fork → ABI mismatch (torch 2.9.1 vs precompiled for 2.10.0)
+4. **Solution:** Rebased to v0.18.1, VLLM_USE_PRECOMPILED=1 with official PyPI wheel
+
+**Rebase:**
+- Cherry-picked 20 emulator commits onto v0.18.1 tag
+- Resolved 3 merge conflicts
+- All 72 unit tests pass
+- Force-pushed to `feature/emulator-backend`
+
+**RTX 3060 Issues:**
+- FP8 CUTLASS ops not available (sm_86 lacks FP8) → official PyPI wheel handles gracefully
+- Emulator platform plugin: fixed to only activate when VLLM_EMULATOR_ENABLE_ORACLE=1
+
+### Code Changes (Session 1)
+
+1. **Fake token generation** — 1 token/req, deterministic RNG, avoids EOS, respects vocab
+2. **Logprobs shape** — correct shape per request
+3. **Thread safety** — locks on offload/network hook concurrency counters
+4. **Power-law extrapolation** — replaces linear interpolation + clamping
+5. **v0.18.1 async scheduler** — `_emulator_pending_output` + `sample_tokens()` returns stored output
+6. **Prefill chunk handling** — 0 tokens for partial chunks, 1 for completed
+7. **Unified oracle** — `estimate_step_latency_us(total_tokens)` with forward_pass profile
+8. **Trace profiler** — instruments execute_model() for validation
+9. **Rename** — online/offline → realtime/accelerated
+
+---
+
+## Session 2: 2026-04-03 (Accuracy Debugging)
+
+### Iteration History (1.5B TP=1)
+
+| Version | Profile | Error | Root Cause |
+|---------|---------|-------|------------|
+| v2 | Synthetic batch_size=1 | +183% | Oracle modeled as single giant sequence |
+| v5 | Forward_pass unified | +19.2% | Synthetic profiler doesn't match batch composition |
+| trace | Data-dependent | +2.4% | Overfits to workload (not data-independent) |
+| sweep v1 | 1D total_tokens only | +30.5% | **Bug: prompt was half intended length** (`"hello " * (n//2+1)` = n/2 tokens) |
+| sweep v7 | Fixed prompt length | +6.5% | Benchmark used `--random-input-len 256` = 256 tokens, profile matched |
+| sweep v7 | Same, `--input-len 256` | +37% | **Benchmark produced 1024 tokens** (RandomDataset inflation), profile had 256 |
+| sweep v11 | `max_output_len=128` | +10.4% | Sweep used identical prompts → prefix caching → scheduler chunked differently |
+| **sweep v13** | **Unique random prompts** | **-3.2%** | **All issues fixed** |
+
+### Key Bugs Found and Fixed
+
+#### Bug 1: Prompt Token Count Mismatch
+**Symptom:** 37% error despite "correct" profiling
+**Root cause:** `"hello " * (input_len // 2 + 1)` generated half the intended tokens. "hello " is 1 token, not 2.
+**Fix:** `"hello " * (input_len - 1)` or use `TokensPrompt` with exact token IDs
+**Lesson:** Always verify actual token count, never assume text-to-token ratio
+
+#### Bug 2: Benchmark --input-len vs --random-input-len
+**Symptom:** Real baseline had 1024 tokens per prompt despite `--input-len 256`
+**Root cause:** `vllm bench throughput --input-len 256` uses RandomDataset with default range_ratio that inflates prompt length. `--random-input-len 256` gives exactly 256 tokens.
+**Fix:** Always use explicit `--random-input-len` and `--random-output-len` for controlled benchmarks
+**Lesson:** Read benchmark tool documentation carefully; --input-len ≠ exact token count
+
+#### Bug 3: Prefix Caching in Sweep Profiler
+**Symptom:** Sweep produced max tt=2048 per step, but real workload hit tt=7425
+**Root cause:** Sweep used identical `"hello " * 255` prompts for all requests. vLLM's prefix caching (enabled by default) detected shared prefixes and skipped prefilling cached tokens, resulting in much smaller `total_num_scheduled_tokens` per step.
+**Fix:** Use unique random token IDs per prompt: `TokensPrompt(prompt_token_ids=[random IDs])`
+**Lesson:** Profiler must use unique prompts to match real workload scheduler behavior. Prefix caching fundamentally changes how the scheduler packs batches.
+
+#### Bug 4: Decode Output Length Mismatch
+**Symptom:** 6.5% error instead of <5%
+**Root cause:** Sweep decode configs used `output_len=64` but real workload generates 128 tokens. Shorter output = shorter KV cache during decode = faster decode steps.
+**Fix:** Sweep `max_output_len` parameter, defaults to `max_model_len / 2` to cover full range.
+**Lesson:** Profile must cover the full operating range of the workload — both input AND output dimensions.
+
+### Misleading Investigations (Red Herrings)
+
+These were explored but turned out NOT to be the real issues:
+
+1. **GPU/CPU overlap** — Investigated extensively (deadline-based sleep, Future-based approach, threading.Timer). Not the issue because LLM() offline benchmark uses sequential step execution, not pipelined.
+
+2. **2D oracle (total_tokens × context_length)** — Implemented bilinear interpolation over forward_pass_2d profile. The context dimension had minimal impact because the 1D profile accuracy was limited by the profiling bugs, not by missing the context dimension.
+
+3. **KV cache reads / Vidur-style decomposition** — Computed total_kv_reads from scheduler's num_computed_tokens. Unnecessary complexity — 1D forward_pass is sufficient when profiling matches workload.
+
+4. **CUDA graph capture overhead** — Profiled with warmup, not a significant source of error.
+
+5. **Scheduler CPU overhead** — Real scheduler runs in both real and emulator, so it's already accounted for.
+
+### Correct Sweep Profiler Design
+
+The final working profiler (`shape_sweep_profiler.py v13`) requires:
+
+1. **Unique random prompts** — `TokensPrompt(prompt_token_ids=[random IDs])` per prompt to avoid prefix caching
+2. **Correct token counts** — verified via TokensPrompt, not text approximation
+3. **Full output length coverage** — `max_output_len` covers the longest workload output
+4. **Sufficient batch sizes** — configs that produce the same `total_num_scheduled_tokens` as real workloads
+5. **Mixed prefill+decode configs** — multiple concurrent requests with output generation to create chunked-prefill mixed steps
+
+### Architecture Notes
+
+**execute_model() hook design (v0.18.1):**
+```
+execute_model(scheduler_output):
+    if emulator_hook.is_enabled:
+        cost = estimate_execution_cost(scheduler_output)
+        fake_output = create_fake_output(scheduler_output)
+        if should_block: time.sleep(cost)
+        store pending_output
+        return None  # triggers sample_tokens() path
+
+sample_tokens(grammar_output):
+    if pending_output: return pending_output
+    return real_sample_tokens()
+```
+
+**Oracle: 1D forward_pass lookup**
+- `estimate_step_latency_us(total_tokens)` 
+- Piecewise linear interpolation within profiled range
+- Power-law extrapolation outside range
+- Profile section: `forward_pass: [{total_tokens, latency_us, num_samples}]`
+
+**Trace profiler:**
+- Instruments execute_model() with `torch.cuda.synchronize()` + `time.perf_counter()`
+- Records: total_tokens, num_prefill_tokens, num_decode_seqs, latency_us per step
+- Useful for validation and debugging, not for production profiles (adds sync overhead)
+
+---
+
+## Decisions Made
+
+1. **Rebase to v0.18.1** — enables VLLM_USE_PRECOMPILED, matches latest vLLM
+2. **1D forward_pass oracle** — sufficient with correct profiling; 2D is premature
+3. **Unique random prompts in sweep** — critical to avoid prefix caching bias
+4. **time.sleep() in execute_model** — simple, correct for offline inference
+5. **Rename realtime/accelerated** — avoids collision with vLLM's online/offline serving
+6. **Clean real GPU = primary baseline** — compare against non-traced benchmark
+7. **`--random-input-len` / `--random-output-len`** — always use explicit token counts
+
+---
+
+## Session 3: 2026-04-03 (Online Serving Accuracy)
+
+### Key Findings
+
+**1. Per-token profile bucketing (tt≤32)**
+The trace-to-profile converter was bucketing tt=2-7 → bucket 8, tt=9-15 → bucket 16 (bucket_size=8), losing dense coverage at online serving batch sizes. Fixed to use per-token granularity for tt≤32. This revealed a CUDA graph boundary at tt=17 where latency jumps from 15.6ms to 28.5ms (~2×).
+
+**2. Decode-specific overhead**
+Profile captures GPU forward pass only (~13ms for tt=1). Real TPOT includes ~4-6ms of output processing overhead (sampling, detokenization, scheduling). This overhead is cheaper with fake emulator outputs than real GPU outputs. Fix: `VLLM_EMULATOR_DECODE_OVERHEAD_US` applied only to steps with decode sequences, preserving prefill TTFT accuracy.
+
+**3. Worker hook vs executor hook**
+- Worker hook: runs inside real scheduler loop → accurate TTFT, but `time.sleep()` blocks worker thread → deadlocks at rate≥4 with large batches
+- Executor hook: uses timer-based Futures → non-blocking, but TTFT depends on timer chain accuracy
+- **Decision**: Use executor hook for online serving (non-blocking), worker hook for offline throughput
+
+**4. Real baselines vary significantly**
+Back-to-back measurements show real baseline TTFT can vary 30-60% between server startups (90ms vs 153ms at rate=1). Must always compare real vs emulator from the same session.
+
+### Online Serving Results (preliminary, 4ms decode overhead)
+
+Compared against **fresh baselines from same session**:
+
+| Metric | Real rate=1 | Emu rate=1 | Error | Real rate=4 | Emu rate=4 | Error |
+|--------|------------|-----------|-------|------------|-----------|-------|
+| TTFT | 153.2ms | 146.4ms | -4.4% | 93.6ms | 95.1ms | +1.6% |
+| TPOT | 20.6ms | 18.4ms | -10.5% | 18.4ms | 18.9ms | +2.7% |
+
+Rate=4: TTFT +1.6%, TPOT +2.7% — both <5% ✓
+Rate=1: TTFT -4.4% ✓, TPOT -10.5% (decode overhead calibration varies by rate)
+
+Back-to-back eval with 5ms decode overhead running (rates 1/2/4, 50 prompts each).
+
+---
+
+## Remaining Work
+
+### Priority 1: Re-run all experiments with fixed profiler
+- [ ] 0.5B sweep v13 + all benchmarks
+- [ ] 1.5B BurstGPT cross-workload validation
+- [ ] TP=2 evaluation (both models)
+
+### Priority 2: Feature demos
+- [ ] With/without chunked prefill
+- [ ] With/without CUDA graphs (enforce-eager)
+- [ ] KV offloading demo
+- [ ] PD disaggregation demo
+
+### Priority 3: Online serving evaluation
+- [ ] `vllm bench serve` with TTFT/TPOT/P99 metrics
+- [ ] BurstGPT trace replay via online serving
+
+### Priority 4: Accelerated mode
+- [ ] Implement virtual-time accumulation
+- [ ] Compare speedup vs real execution
+
+### Priority 5: Paper
+- [ ] Update draft with results
+- [ ] Figures: accuracy comparison, capability table
+- [ ] Related work positioning vs REVATI/Vidur
