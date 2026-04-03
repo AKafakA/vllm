@@ -206,7 +206,38 @@ Compared against **fresh baselines from same session**:
 Rate=4: TTFT +1.6%, TPOT +2.7% — both <5% ✓
 Rate=1: TTFT -4.4% ✓, TPOT -10.5% (decode overhead calibration varies by rate)
 
-Back-to-back eval with 5ms decode overhead running (rates 1/2/4, 50 prompts each).
+### Back-to-Back Results (5ms decode overhead, 50 prompts)
+
+| Rate | TTFT Error | TPOT Error | P99 TPOT Error |
+|------|-----------|-----------|---------------|
+| 1 | -1.0% ✓ | -6.5% ✓ | -7.6% ✓ |
+| 2 | +5.9% ✓ | -5.3% ✓ | -6.9% ✓ |
+| 4 | +12.6% | +6.7% ✓ | +2.0% ✓ |
+
+TPOT <7% at all rates, but overhead is rate-dependent (too high at rate=4, too low at rate=1).
+
+### Step-Cycle Serving Profile (BREAKTHROUGH)
+
+**Key discovery**: GPU-only profiles miss per-step serving overhead that varies with batch size due to GPU/CPU pipelining. A constant `DECODE_OVERHEAD_US` is rate-dependent.
+
+**Solution**: Profile the full step cycle time (GPU + scheduling + output processing) during a short serving trace. The step cycle captures GPU/CPU overlap naturally.
+
+Step cycle vs GPU-only comparison (1.5B, RTX 3060):
+```
+tt=1-7:  cycle=20ms, GPU=13ms, overhead=+6.5ms (low batch, CPU dominates)
+tt=8-10: cycle=17ms, GPU=14ms, overhead=+2.5ms (CUDA graph sweet spot)
+tt≥17:   cycle=20ms, GPU=28ms, overhead=-8ms (GPU/CPU overlap hides CPU)
+```
+
+**Final results with serving profile (NO calibration constant):**
+
+| Rate | TTFT Error | TPOT Error |
+|------|-----------|-----------|
+| **1** | **+2.5%** | **+1.0%** |
+| **2** | **-2.8%** | **-0.2%** |
+| **4** | **+0.8%** | **+0.5%** |
+
+All metrics <3% across all rates. Rate-independent. No per-rate calibration needed.
 
 ---
 
