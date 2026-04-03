@@ -193,7 +193,6 @@ class Worker(WorkerBase):
         # Optional emulator hook for cost estimation (lazy loaded)
         self._emulator_hook = None
         self._emulator_pending_output = None
-        self._emulator_sleep_deadline = 0.0  # When "virtual GPU" finishes
         hook_cls = _get_emulator_hook()
         if hook_cls is not None:
             try:
@@ -807,17 +806,8 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        # If emulator has pending output, wait for "virtual GPU" deadline.
-        # Between execute_model() (which returned immediately) and now,
-        # the engine core scheduled the next batch on its thread while
-        # the worker thread handled execute_model(N+1) — modeling the
-        # GPU/CPU overlap.
+        # If emulator produced output in execute_model(), return it.
         if self._emulator_pending_output is not None:
-            if self._emulator_sleep_deadline > 0:
-                remaining = self._emulator_sleep_deadline - time.perf_counter()
-                if remaining > 0.001:
-                    time.sleep(remaining)
-                self._emulator_sleep_deadline = 0.0
             output = self._emulator_pending_output
             self._emulator_pending_output = None
             return output
@@ -850,22 +840,15 @@ class Worker(WorkerBase):
                     cost_estimate["total_estimated_us"] / 1000,
                 )
                 
-                # Create fake output. Don't block the worker thread —
-                # record the "GPU completion" deadline and return None
-                # immediately (like a real non-blocking kernel launch).
-                # The worker thread stays free for the next call.
-                # sample_tokens() will wait for the deadline.
+                # Create fake output and sleep for estimated GPU time.
                 fake_output = self._emulator_hook.create_fake_output(scheduler_output)
                 if fake_output is not None:
                     estimated_latency_s = cost_estimate["total_estimated_us"] / 1_000_000
 
                     if self._emulator_hook.should_block and estimated_latency_s >= 0.001:
-                        self._emulator_sleep_deadline = (
-                            time.perf_counter() + estimated_latency_s
-                        )
-                    else:
-                        self._emulator_sleep_deadline = 0.0
+                        time.sleep(estimated_latency_s)
 
+                    # Store for sample_tokens() (v0.18.1 async flow)
                     self._emulator_pending_output = fake_output
                     return None
                 # Fall through if no requests to schedule
