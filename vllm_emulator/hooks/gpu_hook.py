@@ -67,9 +67,15 @@ class GpuWorkerHook:
         except Exception:
             pass  # Use defaults
 
-        # Option 2: per-step overhead constant (calibrated)
+        # Per-step overhead constant (calibrated, applied to all steps)
         self._step_overhead_us = float(
             os.environ.get("VLLM_EMULATOR_STEP_OVERHEAD_US", "0")
+        )
+        # Decode-only overhead: accounts for output processing, sampling,
+        # and scheduling overhead that is cheaper with fake outputs than
+        # real GPU outputs. Only applied to steps with decode sequences.
+        self._decode_overhead_us = float(
+            os.environ.get("VLLM_EMULATOR_DECODE_OVERHEAD_US", "0")
         )
 
         self._initialize_oracle()
@@ -180,8 +186,12 @@ class GpuWorkerHook:
         # Unified: one forward pass for all tokens
         batch_latency = self._oracle.estimate_step_latency_us(total_tokens)
 
-        # Option 2: add per-step overhead constant (calibrated)
+        # Add per-step overhead constant (calibrated)
         batch_latency += self._step_overhead_us
+
+        # Add decode-specific overhead (output processing gap)
+        if self._decode_overhead_us > 0 and num_decode_seqs > 0:
+            batch_latency += self._decode_overhead_us
 
         return {
             "prefill_latency_us": prefill_latency,

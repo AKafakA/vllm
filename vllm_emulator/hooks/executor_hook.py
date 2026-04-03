@@ -30,6 +30,7 @@ ORACLE_ENABLED_ENV = "VLLM_EMULATOR_ENABLE_ORACLE"
 ORACLE_PROFILE_PATH_ENV = "VLLM_EMULATOR_PROFILE_PACK"
 ORACLE_MODE_ENV = "VLLM_EMULATOR_MODE"
 STEP_OVERHEAD_ENV = "VLLM_EMULATOR_STEP_OVERHEAD_US"
+DECODE_OVERHEAD_ENV = "VLLM_EMULATOR_DECODE_OVERHEAD_US"
 
 EMULATOR_MODE_REALTIME = "realtime"
 EMULATOR_MODE_ACCELERATED = "accelerated"
@@ -75,13 +76,15 @@ class ExecutorEmulatorHook:
         self._emulator_mode = mode
 
         self._step_overhead_us = float(os.environ.get(STEP_OVERHEAD_ENV, "0"))
+        self._decode_overhead_us = float(os.environ.get(DECODE_OVERHEAD_ENV, "0"))
 
         try:
             profile_pack = load_profile_pack(profile_path)
             self._oracle = create_oracle_from_profile_pack(profile_pack)
             self._enabled = True
             print(f"[ExecutorEmulatorHook] Enabled: mode={self._emulator_mode}, "
-                  f"overhead={self._step_overhead_us}us")
+                  f"overhead={self._step_overhead_us}us, "
+                  f"decode_overhead={self._decode_overhead_us}us")
         except Exception as e:
             print(f"[ExecutorEmulatorHook] Failed to initialize: {e}")
 
@@ -124,6 +127,19 @@ class ExecutorEmulatorHook:
         total_tokens = scheduler_output.total_num_scheduled_tokens
         latency_us = self._oracle.estimate_step_latency_us(total_tokens)
         latency_us += self._step_overhead_us
+
+        # Add decode-specific overhead: accounts for output processing,
+        # sampling, and scheduling overhead that is cheaper with fake
+        # outputs than with real GPU outputs.
+        if self._decode_overhead_us > 0:
+            new_req_ids = {r.req_id for r in scheduler_output.scheduled_new_reqs}
+            num_decode = sum(
+                1 for rid in scheduler_output.num_scheduled_tokens
+                if rid not in new_req_ids
+            )
+            if num_decode > 0:
+                latency_us += self._decode_overhead_us
+
         latency_s = latency_us / 1e6
 
         # Create fake output

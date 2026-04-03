@@ -235,8 +235,12 @@ def trace_to_profile_pack(
         total = rec["total_tokens"]
         if total <= 0:
             continue
-        # Round to nearest bucket
-        bucket = max(1, (total + bucket_size // 2) // bucket_size * bucket_size)
+        # Use per-token granularity for small total_tokens (online serving
+        # operating range), coarser buckets above to keep profile compact.
+        if total <= 32:
+            bucket = total
+        else:
+            bucket = max(1, (total + bucket_size // 2) // bucket_size * bucket_size)
         fwd_buckets.setdefault(bucket, []).append(rec["latency_us"])
 
     forward_pass = []
