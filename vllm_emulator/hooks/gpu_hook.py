@@ -67,6 +67,11 @@ class GpuWorkerHook:
         except Exception:
             pass  # Use defaults
 
+        # Option 2: per-step overhead constant (calibrated)
+        self._step_overhead_us = float(
+            os.environ.get("VLLM_EMULATOR_STEP_OVERHEAD_US", "0")
+        )
+
         self._initialize_oracle()
 
     def _initialize_oracle(self) -> None:
@@ -174,6 +179,9 @@ class GpuWorkerHook:
 
         # Unified: one forward pass for all tokens
         batch_latency = self._oracle.estimate_step_latency_us(total_tokens)
+
+        # Option 2: add per-step overhead constant (calibrated)
+        batch_latency += self._step_overhead_us
 
         return {
             "prefill_latency_us": prefill_latency,

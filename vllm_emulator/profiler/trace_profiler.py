@@ -141,6 +141,53 @@ class ExecuteModelTracer:
             self.flush()
 
 
+class StepCycleTracer:
+    """Records full step-cycle time (schedule + execute + output processing).
+
+    This is Option 1 for calibration: measures the complete
+    _process_engine_step() duration, not just execute_model().
+    The difference between step cycle and execute_model is the
+    per-step CPU overhead.
+
+    Enabled via VLLM_EMULATOR_TRACE_STEP_CYCLE=1.
+    """
+
+    def __init__(self, output_path: str = "/tmp/emulator_step_trace.jsonl"):
+        self._output_path = output_path
+        self._records: list[float] = []
+        self._step_count = 0
+
+    def record_step(self, step_latency_us: float) -> None:
+        self._records.append(step_latency_us)
+        self._step_count += 1
+        if len(self._records) >= 200:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._records:
+            return
+        from pathlib import Path
+        path = Path(self._output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            for lat in self._records:
+                f.write(json.dumps({"step_cycle_us": lat}) + "\n")
+        count = len(self._records)
+        self._records.clear()
+        print(f"[StepCycleTracer] Flushed {count} step records to {path}")
+
+    def get_stats(self) -> dict:
+        """Return statistics for calibration."""
+        import statistics
+        if not self._records:
+            return {}
+        return {
+            "num_steps": len(self._records),
+            "median_us": statistics.median(self._records),
+            "mean_us": statistics.mean(self._records),
+        }
+
+
 # ---------------------------------------------------------------------------
 # Trace → Profile Pack conversion
 # ---------------------------------------------------------------------------

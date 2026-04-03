@@ -43,6 +43,18 @@ class UniProcExecutor(Executor):
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput"
             )
 
+        # Executor-level emulator hook (experimental, opt-in)
+        # Disabled by default — worker-level hook is more accurate for
+        # online serving because it runs real worker code overhead.
+        # Enable with VLLM_EMULATOR_EXECUTOR_HOOK=1 for research.
+        self._emulator_executor_hook = None
+        if os.environ.get("VLLM_EMULATOR_EXECUTOR_HOOK", "").lower() in ("1", "true"):
+            try:
+                from vllm_emulator.hooks.executor_hook import get_executor_hook
+                self._emulator_executor_hook = get_executor_hook()
+            except ImportError:
+                pass
+
         is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
         self.driver_worker.init_worker(all_kwargs=[kwargs])
         if not is_eep_new_worker:
@@ -100,6 +112,16 @@ class UniProcExecutor(Executor):
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        # Emulator fast path: return a timer-based Future that resolves
+        # after predicted GPU time. This preserves the engine core's
+        # batch queue pipelining — the scheduler runs while the Future
+        # is pending, exactly like real GPU/CPU overlap.
+        emu_hook = getattr(self, '_emulator_executor_hook', None)
+        if emu_hook is not None and emu_hook.is_enabled:
+            if emu_hook.should_use_oracle(scheduler_output):
+                return emu_hook.create_delayed_future(
+                    scheduler_output, non_block=non_block)
+
         output = self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
@@ -115,6 +137,15 @@ class UniProcExecutor(Executor):
     def sample_tokens(  # type: ignore[override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        # Emulator: sample_tokens returns a Future that waits for the
+        # execute_model timer to fire, then returns the fake output.
+        emu_hook = getattr(self, '_emulator_executor_hook', None)
+        if emu_hook is not None and emu_hook.is_enabled and emu_hook.has_pending_future():
+            if non_block:
+                return emu_hook.get_sample_future()
+            else:
+                return emu_hook.get_sample_future().result()
+
         return self.collective_rpc(
             "sample_tokens",
             args=(grammar_output,),

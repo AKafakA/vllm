@@ -212,6 +212,19 @@ class EngineCore:
 
         self.aborts_queue = queue.Queue[list[str]]()
 
+        # Optional emulator step-cycle tracer (Option 1: full step profiling)
+        self._emulator_step_tracer = None
+        try:
+            import os
+            if os.environ.get("VLLM_EMULATOR_TRACE_STEP_CYCLE", "").lower() in ("1", "true", "yes"):
+                from vllm_emulator.profiler.trace_profiler import StepCycleTracer
+                self._emulator_step_tracer = StepCycleTracer(
+                    os.environ.get("VLLM_EMULATOR_STEP_TRACE_OUTPUT",
+                                   "/tmp/emulator_step_trace.jsonl")
+                )
+        except ImportError:
+            pass
+
         self._idle_state_callbacks: list[Callable] = []
 
         # Mark the startup heap as static so that it's ignored by GC.
@@ -1168,6 +1181,11 @@ class EngineCoreProc(EngineCore):
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
 
+        # Optional: trace full step cycle time (for emulator calibration)
+        _step_t0 = None
+        if getattr(self, '_emulator_step_tracer', None) is not None:
+            _step_t0 = time.perf_counter()
+
         # Step the engine core.
         outputs, model_executed = self.step_fn()
         # Put EngineCoreOutputs into the output queue.
@@ -1175,6 +1193,11 @@ class EngineCoreProc(EngineCore):
             self.output_queue.put_nowait(output)
         # Post-step hook.
         self.post_step(model_executed)
+
+        # Optional: record full step cycle time
+        if _step_t0 is not None and model_executed:
+            step_us = (time.perf_counter() - _step_t0) * 1e6
+            self._emulator_step_tracer.record_step(step_us)
 
         # If no model execution happened but there are waiting requests
         # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow
