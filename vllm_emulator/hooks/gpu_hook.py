@@ -131,50 +131,37 @@ class GpuWorkerHook:
         if not self._enabled or self._oracle is None:
             return {"prefill_latency_us": 0, "decode_latency_us": 0, "total_estimated_us": 0}
 
-        # BATCH-LEVEL estimation (not per-request)
+        # UNIFIED estimation via total_tokens
         #
-        # vLLM v1 runs a SINGLE fused forward pass over all tokens in the
-        # batch (both prefill and decode tokens together).  The cost is
-        # dominated by the total number of tokens processed.
+        # vLLM v1 runs a SINGLE fused forward pass over all tokens in
+        # the batch.  The cost is a function of total_num_scheduled_tokens
+        # regardless of how they split between prefill and decode.
+        #
+        # We also compute separate prefill/decode estimates for logging.
 
-        # 1. Count prefill tokens (new requests being prompted)
+        total_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # For logging breakdown only:
         total_prefill_tokens = 0
         for req in scheduler_output.scheduled_new_reqs:
             if req.prompt_token_ids:
                 total_prefill_tokens += len(req.prompt_token_ids)
+        cached = scheduler_output.scheduled_cached_reqs
+        num_decode_seqs = cached.num_reqs if cached.num_reqs > 0 else 0
 
         prefill_latency = 0.0
         if total_prefill_tokens > 0:
             prefill_latency = self._oracle.estimate_prefill_latency_us(
                 total_prefill_tokens, batch_size=1
             )
-
-        # 2. Count decode tokens (cached/continuing requests, 1 token each)
         decode_latency = 0.0
-        cached = scheduler_output.scheduled_cached_reqs
-        num_decode_seqs = cached.num_reqs if cached.num_reqs > 0 else 0
         if num_decode_seqs > 0:
             decode_latency = self._oracle.estimate_decode_latency_us(
                 num_decode_seqs
             )
 
-        # 3. Combined batch-level latency
-        # In a mixed batch, all tokens go through one fused forward pass.
-        # The total cost is approximately the prefill cost over the
-        # combined token count (prefill tokens + decode tokens), because
-        # prefill tokens dominate compute cost.  When only decode tokens
-        # are present, use decode cost directly.
-        if total_prefill_tokens > 0 and num_decode_seqs > 0:
-            # Mixed batch: model as prefill over total tokens.
-            # Decode tokens add ~1 token each; their marginal cost is
-            # captured by looking up prefill latency at the combined count.
-            total_tokens = total_prefill_tokens + num_decode_seqs
-            batch_latency = self._oracle.estimate_prefill_latency_us(
-                total_tokens, batch_size=1
-            )
-        else:
-            # Pure prefill or pure decode batch
-            batch_latency = prefill_latency + decode_latency
+        # Unified: one forward pass for all tokens
+        batch_latency = self._oracle.estimate_step_latency_us(total_tokens)
 
         return {
             "prefill_latency_us": prefill_latency,
@@ -224,14 +211,32 @@ class GpuWorkerHook:
         if not req_ids:
             return None
 
-        # Each request produces exactly 1 token per forward pass.
-        # Avoid generating EOS so the scheduler controls stopping via max_tokens.
+        # Token generation rules for async scheduler compatibility:
+        # - Prefill chunk (partial prompt): 0 tokens (no placeholder allocated)
+        # - Prefill complete (full prompt) or decode: 1 token
+        #
+        # A request is a "prefill chunk" if num_scheduled_tokens < remaining
+        # prompt tokens. For new requests, we check if the scheduled tokens
+        # cover the full prompt.
+        new_req_ids = {}
+        for req in scheduler_output.scheduled_new_reqs:
+            prompt_len = len(req.prompt_token_ids) if req.prompt_token_ids else 0
+            scheduled = scheduler_output.num_scheduled_tokens.get(req.req_id, 0)
+            # If scheduled < prompt_len, this is a partial prefill chunk
+            new_req_ids[req.req_id] = (prompt_len, scheduled)
+
         vocab = self._vocab_size
         eos = self._eos_token_id
         sampled_token_ids: list[list[int]] = []
-        for _req_id in req_ids:
+        for req_id in req_ids:
+            if req_id in new_req_ids:
+                prompt_len, scheduled = new_req_ids[req_id]
+                if scheduled < prompt_len:
+                    # Partial prefill chunk: no token generated
+                    sampled_token_ids.append([])
+                    continue
+            # Full prefill or decode: generate 1 fake token
             tok = self._rng.randrange(vocab)
-            # Re-roll if we hit EOS (simple rejection; practically 1 attempt)
             while tok == eos:
                 tok = self._rng.randrange(vocab)
             sampled_token_ids.append([tok])
@@ -239,19 +244,20 @@ class GpuWorkerHook:
         # Create req_id_to_index mapping
         req_id_to_index = {rid: idx for idx, rid in enumerate(req_ids)}
 
-        # Logprobs: 1 position per request, 1 column (top-1 only).
-        # This is the minimal shape the scheduler accepts. Requests that
-        # ask for more logprobs will get a truncated view, which is fine
-        # for emulator mode (the scheduler only checks if logprobs is
-        # not None, then slices via slice_request).
-        num_reqs = len(req_ids)
-        logprobs = LogprobsLists(
-            logprob_token_ids=np.array(
-                [[toks[0]] for toks in sampled_token_ids], dtype=np.int32
-            ),
-            logprobs=np.full((num_reqs, 1), -0.1, dtype=np.float32),
-            sampled_token_ranks=np.zeros(num_reqs, dtype=np.int32),
-        )
+        # Logprobs: 1 position per token-producing request.
+        # Requests with empty sampled_token_ids (prefill chunks) are excluded.
+        num_with_tokens = sum(1 for toks in sampled_token_ids if toks)
+        if num_with_tokens > 0:
+            token_vals = [toks[0] for toks in sampled_token_ids if toks]
+            logprobs = LogprobsLists(
+                logprob_token_ids=np.array(
+                    [[t] for t in token_vals], dtype=np.int32
+                ),
+                logprobs=np.full((num_with_tokens, 1), -0.1, dtype=np.float32),
+                sampled_token_ranks=np.zeros(num_with_tokens, dtype=np.int32),
+            )
+        else:
+            logprobs = None
 
         # Create the fake output
         fake_output = ModelRunnerOutput(

@@ -32,6 +32,20 @@ class BaseGpuCostOracle(ABC):
     def estimate_decode_latency_us(self, active_seqs: int) -> float:
         """Estimate decode latency per token step for active sequences."""
 
+    def estimate_step_latency_us(self, total_tokens: int) -> float:
+        """Estimate latency for one forward pass with total_tokens tokens.
+
+        This is the unified interface: the model runner processes all tokens
+        (prefill chunks + decode tokens) in a single forward pass.  The cost
+        is a function of total_tokens regardless of how they're split between
+        prefill and decode.
+
+        Default implementation falls back to estimate_prefill_latency_us
+        for backward compatibility.  Subclasses with a unified profile
+        should override this directly.
+        """
+        return self.estimate_prefill_latency_us(total_tokens, batch_size=1)
+
 
 class BaseOffloadCostOracle(ABC):
     """Abstract interface for estimating KV offload transfer costs in microseconds."""

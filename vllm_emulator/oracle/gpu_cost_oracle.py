@@ -66,21 +66,40 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         self._profile = profile_pack
         self._gpu_model = profile_pack["gpu_model"]
 
-        # Pre-sort samples by x-axis (seq_len / active_seqs) to guarantee
-        # monotonic interpolation.
+        # Group prefill samples by batch_size, sorted by seq_len within each
+        self._prefill_by_bs: dict[int, list[dict]] = {}
+        for s in profile_pack["prefill"]:
+            bs = s["batch_size"]
+            self._prefill_by_bs.setdefault(bs, []).append(s)
+        for bs in self._prefill_by_bs:
+            self._prefill_by_bs[bs].sort(key=lambda s: s["seq_len"])
+
+        # Available batch sizes sorted for interpolation
+        self._prefill_batch_sizes = sorted(self._prefill_by_bs.keys())
+
+        # Fallback: flatten all samples for single-dim lookup
         self._prefill_samples = sorted(
             profile_pack["prefill"], key=lambda s: s["seq_len"]
         )
+
         self._decode_samples = sorted(
             profile_pack["decode"], key=lambda s: s["active_seqs"]
         )
 
-        # Pre-compute power-law fits for extrapolation
-        prefill_xs = [float(s["seq_len"]) for s in self._prefill_samples]
-        prefill_ys = [float(s["latency_us"]) for s in self._prefill_samples]
-        self._prefill_pw_a, self._prefill_pw_b = _fit_power_law(
-            prefill_xs, prefill_ys
-        )
+        # Pre-compute power-law fits per batch_size group
+        self._prefill_pw: dict[int, tuple[float, float]] = {}
+        for bs, samples in self._prefill_by_bs.items():
+            xs = [float(s["seq_len"]) for s in samples]
+            ys = [float(s["latency_us"]) for s in samples]
+            self._prefill_pw[bs] = _fit_power_law(xs, ys)
+
+        # Global fallback power-law (batch_size=1 or flattened)
+        if 1 in self._prefill_pw:
+            self._prefill_pw_a, self._prefill_pw_b = self._prefill_pw[1]
+        else:
+            xs = [float(s["seq_len"]) for s in self._prefill_samples]
+            ys = [float(s["latency_us"]) for s in self._prefill_samples]
+            self._prefill_pw_a, self._prefill_pw_b = _fit_power_law(xs, ys)
 
         decode_xs = [float(s["active_seqs"]) for s in self._decode_samples]
         decode_ys = [
@@ -90,6 +109,18 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             decode_xs, decode_ys
         )
 
+        # Unified forward_pass profile (optional, preferred if available)
+        self._forward_pass_samples = sorted(
+            profile_pack.get("forward_pass", []),
+            key=lambda s: s["total_tokens"],
+        )
+        if self._forward_pass_samples:
+            fwd_xs = [float(s["total_tokens"]) for s in self._forward_pass_samples]
+            fwd_ys = [float(s["latency_us"]) for s in self._forward_pass_samples]
+            self._fwd_pw_a, self._fwd_pw_b = _fit_power_law(fwd_xs, fwd_ys)
+        else:
+            self._fwd_pw_a, self._fwd_pw_b = self._prefill_pw_a, self._prefill_pw_b
+
     @property
     def gpu_model(self) -> str:
         return self._gpu_model
@@ -97,28 +128,74 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
     def estimate_prefill_latency_us(
         self, prompt_tokens: int, batch_size: int
     ) -> float:
-        """Estimate prefill latency.
+        """Estimate prefill latency for a batch of requests.
 
-        Within the profiled range: piecewise-linear interpolation.
-        Outside: power-law extrapolation (captures super-linear attention
-        scaling).
+        If profile data exists for the given batch_size, interpolates
+        within that group.  Otherwise, finds the two nearest batch_size
+        groups and interpolates between them.  Falls back to power-law
+        extrapolation outside the profiled range.
         """
-        samples = self._prefill_samples
-        seq_lens = [s["seq_len"] for s in samples]
-        latencies = [s["latency_us"] for s in samples]
-
         if prompt_tokens <= 0:
             return 0.0
 
-        if seq_lens[0] <= prompt_tokens <= seq_lens[-1]:
-            return _interpolate_linear(
-                [float(s) for s in seq_lens],
-                [float(l) for l in latencies],
-                float(prompt_tokens),
+        # Try exact batch_size match first
+        if batch_size in self._prefill_by_bs:
+            return self._estimate_prefill_for_bs(
+                prompt_tokens, batch_size
             )
 
-        # Power-law extrapolation: y = a * x^b
-        return self._prefill_pw_a * (prompt_tokens ** self._prefill_pw_b)
+        # Interpolate between nearest batch_size groups
+        if len(self._prefill_batch_sizes) >= 2 and batch_size > 0:
+            bss = self._prefill_batch_sizes
+            # Find bracketing batch sizes
+            lo_bs, hi_bs = bss[0], bss[-1]
+            for i in range(len(bss) - 1):
+                if bss[i] <= batch_size <= bss[i + 1]:
+                    lo_bs, hi_bs = bss[i], bss[i + 1]
+                    break
+
+            if batch_size <= bss[0]:
+                return self._estimate_prefill_for_bs(
+                    prompt_tokens, bss[0]
+                )
+            if batch_size >= bss[-1]:
+                # Extrapolate from the two largest batch sizes
+                lo_lat = self._estimate_prefill_for_bs(
+                    prompt_tokens, bss[-2]
+                )
+                hi_lat = self._estimate_prefill_for_bs(
+                    prompt_tokens, bss[-1]
+                )
+                if bss[-1] != bss[-2]:
+                    ratio = (batch_size - bss[-2]) / (bss[-1] - bss[-2])
+                    return lo_lat + ratio * (hi_lat - lo_lat)
+                return hi_lat
+
+            lo_lat = self._estimate_prefill_for_bs(prompt_tokens, lo_bs)
+            hi_lat = self._estimate_prefill_for_bs(prompt_tokens, hi_bs)
+            ratio = (batch_size - lo_bs) / (hi_bs - lo_bs)
+            return lo_lat + ratio * (hi_lat - lo_lat)
+
+        # Single batch_size group — use it regardless
+        bs = self._prefill_batch_sizes[0] if self._prefill_batch_sizes else 1
+        return self._estimate_prefill_for_bs(prompt_tokens, bs)
+
+    def _estimate_prefill_for_bs(
+        self, prompt_tokens: int, batch_size: int
+    ) -> float:
+        """Estimate prefill for a specific profiled batch_size."""
+        samples = self._prefill_by_bs.get(batch_size, self._prefill_samples)
+        seq_lens = [float(s["seq_len"]) for s in samples]
+        latencies = [float(s["latency_us"]) for s in samples]
+
+        if seq_lens[0] <= prompt_tokens <= seq_lens[-1]:
+            return _interpolate_linear(seq_lens, latencies, float(prompt_tokens))
+
+        # Power-law extrapolation
+        a, b = self._prefill_pw.get(
+            batch_size, (self._prefill_pw_a, self._prefill_pw_b)
+        )
+        return a * (prompt_tokens ** b)
 
     def estimate_decode_latency_us(self, active_seqs: int) -> float:
         """Estimate per-token decode latency.
@@ -141,6 +218,34 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             )
 
         return self._decode_pw_a * (active_seqs ** self._decode_pw_b)
+
+    def estimate_step_latency_us(self, total_tokens: int) -> float:
+        """Estimate latency for one forward pass processing total_tokens.
+
+        Uses the ``forward_pass`` profile section if available (unified
+        model: latency = f(total_tokens)).  Falls back to prefill-based
+        estimation otherwise.
+
+        The forward_pass profile captures the actual model runner cost
+        for a batch of total_tokens, regardless of whether they come
+        from prefill or decode.  This is the most accurate model for
+        vLLM's fused forward pass.
+        """
+        if not self._forward_pass_samples:
+            # Fallback: use prefill oracle (less accurate for mixed batches)
+            return self.estimate_prefill_latency_us(total_tokens, batch_size=1)
+
+        xs = [float(s["total_tokens"]) for s in self._forward_pass_samples]
+        ys = [float(s["latency_us"]) for s in self._forward_pass_samples]
+
+        if total_tokens <= 0:
+            return 0.0
+
+        if xs[0] <= total_tokens <= xs[-1]:
+            return _interpolate_linear(xs, ys, float(total_tokens))
+
+        # Power-law extrapolation
+        return self._fwd_pw_a * (total_tokens ** self._fwd_pw_b)
 
 
 def create_oracle_from_profile_pack(
