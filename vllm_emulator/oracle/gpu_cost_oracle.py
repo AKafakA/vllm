@@ -121,6 +121,9 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         else:
             self._fwd_pw_a, self._fwd_pw_b = self._prefill_pw_a, self._prefill_pw_b
 
+        # 2D forward pass profile (optional, most accurate)
+        self._forward_pass_2d = profile_pack.get("forward_pass_2d", [])
+
     @property
     def gpu_model(self) -> str:
         return self._gpu_model
@@ -219,33 +222,83 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         return self._decode_pw_a * (active_seqs ** self._decode_pw_b)
 
-    def estimate_step_latency_us(self, total_tokens: int) -> float:
-        """Estimate latency for one forward pass processing total_tokens.
+    def estimate_step_latency_us(
+        self, total_tokens: int, avg_context_len: int = 0
+    ) -> float:
+        """Estimate latency for one forward pass.
 
-        Uses the ``forward_pass`` profile section if available (unified
-        model: latency = f(total_tokens)).  Falls back to prefill-based
-        estimation otherwise.
-
-        The forward_pass profile captures the actual model runner cost
-        for a batch of total_tokens, regardless of whether they come
-        from prefill or decode.  This is the most accurate model for
-        vLLM's fused forward pass.
+        If a 2D profile (forward_pass_2d) is available, uses bilinear
+        interpolation over (total_tokens, avg_context_len).  Falls back
+        to 1D forward_pass or prefill oracle otherwise.
         """
+        if total_tokens <= 0:
+            return 0.0
+
+        # Try 2D lookup first
+        if self._forward_pass_2d and avg_context_len > 0:
+            return self._estimate_2d(total_tokens, avg_context_len)
+
+        # 1D fallback
         if not self._forward_pass_samples:
-            # Fallback: use prefill oracle (less accurate for mixed batches)
             return self.estimate_prefill_latency_us(total_tokens, batch_size=1)
 
         xs = [float(s["total_tokens"]) for s in self._forward_pass_samples]
         ys = [float(s["latency_us"]) for s in self._forward_pass_samples]
 
-        if total_tokens <= 0:
-            return 0.0
-
         if xs[0] <= total_tokens <= xs[-1]:
             return _interpolate_linear(xs, ys, float(total_tokens))
 
-        # Power-law extrapolation
         return self._fwd_pw_a * (total_tokens ** self._fwd_pw_b)
+
+    def _estimate_2d(self, total_tokens: int, avg_context_len: int) -> float:
+        """Bilinear interpolation over the 2D forward_pass profile.
+
+        Groups 2D samples by total_tokens, interpolates avg_context_len
+        within each group, then interpolates between groups.
+        """
+        # Group by total_tokens
+        by_tt: dict[int, list[tuple[int, float]]] = {}
+        for s in self._forward_pass_2d:
+            tt = s["total_tokens"]
+            ctx = s["avg_context_len"]
+            lat = s["latency_us"]
+            by_tt.setdefault(tt, []).append((ctx, lat))
+
+        tts = sorted(by_tt.keys())
+        if not tts:
+            return self.estimate_prefill_latency_us(total_tokens, batch_size=1)
+
+        def interp_context(points: list[tuple[int, float]], ctx: int) -> float:
+            """Interpolate latency for a given context within one tt group."""
+            points = sorted(points)
+            xs = [float(p[0]) for p in points]
+            ys = [float(p[1]) for p in points]
+            if len(xs) == 1:
+                return ys[0]
+            if ctx <= xs[0]:
+                return ys[0]
+            if ctx >= xs[-1]:
+                # Linear extrapolation from last two points
+                if len(xs) >= 2:
+                    slope = (ys[-1] - ys[-2]) / max(xs[-1] - xs[-2], 1)
+                    return ys[-1] + slope * (ctx - xs[-1])
+                return ys[-1]
+            return _interpolate_linear(xs, ys, float(ctx))
+
+        # Find bracketing total_tokens
+        if total_tokens <= tts[0]:
+            return interp_context(by_tt[tts[0]], avg_context_len)
+        if total_tokens >= tts[-1]:
+            return interp_context(by_tt[tts[-1]], avg_context_len)
+
+        for i in range(len(tts) - 1):
+            if tts[i] <= total_tokens <= tts[i + 1]:
+                lo_lat = interp_context(by_tt[tts[i]], avg_context_len)
+                hi_lat = interp_context(by_tt[tts[i + 1]], avg_context_len)
+                ratio = (total_tokens - tts[i]) / max(tts[i + 1] - tts[i], 1)
+                return lo_lat + ratio * (hi_lat - lo_lat)
+
+        return interp_context(by_tt[tts[-1]], avg_context_len)
 
 
 def create_oracle_from_profile_pack(

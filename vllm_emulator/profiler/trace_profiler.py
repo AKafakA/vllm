@@ -91,6 +91,13 @@ class ExecuteModelTracer:
         )
         max_seq_len = max(seq_lens) if seq_lens else 0
 
+        # Compute avg_decode_context (matches hook)
+        # Only decode sequences' context — prefill cost captured by total_tokens
+        avg_decode_context = 0
+        if num_decode_seqs > 0:
+            total_decode_ctx = sum(cached.num_computed_tokens)
+            avg_decode_context = total_decode_ctx // num_decode_seqs
+
         return {
             "total_tokens": total_tokens,
             "num_prefill_tokens": num_prefill_tokens,
@@ -99,6 +106,8 @@ class ExecuteModelTracer:
             "num_decode_seqs": num_decode_seqs,
             "avg_seq_len": avg_seq_len,
             "max_seq_len": max_seq_len,
+            "avg_decode_context": avg_decode_context,
+            "avg_context_len": avg_decode_context,
         }
 
     def record(

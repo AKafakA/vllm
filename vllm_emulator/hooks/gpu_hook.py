@@ -172,8 +172,20 @@ class GpuWorkerHook:
                 num_decode_seqs
             )
 
+        # Compute avg decode context for 2D oracle
+        # Only decode sequences contribute to KV cache attention cost.
+        # Prefill cost is already captured by total_tokens dimension.
+        # avg_decode_context = mean(num_computed_tokens) across decode seqs
+        avg_decode_context = 0
+        if num_decode_seqs > 0:
+            cached = scheduler_output.scheduled_cached_reqs
+            total_decode_ctx = sum(cached.num_computed_tokens)
+            avg_decode_context = total_decode_ctx // num_decode_seqs
+
         # Unified: one forward pass for all tokens
-        batch_latency = self._oracle.estimate_step_latency_us(total_tokens)
+        batch_latency = self._oracle.estimate_step_latency_us(
+            total_tokens, avg_context_len=avg_decode_context
+        )
 
         return {
             "prefill_latency_us": prefill_latency,

@@ -191,6 +191,7 @@ class Worker(WorkerBase):
         # Optional emulator hook for cost estimation (lazy loaded)
         self._emulator_hook = None
         self._emulator_pending_output = None
+        self._emulator_sleep_deadline = 0.0  # When "virtual GPU" finishes
         hook_cls = _get_emulator_hook()
         if hook_cls is not None:
             try:
@@ -838,24 +839,21 @@ class Worker(WorkerBase):
                     cost_estimate["total_estimated_us"] / 1000,
                 )
                 
-                # Create fake output and return it (skip real GPU execution)
+                # Create fake output and sleep for estimated GPU time.
+                # The sleep happens inside execute_model(), which the
+                # executor wraps in a Future (non_block=True). The engine
+                # core's batch queue pipelines: while this Future sleeps,
+                # the scheduler prepares the next batch — matching real
+                # GPU/CPU overlap behavior.
                 fake_output = self._emulator_hook.create_fake_output(scheduler_output)
                 if fake_output is not None:
                     estimated_latency_s = cost_estimate["total_estimated_us"] / 1_000_000
-                    
-                    # Block for timing simulation based on blocking mode
+
                     if self._emulator_hook.should_block:
-                        # Online mode: block for estimated latency
                         if estimated_latency_s >= 0.001:
                             time.sleep(estimated_latency_s)
-                        # else: ignore sub-ms delays
-                    else:
-                        # Offline mode (REVATI-like): no blocking
-                        # Just record timing for metrics/logging
-                        pass
-                    
-                    # Store for sample_tokens() and return None to signal
-                    # the engine core to call sample_tokens() next
+
+                    # Store for sample_tokens() and return None
                     self._emulator_pending_output = fake_output
                     return None
                 # Fall through if no requests to schedule
