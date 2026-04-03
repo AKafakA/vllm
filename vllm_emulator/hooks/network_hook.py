@@ -26,8 +26,9 @@ NETWORK_BLOCKING_MODE_ENV = "VLLM_EMULATOR_NETWORK_BLOCKING_MODE"
 NETWORK_TOPOLOGY_ENV = "VLLM_EMULATOR_NETWORK_TOPOLOGY"
 
 # Blocking modes
-BLOCKING_MODE_ONLINE = "online"  # Block for estimated latency (default)
-BLOCKING_MODE_OFFLINE = "offline"  # No blocking (virtual time)
+EMULATOR_MODE_REALTIME = "realtime"      # Block for estimated latency (default)
+EMULATOR_MODE_ACCELERATED = "accelerated"  # No blocking (virtual time)
+_MODE_ALIASES = {"online": EMULATOR_MODE_REALTIME, "offline": EMULATOR_MODE_ACCELERATED}
 
 
 class NetworkHook:
@@ -42,7 +43,7 @@ class NetworkHook:
     def __init__(self, topology: str = "nvlink"):
         self._oracle: BaseNetworkCostOracle | None = None
         self._enabled = False
-        self._blocking_mode = BLOCKING_MODE_ONLINE
+        self._emulator_mode = EMULATOR_MODE_REALTIME
         self._topology = self._parse_topology(topology)
         self._active_transfers = 0
         self._lock = threading.Lock()
@@ -72,8 +73,9 @@ class NetworkHook:
             )
 
         # Determine blocking mode
-        blocking_mode = os.environ.get(NETWORK_BLOCKING_MODE_ENV, BLOCKING_MODE_ONLINE).lower()
-        self._blocking_mode = BLOCKING_MODE_OFFLINE if blocking_mode == BLOCKING_MODE_OFFLINE else BLOCKING_MODE_ONLINE
+        mode = os.environ.get(NETWORK_BLOCKING_MODE_ENV, EMULATOR_MODE_REALTIME).lower()
+        mode = _MODE_ALIASES.get(mode, mode)
+        self._emulator_mode = mode if mode == EMULATOR_MODE_ACCELERATED else EMULATOR_MODE_REALTIME
 
         # Determine topology
         topology_str = os.environ.get(NETWORK_TOPOLOGY_ENV, "nvlink").lower()
@@ -95,13 +97,13 @@ class NetworkHook:
 
     @property
     def blocking_mode(self) -> str:
-        """Return the blocking mode: 'online' or 'offline'."""
-        return self._blocking_mode
+        """Return the emulator mode: 'realtime' or 'accelerated'."""
+        return self._emulator_mode
 
     @property
     def should_block(self) -> bool:
         """Return whether we should block for timing simulation."""
-        return self._blocking_mode == BLOCKING_MODE_ONLINE
+        return self._emulator_mode == EMULATOR_MODE_REALTIME
 
     @property
     def oracle(self) -> BaseNetworkCostOracle | None:

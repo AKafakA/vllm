@@ -25,11 +25,16 @@ _DEFAULT_VOCAB_SIZE = 32000
 # Environment variable to enable emulator cost oracle
 ORACLE_ENABLED_ENV = "VLLM_EMULATOR_ENABLE_ORACLE"
 ORACLE_PROFILE_PATH_ENV = "VLLM_EMULATOR_PROFILE_PACK"
+ORACLE_MODE_ENV = "VLLM_EMULATOR_MODE"
+# Legacy env var (backward compat)
 ORACLE_BLOCKING_MODE_ENV = "VLLM_EMULATOR_BLOCKING_MODE"
 
-# Blocking modes
-BLOCKING_MODE_ONLINE = "online"  # Block for estimated latency (default)
-BLOCKING_MODE_OFFLINE = "offline"  # No blocking (virtual time, like REVATI)
+# Emulator modes
+EMULATOR_MODE_REALTIME = "realtime"      # Block for estimated latency (default)
+EMULATOR_MODE_ACCELERATED = "accelerated"  # No blocking (virtual time, like REVATI)
+
+# Backward compat mapping
+_MODE_ALIASES = {"online": EMULATOR_MODE_REALTIME, "offline": EMULATOR_MODE_ACCELERATED}
 
 
 class GpuWorkerHook:
@@ -45,7 +50,7 @@ class GpuWorkerHook:
         self._worker = worker
         self._oracle: BaseGpuCostOracle | None = None
         self._enabled = False
-        self._blocking_mode = BLOCKING_MODE_ONLINE  # Default
+        self._emulator_mode = EMULATOR_MODE_REALTIME  # Default
         self._rng = random.Random(42)  # Deterministic fake token generation
 
         # Try to extract vocab_size and eos_token_id from model config
@@ -75,12 +80,14 @@ class GpuWorkerHook:
                 f"{ORACLE_ENABLED_ENV} is set but {ORACLE_PROFILE_PATH_ENV} is not configured"
             )
 
-        # Determine blocking mode
-        blocking_mode = os.environ.get(ORACLE_BLOCKING_MODE_ENV, BLOCKING_MODE_ONLINE).lower()
-        if blocking_mode == BLOCKING_MODE_OFFLINE:
-            self._blocking_mode = BLOCKING_MODE_OFFLINE
-        else:
-            self._blocking_mode = BLOCKING_MODE_ONLINE
+        # Determine emulator mode (realtime or accelerated)
+        mode = os.environ.get(ORACLE_MODE_ENV, "").lower()
+        if not mode:
+            # Fallback to legacy env var
+            mode = os.environ.get(ORACLE_BLOCKING_MODE_ENV, EMULATOR_MODE_REALTIME).lower()
+        # Apply backward compat aliases (online→realtime, offline→accelerated)
+        mode = _MODE_ALIASES.get(mode, mode)
+        self._emulator_mode = mode if mode == EMULATOR_MODE_ACCELERATED else EMULATOR_MODE_REALTIME
 
         try:
             profile_pack = load_profile_pack(profile_path)
@@ -97,17 +104,22 @@ class GpuWorkerHook:
         return self._enabled
 
     @property
+    def emulator_mode(self) -> str:
+        """Return the emulator mode: 'realtime' or 'accelerated'."""
+        return self._emulator_mode
+
+    @property
     def blocking_mode(self) -> str:
-        """Return the blocking mode: 'online' or 'offline'."""
-        return self._blocking_mode
+        """Backward compat alias for emulator_mode."""
+        return self._emulator_mode
 
     @property
     def should_block(self) -> bool:
         """Return whether we should block for timing simulation.
-        
-        True for online serving (default), False for offline (REVATI-like).
+
+        True for realtime mode (default), False for accelerated mode.
         """
-        return self._blocking_mode == BLOCKING_MODE_ONLINE
+        return self._emulator_mode == EMULATOR_MODE_REALTIME
 
     @property
     def oracle(self) -> BaseGpuCostOracle | None:

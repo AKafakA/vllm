@@ -677,16 +677,26 @@ class EngineArgs:
         """
         import os
 
+        _mode_aliases = {"online": "realtime", "offline": "accelerated"}
+
         # 1. Resolve emulator_mode: CLI flag > env var
         if self.emulator_mode is None:
-            env_mode = os.environ.get("VLLM_EMULATOR_BLOCKING_MODE")
-            if env_mode and env_mode.lower() in ("online", "offline"):
-                self.emulator_mode = env_mode.lower()
+            env_mode = (os.environ.get("VLLM_EMULATOR_MODE")
+                        or os.environ.get("VLLM_EMULATOR_BLOCKING_MODE"))
+            if env_mode:
+                mode = _mode_aliases.get(env_mode.lower(), env_mode.lower())
+                if mode in ("realtime", "accelerated"):
+                    self.emulator_mode = mode
             elif os.environ.get("VLLM_EMULATOR_ENABLE_ORACLE", "").lower() in (
                 "1", "true", "yes",
             ):
-                # Legacy: ENABLE_ORACLE without BLOCKING_MODE → default online
-                self.emulator_mode = "online"
+                # Legacy: ENABLE_ORACLE without mode → default realtime
+                self.emulator_mode = "realtime"
+        else:
+            # Apply aliases to CLI value too
+            self.emulator_mode = _mode_aliases.get(
+                self.emulator_mode, self.emulator_mode
+            )
 
         # 2. Resolve profile_pack: CLI flag > env var
         if self.profile_pack is None:
@@ -704,6 +714,8 @@ class EngineArgs:
         # 4. Propagate to env vars so that GpuWorkerHook picks them up
         if self.emulator_mode is not None:
             os.environ["VLLM_EMULATOR_ENABLE_ORACLE"] = "1"
+            os.environ["VLLM_EMULATOR_MODE"] = self.emulator_mode
+            # Legacy compat
             os.environ["VLLM_EMULATOR_BLOCKING_MODE"] = self.emulator_mode
             os.environ["VLLM_EMULATOR_PROFILE_PACK"] = self.profile_pack  # type: ignore[assignment]
             logger.info(
@@ -1397,11 +1409,12 @@ class EngineArgs:
             "--emulator-mode",
             type=str,
             default=None,
-            choices=["online", "offline"],
-            help="Enable emulator mode. 'online' blocks for estimated "
-            "latency (real-time simulation for serving). 'offline' "
-            "uses virtual time with no blocking (batch analysis). "
-            "Can also be set via VLLM_EMULATOR_BLOCKING_MODE env var. "
+            choices=["realtime", "accelerated", "online", "offline"],
+            help="Enable emulator mode. 'realtime' blocks for estimated "
+            "latency (real-time simulation). 'accelerated' uses virtual "
+            "time with no blocking (fast what-if analysis). "
+            "'online'/'offline' are deprecated aliases. "
+            "Can also be set via VLLM_EMULATOR_MODE env var. "
             "Setting this flag implicitly enables the emulator oracle.",
         )
         emulator_group.add_argument(

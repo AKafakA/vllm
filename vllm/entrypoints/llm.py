@@ -431,27 +431,29 @@ class LLM:
         self.llm_engine.reset_mm_cache()
 
     def _check_emulator_blocking_mode(self) -> None:
-        """Check emulator blocking mode and warn for offline batch inference.
-        
-        When using LLM.generate() (offline batch mode) with emulator enabled,
-        recommend using offline blocking mode for better performance.
+        """Check emulator mode and warn for offline batch inference.
+
+        When using LLM.generate() (batch mode) with realtime emulator,
+        recommend using accelerated mode for better performance.
         """
         import os
         emulator_enabled = os.environ.get("VLLM_EMULATOR_ENABLE_ORACLE", "").lower()
         if emulator_enabled not in ("1", "true", "yes"):
             return
-        
-        blocking_mode = os.environ.get("VLLM_EMULATOR_BLOCKING_MODE", "online").lower()
-        if blocking_mode == "offline":
+
+        mode = (os.environ.get("VLLM_EMULATOR_MODE")
+                or os.environ.get("VLLM_EMULATOR_BLOCKING_MODE", "realtime")).lower()
+        # Backward compat
+        mode = {"online": "realtime", "offline": "accelerated"}.get(mode, mode)
+        if mode == "accelerated":
             return
-        
-        # Emulator enabled + online mode + LLM.generate path = warn
+
         import warnings
         warnings.warn(
-            "Emulator is enabled with blocking mode 'online' but you're using "
-            "LLM.generate() (offline batch inference). Consider using "
-            "VLLM_EMULATOR_BLOCKING_MODE=offline for better performance. "
-            "Online mode is recommended for async engine / online serving only.",
+            "Emulator is enabled in 'realtime' mode but you're using "
+            "LLM.generate() (batch inference). Consider using "
+            "VLLM_EMULATOR_MODE=accelerated for better performance. "
+            "Realtime mode is recommended for online serving only.",
             UserWarning,
             stacklevel=2,
         )

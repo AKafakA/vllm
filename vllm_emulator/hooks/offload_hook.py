@@ -24,8 +24,9 @@ OFFLOAD_PROFILE_PATH_ENV = "VLLM_EMULATOR_OFFLOAD_PROFILE_PACK"
 OFFLOAD_BLOCKING_MODE_ENV = "VLLM_EMULATOR_OFFLOAD_BLOCKING_MODE"
 
 # Blocking modes
-BLOCKING_MODE_ONLINE = "online"  # Block for estimated latency (default)
-BLOCKING_MODE_OFFLINE = "offline"  # No blocking (virtual time)
+EMULATOR_MODE_REALTIME = "realtime"      # Block for estimated latency (default)
+EMULATOR_MODE_ACCELERATED = "accelerated"  # No blocking (virtual time)
+_MODE_ALIASES = {"online": EMULATOR_MODE_REALTIME, "offline": EMULATOR_MODE_ACCELERATED}
 
 
 # Default bytes per KV block (assuming block_size=16, num_kv_heads=8, head_size=128)
@@ -46,7 +47,7 @@ class OffloadWorkerHook:
         self._bytes_per_block = bytes_per_block
         self._oracle: BaseOffloadCostOracle | None = None
         self._enabled = False
-        self._blocking_mode = BLOCKING_MODE_ONLINE
+        self._emulator_mode = EMULATOR_MODE_REALTIME
         self._active_transfers = 0
         self._lock = threading.Lock()
         self._initialize_oracle()
@@ -62,12 +63,10 @@ class OffloadWorkerHook:
                 f"{OFFLOAD_ORACLE_ENABLED_ENV} is set but {OFFLOAD_PROFILE_PATH_ENV} is not configured"
             )
 
-        # Determine blocking mode
-        blocking_mode = os.environ.get(OFFLOAD_BLOCKING_MODE_ENV, BLOCKING_MODE_ONLINE).lower()
-        if blocking_mode == BLOCKING_MODE_OFFLINE:
-            self._blocking_mode = BLOCKING_MODE_OFFLINE
-        else:
-            self._blocking_mode = BLOCKING_MODE_ONLINE
+        # Determine emulator mode
+        mode = os.environ.get(OFFLOAD_BLOCKING_MODE_ENV, EMULATOR_MODE_REALTIME).lower()
+        mode = _MODE_ALIASES.get(mode, mode)
+        self._emulator_mode = mode if mode == EMULATOR_MODE_ACCELERATED else EMULATOR_MODE_REALTIME
 
         try:
             profile_pack = load_profile_pack(profile_path)
@@ -86,7 +85,7 @@ class OffloadWorkerHook:
     @property
     def blocking_mode(self) -> str:
         """Return the blocking mode: 'online' or 'offline'."""
-        return self._blocking_mode
+        return self._emulator_mode
 
     @property
     def should_block(self) -> bool:
@@ -94,7 +93,7 @@ class OffloadWorkerHook:
         
         True for online serving (default), False for offline (virtual time).
         """
-        return self._blocking_mode == BLOCKING_MODE_ONLINE
+        return self._emulator_mode == EMULATOR_MODE_REALTIME
 
     @property
     def oracle(self) -> BaseOffloadCostOracle | None:
