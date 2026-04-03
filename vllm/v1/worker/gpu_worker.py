@@ -80,6 +80,23 @@ def _get_emulator_hook():
     return _EMULATOR_HOOK_MODULE if _EMULATOR_HOOK_MODULE else None
 
 
+# Optional trace profiler - measures real execute_model() latency
+_EMULATOR_TRACER = None
+
+
+def _get_emulator_tracer():
+    """Lazy import trace profiler."""
+    global _EMULATOR_TRACER
+    if _EMULATOR_TRACER is None:
+        try:
+            from vllm_emulator.profiler.trace_profiler import ExecuteModelTracer
+            tracer = ExecuteModelTracer()
+            _EMULATOR_TRACER = tracer if tracer.is_enabled else False
+        except ImportError:
+            _EMULATOR_TRACER = False
+    return _EMULATOR_TRACER if _EMULATOR_TRACER else None
+
+
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
@@ -173,6 +190,7 @@ class Worker(WorkerBase):
 
         # Optional emulator hook for cost estimation (lazy loaded)
         self._emulator_hook = None
+        self._emulator_pending_output = None
         hook_cls = _get_emulator_hook()
         if hook_cls is not None:
             try:
@@ -180,6 +198,9 @@ class Worker(WorkerBase):
             except Exception:
                 # Hook initialization failed - continue without it
                 pass
+
+        # Optional trace profiler (measures real execute_model latency)
+        self._emulator_tracer = _get_emulator_tracer()
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -783,6 +804,11 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        # If emulator already produced output in execute_model(), return it
+        if self._emulator_pending_output is not None:
+            output = self._emulator_pending_output
+            self._emulator_pending_output = None
+            return output
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
@@ -828,8 +854,17 @@ class Worker(WorkerBase):
                         # Just record timing for metrics/logging
                         pass
                     
-                    return fake_output
+                    # Store for sample_tokens() and return None to signal
+                    # the engine core to call sample_tokens() next
+                    self._emulator_pending_output = fake_output
+                    return None
                 # Fall through if no requests to schedule
+
+        # Trace profiler: measure real execute_model() latency
+        _trace_t0 = None
+        if self._emulator_tracer is not None and forward_pass:
+            torch.cuda.synchronize()
+            _trace_t0 = time.perf_counter()
 
         all_gather_tensors = {}
         compilation_config = self.vllm_config.compilation_config
@@ -891,6 +926,12 @@ class Worker(WorkerBase):
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
+                # Trace profiler: record latency
+                if _trace_t0 is not None:
+                    torch.cuda.synchronize()
+                    _trace_us = (time.perf_counter() - _trace_t0) * 1e6
+                    self._emulator_tracer.record(scheduler_output, _trace_us)
+                    self._emulator_tracer.flush_periodic()
                 return output
 
         assert isinstance(output, IntermediateTensors)
@@ -906,6 +947,13 @@ class Worker(WorkerBase):
             all_gather_group=get_tp_group(),
             all_gather_tensors=all_gather_tensors,
         )
+
+        # Trace profiler: record latency for PP intermediate case
+        if _trace_t0 is not None:
+            torch.cuda.synchronize()
+            _trace_us = (time.perf_counter() - _trace_t0) * 1e6
+            self._emulator_tracer.record(scheduler_output, _trace_us)
+            self._emulator_tracer.flush_periodic()
 
         return None
 
@@ -1074,6 +1122,10 @@ class Worker(WorkerBase):
         torch.accelerator.synchronize()
 
     def shutdown(self) -> None:
+        # Flush any pending trace records
+        if self._emulator_tracer is not None:
+            self._emulator_tracer.flush()
+
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
