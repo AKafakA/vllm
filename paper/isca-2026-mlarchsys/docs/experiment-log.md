@@ -389,6 +389,12 @@ PD disaggregation (P2pNcclConnector) failed on 2×RTX 3060: the P2P NCCL connect
 
 Three model sizes validated on RTX 3060: 0.5B, 1.5B, 3B — all <5% error with serving profile approach.
 
+**PD disagg with NixlConnector attempted (v4):**
+- Both instances initialized NIXL connector successfully
+- Both got OOM killed: model (2.9GB) + KV cache + NIXL buffers > 12GB RTX 3060
+- P2pNcclConnector also failed (needs P2P DMA, not available on consumer PCIe)
+- **Conclusion**: PD disagg needs ≥24GB GPUs (A30/A100). Defer to CloudLab.
+
 The emulator's approach is inherently compatible with PD disagg because:
 1. Each vLLM instance (prefill/decode) has its own worker hook
 2. The serving profile captures per-instance step cycle time including KV transfer
