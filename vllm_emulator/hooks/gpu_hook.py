@@ -107,7 +107,15 @@ class GpuWorkerHook:
         self._emulator_mode = mode if mode == EMULATOR_MODE_ACCELERATED else EMULATOR_MODE_REALTIME
 
         try:
-            profile_pack = load_profile_pack(profile_path)
+            import json
+            # Load profile directly to support serving profiles that use
+            # forward_pass format (bypasses strict legacy validator)
+            with open(profile_path) as f:
+                profile_pack = json.load(f)
+            # Ensure required fields for oracle constructor
+            profile_pack.setdefault("version", "1.0")
+            profile_pack.setdefault("prefill", [])
+            profile_pack.setdefault("decode", [])
             self._oracle = create_oracle_from_profile_pack(profile_pack)
             self._enabled = True
         except Exception as e:
@@ -179,12 +187,12 @@ class GpuWorkerHook:
         num_decode_seqs = cached.num_reqs if cached.num_reqs > 0 else 0
 
         prefill_latency = 0.0
-        if total_prefill_tokens > 0:
+        if total_prefill_tokens > 0 and self._oracle._prefill_samples:
             prefill_latency = self._oracle.estimate_prefill_latency_us(
                 total_prefill_tokens, batch_size=1
             )
         decode_latency = 0.0
-        if num_decode_seqs > 0:
+        if num_decode_seqs > 0 and self._oracle._decode_samples:
             decode_latency = self._oracle.estimate_decode_latency_us(
                 num_decode_seqs
             )

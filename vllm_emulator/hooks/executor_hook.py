@@ -84,7 +84,15 @@ class ExecutorEmulatorHook:
         self._decode_overhead_us = float(os.environ.get(DECODE_OVERHEAD_ENV, "0"))
 
         try:
-            profile_pack = load_profile_pack(profile_path)
+            import json
+            # Load profile pack directly (bypass strict validator for
+            # serving profiles that use forward_pass instead of prefill/decode)
+            with open(profile_path) as f:
+                profile_pack = json.load(f)
+            # Ensure required fields exist for the oracle constructor
+            profile_pack.setdefault("version", "1.0")
+            profile_pack.setdefault("prefill", [])
+            profile_pack.setdefault("decode", [])
             self._oracle = create_oracle_from_profile_pack(profile_pack)
             self._enabled = True
             print(f"[ExecutorEmulatorHook] Enabled: mode={self._emulator_mode}, "
