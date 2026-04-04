@@ -205,9 +205,14 @@ class Worker(WorkerBase):
         if hook_cls is not None:
             try:
                 self._emulator_hook = hook_cls(self)
-            except Exception:
-                # Hook initialization failed - continue without it
-                pass
+                logger.info("Emulator hook initialized: enabled=%s",
+                            self._emulator_hook.is_enabled)
+            except Exception as e:
+                logger.warning("Emulator hook init failed: %s", e)
+                # In CUDA mock mode, this is fatal — re-raise
+                if os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true"):
+                    raise
+                self._emulator_hook = None
 
         # Optional trace profiler (measures real execute_model latency)
         self._emulator_tracer = _get_emulator_tracer()
