@@ -173,12 +173,12 @@ class GpuWorkerHook:
         num_decode_seqs = cached.num_reqs if cached.num_reqs > 0 else 0
 
         prefill_latency = 0.0
-        if total_prefill_tokens > 0:
+        if total_prefill_tokens > 0 and self._oracle._prefill_samples:
             prefill_latency = self._oracle.estimate_prefill_latency_us(
                 total_prefill_tokens, batch_size=1
             )
         decode_latency = 0.0
-        if num_decode_seqs > 0:
+        if num_decode_seqs > 0 and self._oracle._decode_samples:
             decode_latency = self._oracle.estimate_decode_latency_us(
                 num_decode_seqs
             )

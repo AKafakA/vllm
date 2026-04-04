@@ -96,18 +96,23 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         # Global fallback power-law (batch_size=1 or flattened)
         if 1 in self._prefill_pw:
             self._prefill_pw_a, self._prefill_pw_b = self._prefill_pw[1]
-        else:
+        elif self._prefill_samples:
             xs = [float(s["seq_len"]) for s in self._prefill_samples]
             ys = [float(s["latency_us"]) for s in self._prefill_samples]
             self._prefill_pw_a, self._prefill_pw_b = _fit_power_law(xs, ys)
+        else:
+            # Serving profile with forward_pass only — no legacy sections
+            self._prefill_pw_a, self._prefill_pw_b = (1.0, 1.0)
 
         decode_xs = [float(s["active_seqs"]) for s in self._decode_samples]
         decode_ys = [
             float(s["latency_us_per_token"]) for s in self._decode_samples
         ]
-        self._decode_pw_a, self._decode_pw_b = _fit_power_law(
-            decode_xs, decode_ys
-        )
+        if decode_xs:
+            self._decode_pw_a, self._decode_pw_b = _fit_power_law(
+                decode_xs, decode_ys)
+        else:
+            self._decode_pw_a, self._decode_pw_b = (1.0, 1.0)
 
         # Unified forward_pass profile (optional, preferred if available)
         self._forward_pass_samples = sorted(

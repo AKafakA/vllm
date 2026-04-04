@@ -109,10 +109,15 @@ def validate_profile_pack(profile_pack: Mapping[str, Any]) -> None:
     if not isinstance(decode, Sequence) or isinstance(decode, (str, bytes)):
         raise ProfileValidationError("decode must be an array")
 
-    if len(prefill) == 0:
+    # Serving profiles use forward_pass instead of prefill/decode
+    has_forward_pass = "forward_pass" in obj and len(obj["forward_pass"]) > 0
+
+    if len(prefill) == 0 and not has_forward_pass:
         raise ProfileValidationError("prefill must include at least one sample")
-    if len(decode) == 0:
+    if len(decode) == 0 and not has_forward_pass:
         raise ProfileValidationError("decode must include at least one sample")
 
-    _validate_prefill_rows(prefill)
-    _validate_decode_rows(decode)
+    if prefill:
+        _validate_prefill_rows(prefill)
+    if decode:
+        _validate_decode_rows(decode)

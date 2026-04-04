@@ -52,9 +52,12 @@ except FileNotFoundError:
     print("Warning: no sweep profile to merge")
 
 profile = {
+    "version": "1.0",
     "gpu_model": gpu_model,
     "model_name": model_name,
     "profile_type": "serving_step_cycle",
+    "prefill": [],
+    "decode": [],
     "forward_pass": sorted(forward_pass, key=lambda e: e["total_tokens"]),
 }
 json.dump(profile, open(output_path, "w"), indent=2)

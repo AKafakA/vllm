@@ -79,6 +79,8 @@ class ExecutorEmulatorHook:
         self._decode_overhead_us = float(os.environ.get(DECODE_OVERHEAD_ENV, "0"))
 
         try:
+            # Use load_profile_pack which now accepts serving profiles
+            # (forward_pass with empty prefill/decode)
             profile_pack = load_profile_pack(profile_path)
             self._oracle = create_oracle_from_profile_pack(profile_pack)
             self._enabled = True
