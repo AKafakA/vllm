@@ -1124,6 +1124,10 @@ class Worker(WorkerBase):
         torch.accelerator.synchronize()
 
     def shutdown(self) -> None:
+        # Print virtual time summary if emulator was active
+        if self._emulator_hook is not None:
+            self._emulator_hook.print_virtual_time_summary()
+
         # Flush any pending trace records
         if self._emulator_tracer is not None:
             self._emulator_tracer.flush()
