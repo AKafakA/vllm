@@ -289,6 +289,25 @@ Qwen2.5-3B-Instruct, TP=2, max-model-len=2048, enforce-eager (CUDA graphs OOM on
 
 All metrics under 5%. TP=2 works with the serving profile approach.
 
+### Feature Ablation: CUDA Graphs (1.5B TP=1, rate=2)
+
+| Config | Real TTFT | Emu TTFT | Error | Real TPOT | Emu TPOT | Error |
+|--------|----------|---------|-------|----------|---------|-------|
+| Default (CUDA graphs) | 161.9ms | 161.8ms | **-0.1%** | 22.0ms | 22.2ms | **+0.9%** |
+| enforce-eager (no graphs) | 244.7ms | 227.3ms | -7.1% | 63.8ms | 58.6ms | -8.1% |
+
+CUDA graphs provide 2.9× TPOT speedup (22ms vs 64ms). The emulator captures this speedup accurately with CUDA graphs (0.9% error) but underestimates enforce-eager by ~8%. This is because enforce-eager has higher latency variance — without deterministic CUDA graph execution, each kernel launch varies more with system state.
+
+**Key insight for the paper**: the emulator's accuracy depends on the determinism of the GPU execution path. CUDA graphs make latency highly predictable → excellent emulation. Eager mode is less predictable → harder to emulate precisely.
+
+### Accelerated Mode (Virtual Time)
+
+Implemented virtual time tracking in both worker and executor hooks. In accelerated mode (`VLLM_EMULATOR_MODE=accelerated`):
+- No `time.sleep()` — steps execute at CPU speed
+- Cumulative predicted GPU time is tracked
+- Summary reports: virtual GPU time, wall time, speedup factor
+- Useful for capacity planning simulations
+
 ---
 
 ## Remaining Work

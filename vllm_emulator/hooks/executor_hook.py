@@ -56,6 +56,11 @@ class ExecutorEmulatorHook:
         self._sample_future = None  # Future for sample_tokens to return
         self._gpu_free_time = 0.0  # When the virtual GPU becomes free
 
+        # Virtual time tracking for accelerated mode
+        self._virtual_time_us = 0.0  # Cumulative predicted GPU time
+        self._step_count = 0  # Number of steps executed
+        self._wall_start_time: float | None = None  # Set on first step
+
         # Fake output generation (simplified — reuses gpu_hook logic)
         self._rng = __import__("random").Random(42)
         self._vocab_size = 32000
@@ -91,6 +96,53 @@ class ExecutorEmulatorHook:
     @property
     def is_enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def virtual_time_us(self) -> float:
+        """Return accumulated virtual GPU time in microseconds."""
+        return self._virtual_time_us
+
+    @property
+    def step_count(self) -> int:
+        """Return the number of emulated steps."""
+        return self._step_count
+
+    def get_virtual_time_summary(self) -> dict[str, float]:
+        """Return a summary of virtual time vs wall time.
+
+        Returns:
+            Dict with keys:
+            - virtual_time_s: Total predicted GPU time (seconds)
+            - wall_time_s: Elapsed wall clock time (seconds)
+            - speedup: virtual_time / wall_time (>1 means faster than realtime)
+            - step_count: Number of emulated steps
+            - avg_step_us: Average predicted latency per step (microseconds)
+        """
+        virtual_s = self._virtual_time_us / 1e6
+        wall_s = (time.perf_counter() - self._wall_start_time
+                  if self._wall_start_time is not None else 0.0)
+        speedup = virtual_s / wall_s if wall_s > 0 else 0.0
+        avg_step_us = (self._virtual_time_us / self._step_count
+                       if self._step_count > 0 else 0.0)
+        return {
+            "virtual_time_s": virtual_s,
+            "wall_time_s": wall_s,
+            "speedup": speedup,
+            "step_count": self._step_count,
+            "avg_step_us": avg_step_us,
+        }
+
+    def print_virtual_time_summary(self) -> None:
+        """Print a human-readable summary of virtual time simulation."""
+        if self._step_count == 0:
+            return
+        s = self.get_virtual_time_summary()
+        print(f"[ExecutorEmulatorHook] Virtual time summary: "
+              f"simulated {s['virtual_time_s']:.3f}s of GPU time "
+              f"in {s['wall_time_s']:.3f}s wall time "
+              f"({s['speedup']:.1f}x speedup), "
+              f"{s['step_count']} steps, "
+              f"avg {s['avg_step_us']:.0f}us/step")
 
     def should_use_oracle(self, scheduler_output: "SchedulerOutput") -> bool:
         return self._enabled and scheduler_output.total_num_scheduled_tokens > 0
@@ -141,6 +193,12 @@ class ExecutorEmulatorHook:
                 latency_us += self._decode_overhead_us
 
         latency_s = latency_us / 1e6
+
+        # Accumulate virtual time for reporting
+        if self._wall_start_time is None:
+            self._wall_start_time = time.perf_counter()
+        self._step_count += 1
+        self._virtual_time_us += latency_us
 
         # Create fake output
         fake_output = self._create_fake_output(scheduler_output)

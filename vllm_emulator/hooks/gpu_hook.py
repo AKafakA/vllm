@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import random
+import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -66,6 +67,11 @@ class GpuWorkerHook:
                     self._eos_token_id = eos if isinstance(eos, int) else eos[0]
         except Exception:
             pass  # Use defaults
+
+        # Virtual time tracking for accelerated mode
+        self._virtual_time_us = 0.0  # Cumulative predicted GPU time
+        self._step_count = 0  # Number of steps executed
+        self._wall_start_time: float | None = None  # Set on first step
 
         # Per-step overhead constant (calibrated, applied to all steps)
         self._step_overhead_us = float(
@@ -193,11 +199,64 @@ class GpuWorkerHook:
         if self._decode_overhead_us > 0 and num_decode_seqs > 0:
             batch_latency += self._decode_overhead_us
 
+        # Accumulate virtual time for accelerated mode reporting
+        if self._wall_start_time is None:
+            self._wall_start_time = time.perf_counter()
+        self._step_count += 1
+        self._virtual_time_us += batch_latency
+
         return {
             "prefill_latency_us": prefill_latency,
             "decode_latency_us": decode_latency,
             "total_estimated_us": batch_latency,
         }
+
+    @property
+    def virtual_time_us(self) -> float:
+        """Return accumulated virtual GPU time in microseconds."""
+        return self._virtual_time_us
+
+    @property
+    def step_count(self) -> int:
+        """Return the number of emulated steps."""
+        return self._step_count
+
+    def get_virtual_time_summary(self) -> dict[str, float]:
+        """Return a summary of virtual time vs wall time.
+
+        Returns:
+            Dict with keys:
+            - virtual_time_s: Total predicted GPU time (seconds)
+            - wall_time_s: Elapsed wall clock time (seconds)
+            - speedup: virtual_time / wall_time (>1 means faster than realtime)
+            - step_count: Number of emulated steps
+            - avg_step_us: Average predicted latency per step (microseconds)
+        """
+        virtual_s = self._virtual_time_us / 1e6
+        wall_s = (time.perf_counter() - self._wall_start_time
+                  if self._wall_start_time is not None else 0.0)
+        speedup = virtual_s / wall_s if wall_s > 0 else 0.0
+        avg_step_us = (self._virtual_time_us / self._step_count
+                       if self._step_count > 0 else 0.0)
+        return {
+            "virtual_time_s": virtual_s,
+            "wall_time_s": wall_s,
+            "speedup": speedup,
+            "step_count": self._step_count,
+            "avg_step_us": avg_step_us,
+        }
+
+    def print_virtual_time_summary(self) -> None:
+        """Print a human-readable summary of virtual time simulation."""
+        if self._step_count == 0:
+            return
+        s = self.get_virtual_time_summary()
+        print(f"[GpuWorkerHook] Virtual time summary: "
+              f"simulated {s['virtual_time_s']:.3f}s of GPU time "
+              f"in {s['wall_time_s']:.3f}s wall time "
+              f"({s['speedup']:.1f}x speedup), "
+              f"{s['step_count']} steps, "
+              f"avg {s['avg_step_us']:.0f}us/step")
 
     def should_use_oracle(self, scheduler_output: "SchedulerOutput") -> bool:
         """Determine if oracle should be used for this scheduling iteration.
