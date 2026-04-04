@@ -332,7 +332,28 @@ All <5%. The emulator generalizes to unseen real-world workload patterns.
 
 **Why realtime offline is less accurate:** `time.sleep()` has OS scheduling jitter (~0.1-1ms per call) that compounds over 12,800+ decode steps. Real GPU runs kernels back-to-back without this overhead. This is an inherent limitation of sleep-based timing for batch workloads.
 
-**Solution for paper:** Use accelerated mode for offline throughput prediction — it reports predicted GPU time via virtual clock without sleep overhead. The throughput is computed as `total_tokens / virtual_gpu_time`.
+**Root cause investigation:**
+- N=30 prompts: -3.8% error. Decode at tt≈30 (well-covered by profile)
+- N=100 prompts: -16.1% error. Decode at tt≈100 (sparse profile coverage, CUDA graph boundary at tt=144 causes overestimation)
+- The error scales with num_prompts because larger batches push into poorly-profiled tt ranges
+- NOT primarily sleep overhead — it's profile accuracy at large batch sizes
+
+**Fix needed:** Better sweep profile coverage at tt=30-128 (offline operating range).
+
+**Accelerated mode virtual throughput:**
+- N=30: virtual_time=13.7s for 11,520 tokens → virtual_throughput=842 tok/s vs real=2,312 tok/s (profile overestimates at large tt)
+- Same root cause: profile latencies too high at tt=30-128
+
+**Fix (v14 sweep profile):** Extended `decode_batch_sizes` in sweep profiler to `range(1,21) + [24,28,32,40,48,56,64,80,96,128]`. This covers the offline operating range (tt=30-128) with proper decode configurations instead of mismatched prefill data.
+
+| Prompts | Error (v13) | Error (v14, fixed) |
+|---------|------------|-------------------|
+| N=30 | -3.8% | **+0.3%** |
+| N=100 | -16.1% | **-4.4%** |
+
+Root cause: v13 sweep only profiled decode batch sizes up to 32. For tt=50-100, the profile contained prefill/single-seq data with +48-55% overestimation vs actual 50-100 seq decode. The v14 sweep profiles actual decode at these batch sizes.
+
+**This fix is data-independent** — no workload-specific traces needed. The throughput is computed as `total_tokens / virtual_gpu_time`.
 
 ### Accelerated Mode (Virtual Time)
 
