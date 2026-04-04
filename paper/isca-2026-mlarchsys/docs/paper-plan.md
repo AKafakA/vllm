@@ -73,13 +73,26 @@ Same profiling data, same accuracy, but without time.sleep() blocking.
 | Multi-model serving | Medium | Low | vLLM LoRA/multi-model support |
 | Speculative decoding | High | Low | Would need spec decode profile |
 
+### vLLM v0.18.1 Feature Availability (confirmed in codebase):
+| Feature | Available? | Key files | CLI/Config |
+|---------|-----------|-----------|------------|
+| PD disaggregation | ✅ | `vllm/v1/worker/gpu/kv_connector.py` | KV connector config |
+| CPU offloading | ✅ | `vllm/config/offload.py`, `vllm/model_executor/offloader/` | `--cpu-offload-gb` |
+| gRPC serving | ✅ | `vllm/entrypoints/grpc_server.py` | `vllm serve --rpc grpc` |
+| OpenAI Realtime API | ✅ | `vllm/entrypoints/openai/realtime/serving.py` | WebSocket endpoint |
+| Chunked prefill | ✅ (default) | Built-in | `--enable-chunked-prefill`/`--no-chunked-prefill` |
+| CUDA graphs | ✅ (default) | Built-in | `--enforce-eager` to disable |
+| TP/PP | ✅ | Built-in | `--tensor-parallel-size`, `--pipeline-parallel-size` |
+
 ### Need to Investigate:
 | Feature | Question |
 |---------|----------|
-| CPU-GPU transfer overhead | Captured implicitly in step-cycle profile? Or need explicit modeling? |
+| CPU-GPU transfer overhead | Captured implicitly in step-cycle profile? Or need explicit modeling for KV offload? |
 | GPU-GPU (NVLink/PCIe) overhead | Captured in TP=2 serving profile implicitly |
 | Network overhead (multi-node) | Need network oracle for multi-node TP/PP |
-| PD disaggregation overhead | Does vLLM separate prefill/decode workers? How does scheduling change? |
+| PD disaggregation overhead | KV transfer between prefill/decode workers — profile captures it if server runs with disagg enabled |
+| gRPC vs REST overhead | Should be minimal — test to confirm emulator is API-independent |
+| Realtime WebSocket | WebSocket adds bidirectional streaming — test to confirm compatibility |
 
 ---
 

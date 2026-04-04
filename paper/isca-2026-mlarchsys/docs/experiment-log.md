@@ -300,6 +300,18 @@ CUDA graphs provide 2.9× TPOT speedup (22ms vs 64ms). The emulator captures thi
 
 **Key insight for the paper**: the emulator's accuracy depends on the determinism of the GPU execution path. CUDA graphs make latency highly predictable → excellent emulation. Eager mode is less predictable → harder to emulate precisely.
 
+### BurstGPT Cross-Workload Validation (1.5B TP=1)
+
+Real-world trace replay using BurstGPT dataset (GPT-4 conversation logs with natural arrival patterns and variable input/output lengths).
+
+| Workload | Real TTFT | Emu TTFT | Error | Real TPOT | Emu TPOT | Error |
+|----------|----------|---------|-------|----------|---------|-------|
+| BurstGPT rate=2 | 200.7ms | 202.7ms | **+1.0%** | 23.9ms | 23.8ms | **-0.3%** |
+| BurstGPT rate=4 | 92.8ms | 96.2ms | **+3.7%** | 24.9ms | 25.8ms | **+3.9%** |
+| Random rate=2 (control) | 153.8ms | 157.3ms | **+2.3%** | 22.2ms | 22.1ms | **-0.3%** |
+
+All <5%. The emulator generalizes to unseen real-world workload patterns.
+
 ### Accelerated Mode (Virtual Time)
 
 Implemented virtual time tracking in both worker and executor hooks. In accelerated mode (`VLLM_EMULATOR_MODE=accelerated`):
