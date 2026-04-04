@@ -68,7 +68,7 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         # Group prefill samples by batch_size, sorted by seq_len within each
         self._prefill_by_bs: dict[int, list[dict]] = {}
-        for s in profile_pack.get("prefill", []):
+        for s in profile_pack["prefill"]:
             bs = s["batch_size"]
             self._prefill_by_bs.setdefault(bs, []).append(s)
         for bs in self._prefill_by_bs:
@@ -79,11 +79,11 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         # Fallback: flatten all samples for single-dim lookup
         self._prefill_samples = sorted(
-            profile_pack.get("prefill", []), key=lambda s: s.get("seq_len", 0)
+            profile_pack["prefill"], key=lambda s: s["seq_len"]
         )
 
         self._decode_samples = sorted(
-            profile_pack.get("decode", []), key=lambda s: s.get("active_seqs", 0)
+            profile_pack["decode"], key=lambda s: s["active_seqs"]
         )
 
         # Pre-compute power-law fits per batch_size group
@@ -91,31 +91,23 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         for bs, samples in self._prefill_by_bs.items():
             xs = [float(s["seq_len"]) for s in samples]
             ys = [float(s["latency_us"]) for s in samples]
-            if xs:
-                self._prefill_pw[bs] = _fit_power_law(xs, ys)
+            self._prefill_pw[bs] = _fit_power_law(xs, ys)
 
         # Global fallback power-law (batch_size=1 or flattened)
         if 1 in self._prefill_pw:
             self._prefill_pw_a, self._prefill_pw_b = self._prefill_pw[1]
-        elif self._prefill_samples:
+        else:
             xs = [float(s["seq_len"]) for s in self._prefill_samples]
             ys = [float(s["latency_us"]) for s in self._prefill_samples]
             self._prefill_pw_a, self._prefill_pw_b = _fit_power_law(xs, ys)
-        else:
-            # Serving profile with forward_pass only — no legacy prefill data
-            self._prefill_pw_a, self._prefill_pw_b = (1.0, 1.0)
 
         decode_xs = [float(s["active_seqs"]) for s in self._decode_samples]
         decode_ys = [
             float(s["latency_us_per_token"]) for s in self._decode_samples
         ]
-        if decode_xs:
-            self._decode_pw_a, self._decode_pw_b = _fit_power_law(
-                decode_xs, decode_ys
-            )
-        else:
-            # Serving profile with forward_pass only — no legacy decode data
-            self._decode_pw_a, self._decode_pw_b = (1.0, 1.0)
+        self._decode_pw_a, self._decode_pw_b = _fit_power_law(
+            decode_xs, decode_ys
+        )
 
         # Unified forward_pass profile (optional, preferred if available)
         self._forward_pass_samples = sorted(

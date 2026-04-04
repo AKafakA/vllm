@@ -79,14 +79,7 @@ class ExecutorEmulatorHook:
         self._decode_overhead_us = float(os.environ.get(DECODE_OVERHEAD_ENV, "0"))
 
         try:
-            import json
-            # Load profile directly (bypass strict validator for
-            # serving profiles that use forward_pass format)
-            with open(profile_path) as f:
-                profile_pack = json.load(f)
-            profile_pack.setdefault("version", "1.0")
-            profile_pack.setdefault("prefill", [])
-            profile_pack.setdefault("decode", [])
+            profile_pack = load_profile_pack(profile_path)
             self._oracle = create_oracle_from_profile_pack(profile_pack)
             self._enabled = True
             print(f"[ExecutorEmulatorHook] Enabled: mode={self._emulator_mode}, "
@@ -153,20 +146,6 @@ class ExecutorEmulatorHook:
         fake_output = self._create_fake_output(scheduler_output)
         if fake_output is None:
             return None
-
-        # CUDA mock mode: use BLOCKING sleep to recreate GPU blocking behavior.
-        # The serving profile includes CUDA sync overhead — blocking the engine
-        # core thread for this duration naturally recreates scheduler wait times
-        # that determine TTFT accuracy.
-        if os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true"):
-            if self._emulator_mode == EMULATOR_MODE_REALTIME and latency_s >= 0.001:
-                time.sleep(latency_s)
-            # Return fake output directly — no timer Future needed
-            if non_block:
-                fut: Future = Future()
-                fut.set_result(fake_output)
-                return fut
-            return fake_output
 
         if not non_block or self._emulator_mode == EMULATOR_MODE_ACCELERATED:
             # Blocking mode or accelerated: return immediately

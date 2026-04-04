@@ -2,14 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
-# Install CUDA mock early (before any torch.cuda usage) if running on CPU-only
-import os as _os
-if _os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true"):
-    try:
-        import vllm_emulator.cuda_mock  # noqa: F401
-    except ImportError:
-        pass
-
 import gc
 import os
 import threading
@@ -205,14 +197,9 @@ class Worker(WorkerBase):
         if hook_cls is not None:
             try:
                 self._emulator_hook = hook_cls(self)
-                logger.info("Emulator hook initialized: enabled=%s",
-                            self._emulator_hook.is_enabled)
-            except Exception as e:
-                logger.warning("Emulator hook init failed: %s", e)
-                # In CUDA mock mode, this is fatal — re-raise
-                if os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true"):
-                    raise
-                self._emulator_hook = None
+            except Exception:
+                # Hook initialization failed - continue without it
+                pass
 
         # Optional trace profiler (measures real execute_model latency)
         self._emulator_tracer = _get_emulator_tracer()
@@ -348,42 +335,8 @@ class Worker(WorkerBase):
             logger.debug(
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)
             )
-        elif (self._emulator_hook is not None and self._emulator_hook.is_enabled
-              and os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true")):
-            # Emulator mode with CUDA mock: skip ALL GPU initialization.
-            # The emulator hook intercepts execute_model() before any tensor
-            # operations, so we don't need real GPU memory, NCCL, or model weights.
-            self.device = torch.device("cpu")
-            set_random_seed(self.model_config.seed)
-            # Fake memory snapshot
-            fake_mem = int(os.environ.get("VLLM_EMULATOR_MEMORY",
-                                          str(80 * 1024**3)))
-
-            class _FakeSnapshot:
-                def __init__(self, mem):
-                    self.free_memory = mem
-                    self.total_memory = mem
-                    self.torch_peak_increase = 0
-                    self.non_torch_allocations = 0
-                    self.torch_memory_allocated = 0
-
-            self.init_snapshot = _FakeSnapshot(fake_mem)
-            self.requested_memory = int(fake_mem * 0.9)
-            logger.info(
-                "Emulator mode (CUDA mock): skipping GPU init, "
-                "fake memory=%sGiB", format_gib(fake_mem))
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
-
-        # Emulator with CUDA mock: skip workspace and model runner init
-        if (self._emulator_hook is not None and self._emulator_hook.is_enabled
-                and os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true")):
-            # Minimal mock model runner — provides get_kv_cache_spec()
-            # and other methods the engine queries during setup
-            from vllm_emulator.mock_model_runner import MockModelRunner
-            self.model_runner = MockModelRunner(self.vllm_config, self.device)
-            logger.info("Emulator mode (CUDA mock): using mock model runner")
-            return
 
         # Initialize workspace manager
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
@@ -413,12 +366,6 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self) -> None:
-        # Emulator on CPU: skip model loading entirely
-        if (self._emulator_hook is not None and self._emulator_hook.is_enabled
-                and os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true")):
-            logger.info("Emulator mode (CUDA mock): skipping model loading")
-            return
-
         dummy_weights = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
         if dummy_weights:
             (
@@ -460,12 +407,8 @@ class Worker(WorkerBase):
 
         Tip:
             You may limit the usage of GPU memory
-            by adjusting the ``gpu_memory_utilization`` parameter.
+            by adjusting the `gpu_memory_utilization` parameter.
         """
-        # Emulator CUDA mock: return fake memory
-        if (self._emulator_hook is not None and self._emulator_hook.is_enabled
-                and os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true")):
-            return self.requested_memory
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
@@ -631,7 +574,7 @@ class Worker(WorkerBase):
         This is called when max_model_len=-1 is used and the engine
         automatically determines the maximum context length that fits
         in GPU memory. Workers need to update their cached max_model_len
-        to match the engine decision.
+        to match the engine's decision.
         """
         self.model_config.max_model_len = max_model_len
         if self.model_runner is not None:
@@ -641,13 +584,6 @@ class Worker(WorkerBase):
     @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        # Emulator with CUDA mock: skip KV cache allocation
-        if (self._emulator_hook is not None and self._emulator_hook.is_enabled
-                and os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true")):
-            self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
-            logger.info("Emulator mode (CUDA mock): skipping KV cache, "
-                        "num_blocks=%d", kv_cache_config.num_blocks)
-            return
 
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
@@ -682,12 +618,6 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> float:
-        # Emulator with CUDA mock: skip warmup/compile
-        if (self._emulator_hook is not None and self._emulator_hook.is_enabled
-                and os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true")):
-            logger.info("Emulator mode (CUDA mock): skipping model warmup")
-            return 0.0
-
         warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -899,10 +829,6 @@ class Worker(WorkerBase):
 
         # Emulator mode: Use oracle to generate fake output instead of real inference
         if self._emulator_hook is not None and self._emulator_hook.is_enabled:
-            # In CUDA mock mode, handle empty batches (no tokens scheduled)
-            if (not forward_pass and
-                    os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true")):
-                return None  # Empty batch — no execution needed
             # Check if we should use oracle for this iteration
             if self._emulator_hook.should_use_oracle(scheduler_output):
                 # Get cost estimate for logging
@@ -919,25 +845,8 @@ class Worker(WorkerBase):
                 if fake_output is not None:
                     estimated_latency_s = cost_estimate["total_estimated_us"] / 1_000_000
 
-                    # In CUDA mock mode, add CUDA sync overhead that's
-                    # missing because CUDA calls are no-ops. Profiled per GPU.
-                    if os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true"):
-                        cuda_sync_us = float(os.environ.get(
-                            "VLLM_EMULATOR_CUDA_SYNC_US", "0"))
-                        if cuda_sync_us > 0:
-                            estimated_latency_s += cuda_sync_us / 1e6
-
                     if self._emulator_hook.should_block and estimated_latency_s >= 0.001:
-                        # Hybrid sleep: time.sleep() for bulk, busy-wait
-                        # for last 1ms to eliminate OS scheduling jitter
-                        # (~80us per sleep call on Linux).
-                        end = time.perf_counter() + estimated_latency_s
-                        busywait_s = 0.001  # 1ms busy-wait tail
-                        sleep_s = estimated_latency_s - busywait_s
-                        if sleep_s > 0:
-                            time.sleep(sleep_s)
-                        while time.perf_counter() < end:
-                            pass
+                        time.sleep(estimated_latency_s)
 
                     # Store for sample_tokens() (v0.18.1 async flow)
                     self._emulator_pending_output = fake_output
@@ -1206,10 +1115,6 @@ class Worker(WorkerBase):
         torch.accelerator.synchronize()
 
     def shutdown(self) -> None:
-        # Print virtual time summary if emulator was active
-        if self._emulator_hook is not None:
-            self._emulator_hook.print_virtual_time_summary()
-
         # Flush any pending trace records
         if self._emulator_tracer is not None:
             self._emulator_tracer.flush()
