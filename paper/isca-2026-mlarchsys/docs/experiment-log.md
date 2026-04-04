@@ -349,6 +349,16 @@ The emulator works transparently with KV offloading — the serving profile capt
 
 PD disaggregation (P2pNcclConnector) failed on 2×RTX 3060: the P2P NCCL connector requires P2P DMA between GPUs which consumer GPUs on PCIe don't support. Needs NVLink-connected GPUs (A100, H100) — defer to CloudLab Apr 12-16.
 
+### 0.5B Model Validation (TP=1, serving profile)
+
+| Rate | Real TTFT | Emu TTFT | Error | Real TPOT | Emu TPOT | Error |
+|------|----------|---------|-------|----------|---------|-------|
+| 1 | 68.3ms | 68.3ms | **+0.0%** | 10.8ms | 10.8ms | **+0.9%** |
+| 2 | 52.0ms | 53.7ms | **+3.3%** | 12.3ms | 12.3ms | **-0.0%** |
+| 4 | 57.3ms | 57.4ms | **+0.1%** | 12.3ms | 12.6ms | **+2.2%** |
+
+Three model sizes validated on RTX 3060: 0.5B, 1.5B, 3B — all <5% error with serving profile approach.
+
 The emulator's approach is inherently compatible with PD disagg because:
 1. Each vLLM instance (prefill/decode) has its own worker hook
 2. The serving profile captures per-instance step cycle time including KV transfer
