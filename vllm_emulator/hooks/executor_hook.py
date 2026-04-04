@@ -54,13 +54,7 @@ class ExecutorEmulatorHook:
         self._step_overhead_us = 0.0
         self._pending_output = None  # For sample_tokens
         self._sample_future = None  # Future for sample_tokens to return
-        self._sample_future_queue: list = []  # Queue for concurrent requests
         self._gpu_free_time = 0.0  # When the virtual GPU becomes free
-
-        # Virtual time tracking for accelerated mode
-        self._virtual_time_us = 0.0  # Cumulative predicted GPU time
-        self._step_count = 0  # Number of steps executed
-        self._wall_start_time: float | None = None  # Set on first step
 
         # Fake output generation (simplified — reuses gpu_hook logic)
         self._rng = __import__("random").Random(42)
@@ -86,11 +80,10 @@ class ExecutorEmulatorHook:
 
         try:
             import json
-            # Load profile pack directly (bypass strict validator for
-            # serving profiles that use forward_pass instead of prefill/decode)
+            # Load profile directly (bypass strict validator for
+            # serving profiles that use forward_pass format)
             with open(profile_path) as f:
                 profile_pack = json.load(f)
-            # Ensure required fields exist for the oracle constructor
             profile_pack.setdefault("version", "1.0")
             profile_pack.setdefault("prefill", [])
             profile_pack.setdefault("decode", [])
@@ -106,53 +99,6 @@ class ExecutorEmulatorHook:
     def is_enabled(self) -> bool:
         return self._enabled
 
-    @property
-    def virtual_time_us(self) -> float:
-        """Return accumulated virtual GPU time in microseconds."""
-        return self._virtual_time_us
-
-    @property
-    def step_count(self) -> int:
-        """Return the number of emulated steps."""
-        return self._step_count
-
-    def get_virtual_time_summary(self) -> dict[str, float]:
-        """Return a summary of virtual time vs wall time.
-
-        Returns:
-            Dict with keys:
-            - virtual_time_s: Total predicted GPU time (seconds)
-            - wall_time_s: Elapsed wall clock time (seconds)
-            - speedup: virtual_time / wall_time (>1 means faster than realtime)
-            - step_count: Number of emulated steps
-            - avg_step_us: Average predicted latency per step (microseconds)
-        """
-        virtual_s = self._virtual_time_us / 1e6
-        wall_s = (time.perf_counter() - self._wall_start_time
-                  if self._wall_start_time is not None else 0.0)
-        speedup = virtual_s / wall_s if wall_s > 0 else 0.0
-        avg_step_us = (self._virtual_time_us / self._step_count
-                       if self._step_count > 0 else 0.0)
-        return {
-            "virtual_time_s": virtual_s,
-            "wall_time_s": wall_s,
-            "speedup": speedup,
-            "step_count": self._step_count,
-            "avg_step_us": avg_step_us,
-        }
-
-    def print_virtual_time_summary(self) -> None:
-        """Print a human-readable summary of virtual time simulation."""
-        if self._step_count == 0:
-            return
-        s = self.get_virtual_time_summary()
-        print(f"[ExecutorEmulatorHook] Virtual time summary: "
-              f"simulated {s['virtual_time_s']:.3f}s of GPU time "
-              f"in {s['wall_time_s']:.3f}s wall time "
-              f"({s['speedup']:.1f}x speedup), "
-              f"{s['step_count']} steps, "
-              f"avg {s['avg_step_us']:.0f}us/step")
-
     def should_use_oracle(self, scheduler_output: "SchedulerOutput") -> bool:
         return self._enabled and scheduler_output.total_num_scheduled_tokens > 0
 
@@ -165,13 +111,11 @@ class ExecutorEmulatorHook:
         return output
 
     def has_pending_future(self) -> bool:
-        return len(self._sample_future_queue) > 0 or self._sample_future is not None
+        return self._sample_future is not None
 
     def get_sample_future(self) -> "Future":
-        """Return the next Future for sample_tokens.
-        Uses a queue to handle concurrent batch scheduling."""
-        if self._sample_future_queue:
-            return self._sample_future_queue.pop(0)
+        """Return the Future for sample_tokens.
+        Resolves with the fake output after the predicted GPU time."""
         fut = self._sample_future
         self._sample_future = None
         return fut
@@ -205,16 +149,24 @@ class ExecutorEmulatorHook:
 
         latency_s = latency_us / 1e6
 
-        # Accumulate virtual time for reporting
-        if self._wall_start_time is None:
-            self._wall_start_time = time.perf_counter()
-        self._step_count += 1
-        self._virtual_time_us += latency_us
-
         # Create fake output
         fake_output = self._create_fake_output(scheduler_output)
         if fake_output is None:
             return None
+
+        # CUDA mock mode: use BLOCKING sleep to recreate GPU blocking behavior.
+        # The serving profile includes CUDA sync overhead — blocking the engine
+        # core thread for this duration naturally recreates scheduler wait times
+        # that determine TTFT accuracy.
+        if os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true"):
+            if self._emulator_mode == EMULATOR_MODE_REALTIME and latency_s >= 0.001:
+                time.sleep(latency_s)
+            # Return fake output directly — no timer Future needed
+            if non_block:
+                fut: Future = Future()
+                fut.set_result(fake_output)
+                return fut
+            return fake_output
 
         if not non_block or self._emulator_mode == EMULATOR_MODE_ACCELERATED:
             # Blocking mode or accelerated: return immediately
@@ -246,10 +198,7 @@ class ExecutorEmulatorHook:
         delay = end_time - now
 
         def _resolve():
-            try:
-                sample_fut.set_result(fake_output)
-            except Exception as e:
-                print(f"[ExecutorHook] _resolve error: {e}")
+            sample_fut.set_result(fake_output)
 
         if delay >= 0.001:
             timer = threading.Timer(delay, _resolve)
@@ -258,13 +207,7 @@ class ExecutorEmulatorHook:
         else:
             _resolve()
 
-        # Debug rate>1 issue
-        if hasattr(self, '_debug_count') and self._debug_count <= 20:
-            print(f"[ExecutorHook] step={self._debug_count} "
-                  f"tt={total_tokens} delay={delay*1000:.1f}ms "
-                  f"queue_len={len(self._sample_future_queue)}")
-
-        self._sample_future_queue.append(sample_fut)
+        self._sample_future = sample_fut
 
         # Debug: log prediction
         if hasattr(self, '_debug_count'):

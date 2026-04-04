@@ -513,7 +513,7 @@ class EngineCore:
         ):
             model_output = future.result()
             if model_output is None:
-                # In emulator mock mode, empty batches legitimately return None
+                # In emulator mock mode, empty batches return None legitimately
                 if scheduler_output.total_num_scheduled_tokens == 0:
                     return {}, False
                 # None from sample_tokens() implies that the original execute_model()
@@ -1188,30 +1188,11 @@ class EngineCoreProc(EngineCore):
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
 
-        # Optional: trace loop-cycle time (start of step N → start of step N+1)
-        # This captures EVERYTHING: step_fn + output processing + post_step
-        # + inter-step CUDA sync + scheduler overhead. Rate-independent.
+        # Optional: trace full step cycle time (for emulator calibration)
+        _step_t0 = None
         _step_tracer = getattr(self, '_emulator_step_tracer', None)
         if _step_tracer is not None:
-            now = time.perf_counter()
-            prev_t0 = getattr(self, '_emulator_prev_step_t0', None)
-            # Record loop-cycle from previous step (if exists)
-            if prev_t0 is not None:
-                prev_so = getattr(self, '_emulator_prev_scheduler_output', None)
-                if prev_so is not None and prev_so.total_num_scheduled_tokens > 0:
-                    loop_us = (now - prev_t0) * 1e6
-                    new_req_ids = {r.req_id for r in prev_so.scheduled_new_reqs}
-                    num_decode = sum(
-                        1 for rid in prev_so.num_scheduled_tokens
-                        if rid not in new_req_ids
-                    )
-                    _step_tracer.set_batch_info(
-                        total_tokens=prev_so.total_num_scheduled_tokens,
-                        num_new_reqs=len(prev_so.scheduled_new_reqs),
-                        num_decode_seqs=num_decode,
-                    )
-                    _step_tracer.record_step(loop_us)
-            self._emulator_prev_step_t0 = now
+            _step_t0 = time.perf_counter()
 
         # Step the engine core.
         outputs, model_executed = self.step_fn()
@@ -1221,10 +1202,22 @@ class EngineCoreProc(EngineCore):
         # Post-step hook.
         self.post_step(model_executed)
 
-        # Store scheduler output for next iteration's loop-cycle recording
-        if _step_tracer is not None and model_executed:
-            self._emulator_prev_scheduler_output = getattr(
-                self, '_last_scheduler_output', None)
+        # Optional: record full step cycle time with batch context
+        if _step_t0 is not None and model_executed:
+            step_us = (time.perf_counter() - _step_t0) * 1e6
+            so = getattr(self, '_last_scheduler_output', None)
+            if so is not None and so.total_num_scheduled_tokens > 0:
+                new_req_ids = {r.req_id for r in so.scheduled_new_reqs}
+                num_decode = sum(
+                    1 for rid in so.num_scheduled_tokens
+                    if rid not in new_req_ids
+                )
+                _step_tracer.set_batch_info(
+                    total_tokens=so.total_num_scheduled_tokens,
+                    num_new_reqs=len(so.scheduled_new_reqs),
+                    num_decode_seqs=num_decode,
+                )
+            _step_tracer.record_step(step_us)
 
         # If no model execution happened but there are waiting requests
         # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow
