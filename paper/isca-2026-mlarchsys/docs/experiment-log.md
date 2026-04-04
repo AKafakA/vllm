@@ -334,6 +334,17 @@ Implemented virtual time tracking in both worker and executor hooks. In accelera
 - 3.9× speedup over real execution on RTX 3060
 - Useful for capacity planning simulations and offline throughput prediction
 
+### KV Offloading Feature Demo (1.5B TP=1)
+
+KV offloading (`--kv-offloading-size 2 --kv-offloading-backend native --disable-hybrid-kv-cache-manager`):
+
+| | Real | Emu | Error |
+|---|---|---|---|
+| TTFT | 159.0ms | 165.4ms | **+4.0%** |
+| TPOT | 22.1ms | 22.1ms | **-0.0%** |
+
+The emulator works transparently with KV offloading — the serving profile captures KV transfer overhead as part of the step cycle time. No emulator code changes needed.
+
 ---
 
 ## Remaining Work
