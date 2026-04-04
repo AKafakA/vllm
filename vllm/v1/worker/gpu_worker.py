@@ -899,6 +899,10 @@ class Worker(WorkerBase):
 
         # Emulator mode: Use oracle to generate fake output instead of real inference
         if self._emulator_hook is not None and self._emulator_hook.is_enabled:
+            # In CUDA mock mode, handle empty batches (no tokens scheduled)
+            if (not forward_pass and
+                    os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true")):
+                return None  # Empty batch — no execution needed
             # Check if we should use oracle for this iteration
             if self._emulator_hook.should_use_oracle(scheduler_output):
                 # Get cost estimate for logging

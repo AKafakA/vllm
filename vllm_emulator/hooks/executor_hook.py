@@ -54,6 +54,7 @@ class ExecutorEmulatorHook:
         self._step_overhead_us = 0.0
         self._pending_output = None  # For sample_tokens
         self._sample_future = None  # Future for sample_tokens to return
+        self._sample_future_queue: list = []  # Queue for concurrent requests
         self._gpu_free_time = 0.0  # When the virtual GPU becomes free
 
         # Virtual time tracking for accelerated mode
@@ -164,11 +165,13 @@ class ExecutorEmulatorHook:
         return output
 
     def has_pending_future(self) -> bool:
-        return self._sample_future is not None
+        return len(self._sample_future_queue) > 0 or self._sample_future is not None
 
     def get_sample_future(self) -> "Future":
-        """Return the Future for sample_tokens.
-        Resolves with the fake output after the predicted GPU time."""
+        """Return the next Future for sample_tokens.
+        Uses a queue to handle concurrent batch scheduling."""
+        if self._sample_future_queue:
+            return self._sample_future_queue.pop(0)
         fut = self._sample_future
         self._sample_future = None
         return fut
@@ -243,7 +246,10 @@ class ExecutorEmulatorHook:
         delay = end_time - now
 
         def _resolve():
-            sample_fut.set_result(fake_output)
+            try:
+                sample_fut.set_result(fake_output)
+            except Exception as e:
+                print(f"[ExecutorHook] _resolve error: {e}")
 
         if delay >= 0.001:
             timer = threading.Timer(delay, _resolve)
@@ -252,7 +258,13 @@ class ExecutorEmulatorHook:
         else:
             _resolve()
 
-        self._sample_future = sample_fut
+        # Debug rate>1 issue
+        if hasattr(self, '_debug_count') and self._debug_count <= 20:
+            print(f"[ExecutorHook] step={self._debug_count} "
+                  f"tt={total_tokens} delay={delay*1000:.1f}ms "
+                  f"queue_len={len(self._sample_future_queue)}")
+
+        self._sample_future_queue.append(sample_fut)
 
         # Debug: log prediction
         if hasattr(self, '_debug_count'):

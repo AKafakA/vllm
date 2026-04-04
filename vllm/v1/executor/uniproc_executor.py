@@ -121,6 +121,13 @@ class UniProcExecutor(Executor):
             if emu_hook.should_use_oracle(scheduler_output):
                 return emu_hook.create_delayed_future(
                     scheduler_output, non_block=non_block)
+            # Empty batch in mock mode: return None directly
+            if os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true"):
+                if non_block:
+                    empty_fut = Future()
+                    empty_fut.set_result(None)
+                    return empty_fut
+                return None
 
         output = self.collective_rpc(
             "execute_model",
