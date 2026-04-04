@@ -93,6 +93,14 @@ def install():
     torch.cuda.current_stream = lambda device=None: FakeStream()
     torch.cuda.default_stream = lambda device=None: FakeStream()
 
+    # Also mock torch.accelerator (used by newer vLLM code)
+    if hasattr(torch, 'accelerator'):
+        torch.accelerator.device_count = torch.cuda.device_count
+        torch.accelerator.current_device_index = lambda: 0
+        torch.accelerator.is_available = lambda: True
+        torch.accelerator.synchronize = lambda *a, **kw: None
+        torch.accelerator.set_device_index = lambda *a, **kw: None
+
     print(f"[EmulatorCudaMock] Fake GPU: {FakeDeviceProps.name}, "
           f"{_FAKE_GPU_MEMORY // (1024**3)}GB, "
           f"device_count={torch.cuda.device_count()}")

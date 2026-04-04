@@ -31,7 +31,9 @@ class EmulatorPlatform(Platform):
     
     _enum = PlatformEnum.OOT
     device_name = "Emulator"
-    device_type: str = "cpu"  # Use CPU device so torch.device() works
+    # device_type determines torch.device() — must be "cuda" when using
+    # CUDA mock, "cpu" otherwise. Set dynamically in check_and_update_config.
+    device_type: str = "cuda"
     dispatch_key: str = "CPU"
     ray_device_key: str = ""  # Emulator doesn't support Ray
     
@@ -77,8 +79,20 @@ class EmulatorPlatform(Platform):
         """Update config for emulator mode."""
         # Disable compilation that requires real GPU
         vllm_config.compilation_config.enable = False
-        # Use CPU for all computation
-        vllm_config.device_config.device = "cpu"
+        # Keep device as "cuda" — the CUDA mock handles the actual calls.
+        # This ensures the GPU worker uses the same code path as real GPU.
+        # Without CUDA mock (CPU-only vLLM build), set device = "cpu".
+        import os
+        if os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true"):
+            vllm_config.device_config.device = "cuda"
+        else:
+            vllm_config.device_config.device = "cpu"
+        # Use GPU worker class (same code path as real GPU serving)
+        # The emulator hooks intercept execute_model() before any GPU work
+        if vllm_config.parallel_config.worker_cls == "auto":
+            vllm_config.parallel_config.worker_cls = (
+                "vllm.v1.worker.gpu_worker.Worker"
+            )
     
     @classmethod
     def is_pin_memory_available(cls) -> bool:

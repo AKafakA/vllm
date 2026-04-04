@@ -2,6 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
+# Install CUDA mock early (before any torch.cuda usage) if running on CPU-only
+import os as _os
+if _os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true"):
+    try:
+        import vllm_emulator.cuda_mock  # noqa: F401
+    except ImportError:
+        pass
+
 import gc
 import os
 import threading
