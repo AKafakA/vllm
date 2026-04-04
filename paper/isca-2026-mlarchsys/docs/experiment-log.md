@@ -300,6 +300,15 @@ CUDA graphs provide 2.9× TPOT speedup (22ms vs 64ms). The emulator captures thi
 
 **Key insight for the paper**: the emulator's accuracy depends on the determinism of the GPU execution path. CUDA graphs make latency highly predictable → excellent emulation. Eager mode is less predictable → harder to emulate precisely.
 
+### Chunked Prefill Ablation (1.5B TP=1, rate=2)
+
+| Config | Real TTFT | Emu TTFT | Error | Real TPOT | Emu TPOT | Error |
+|--------|----------|---------|-------|----------|---------|-------|
+| Default (chunked ON) | 161.9ms | 161.8ms | **-0.1%** | 22.0ms | 22.2ms | **+0.9%** |
+| No chunked prefill | 158.0ms | 157.2ms | **-0.5%** | 22.2ms | 22.1ms | **-0.6%** |
+
+Both configs <1% error. Chunked prefill has minimal impact at input_len=256 (below the 2048 chunking threshold). For longer inputs where chunking matters, the serving profile approach captures the chunking overhead naturally.
+
 ### BurstGPT Cross-Workload Validation (1.5B TP=1)
 
 Real-world trace replay using BurstGPT dataset (GPT-4 conversation logs with natural arrival patterns and variable input/output lengths).
