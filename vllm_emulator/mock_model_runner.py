@@ -24,6 +24,7 @@ class MockModelRunner:
         self.model = None
         self.model_memory_usage = 0  # No real weights loaded
         self.input_registry = None
+        self.supported_tasks = ("generate",)  # Default: text generation
 
     def get_kv_cache_spec(self):
         """Return fake KV cache spec based on model config."""
@@ -65,6 +66,10 @@ class MockModelRunner:
     def init_fp8_kv_scales(self):
         """No-op."""
         pass
+
+    def get_supported_tasks(self):
+        """Return default supported tasks."""
+        return ("generate",)
 
     def profile_run(self):
         """No-op — return 0 peak memory."""
