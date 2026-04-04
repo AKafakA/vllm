@@ -31,7 +31,7 @@ class EmulatorPlatform(Platform):
     
     _enum = PlatformEnum.OOT
     device_name = "Emulator"
-    device_type: str = "emulator"
+    device_type: str = "cpu"  # Use CPU device so torch.device() works
     dispatch_key: str = "CPU"
     ray_device_key: str = ""  # Emulator doesn't support Ray
     
