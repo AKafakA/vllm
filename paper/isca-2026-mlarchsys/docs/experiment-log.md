@@ -406,6 +406,27 @@ Both under 5%. Emulator works with PD disaggregation.
 
 **Conclusion**: PD disagg works with NIXL on small models. Full eval (1.5B+) needs ≥24GB GPUs (A30/A100). Defer to CloudLab.
 
+### EmulatorPlatform GPU-Free Test (CloudLab CPU-only)
+
+**Successfully booted vLLM on CPU-only host (xl170, 20 cores, 62GB RAM, no GPU):**
+- EmulatorPlatform sets `device_config=cpu`, fakes GPU memory (12GB)
+- `--load-format dummy` skips weight loading (random weights)
+- `--enforce-eager` required (no CUDA graph support on CPU)
+- `LD_PRELOAD` needed: `libtcmalloc_minimal.so + libiomp5.so`
+- Server starts in 26s, serves requests (output is random — expected with dummy weights)
+
+**Setup requirements for CPU-only host:**
+```bash
+sudo apt-get install -y gcc-12 g++-12 cmake libnuma-dev libtcmalloc-minimal4
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+VLLM_TARGET_DEVICE=cpu pip install -e .
+LD_PRELOAD="libtcmalloc_minimal.so.4:libiomp5.so" \
+VLLM_EMULATOR_ENABLE_ORACLE=1 \
+VLLM_EMULATOR_PROFILE_PACK=<profile.json> \
+python3 -m vllm.entrypoints.openai.api_server \
+    --model <model> --load-format dummy --enforce-eager
+```
+
 The emulator's approach is inherently compatible with PD disagg because:
 1. Each vLLM instance (prefill/decode) has its own worker hook
 2. The serving profile captures per-instance step cycle time including KV transfer
