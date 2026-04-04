@@ -395,6 +395,15 @@ Three model sizes validated on RTX 3060: 0.5B, 1.5B, 3B — all <5% error with s
 - P2pNcclConnector also failed (needs P2P DMA, not available on consumer PCIe)
 - **0.5B smoke test with NixlConnector**: Both instances started, NIXL initialized, served requests successfully. Step-cycle traces collected (800 prefill + 1400 decode records). Confirms the emulator architecture works with PD disagg.
 
+**PD disagg emulator eval (0.5B, b2b):**
+
+| | Real | Emu | Error |
+|---|---|---|---|
+| TTFT | 139.3ms | 142.3ms | **+2.1%** |
+| TPOT | 34.3ms | 35.8ms | **+4.4%** |
+
+Both under 5%. Emulator works with PD disaggregation.
+
 **Conclusion**: PD disagg works with NIXL on small models. Full eval (1.5B+) needs ≥24GB GPUs (A30/A100). Defer to CloudLab.
 
 The emulator's approach is inherently compatible with PD disagg because:
