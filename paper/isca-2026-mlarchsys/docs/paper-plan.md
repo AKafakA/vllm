@@ -76,11 +76,11 @@ Same profiling data, same accuracy, but without time.sleep() blocking.
 ### vLLM v0.18.1 Feature Availability (confirmed in codebase):
 | Feature | Available? | Key files | CLI/Config |
 |---------|-----------|-----------|------------|
-| PD disaggregation | ✅ | `vllm/v1/worker/gpu/kv_connector.py` | KV connector config |
-| CPU offloading | ✅ | `vllm/config/offload.py`, `vllm/model_executor/offloader/` | `--cpu-offload-gb` |
-| gRPC serving | ✅ | `vllm/entrypoints/grpc_server.py` | `vllm serve --rpc grpc` |
-| OpenAI Realtime API | ✅ | `vllm/entrypoints/openai/realtime/serving.py` | WebSocket endpoint |
-| Chunked prefill | ✅ (default) | Built-in | `--enable-chunked-prefill`/`--no-chunked-prefill` |
+| PD disaggregation | ✅ | `vllm/entrypoints/serve/disagg/` | `--kv-transfer-config '{"kv_connector":"P2pNcclConnector",...}'` |
+| KV offloading | ✅ | `vllm/config/cache.py` | `--kv-offloading-size 10 --kv-offloading-backend native` |
+| gRPC serving | ✅ | `vllm/entrypoints/grpc_server.py` | `vllm serve --grpc` (needs `pip install vllm[grpc]`) |
+| OpenAI Realtime API | ✅ | `vllm/entrypoints/openai/realtime/` | WebSocket `ws://host/v1/realtime` (model-dependent) |
+| Chunked prefill | ✅ (default) | Built-in | `--enable-chunked-prefill` (default on) |
 | CUDA graphs | ✅ (default) | Built-in | `--enforce-eager` to disable |
 | TP/PP | ✅ | Built-in | `--tensor-parallel-size`, `--pipeline-parallel-size` |
 
