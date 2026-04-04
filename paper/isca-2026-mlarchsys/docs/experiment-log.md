@@ -270,6 +270,25 @@ Qwen2.5-1.5B, RTX 3060, 50 prompts each, serving profile + executor hook.
 
 **All 16 metrics under 3%. Most under 1%. Paper-ready.**
 
+### TP=2 Evaluation (3B model, 2×RTX 3060, enforce-eager)
+
+Qwen2.5-3B-Instruct, TP=2, max-model-len=2048, enforce-eager (CUDA graphs OOM on 12GB).
+
+**Key issues encountered:**
+- CUDA OOM with default CUDA graphs on 2×12GB RTX 3060 → fixed with --enforce-eager
+- First serving trace (30 prompts/rate) had too few samples → noisy profile, 5-9% TPOT error
+- Outliers in step cycle data (0.7ms-9315ms) → added filtering: keep values >5ms and <3×median
+
+**Final results (50 prompts/rate, outlier-filtered profile):**
+
+| Rate | Real TTFT | Emu TTFT | Error | Real TPOT | Emu TPOT | Error |
+|------|----------|---------|-------|----------|---------|-------|
+| 1 | 916.0ms | 958.9ms | **+4.7%** | 193.5ms | 195.6ms | **+1.1%** |
+| 2 | 417.8ms | 410.4ms | **-1.8%** | 161.0ms | 158.8ms | **-1.3%** |
+| 4 | 459.8ms | 457.0ms | **-0.6%** | 184.1ms | 184.3ms | **+0.1%** |
+
+All metrics under 5%. TP=2 works with the serving profile approach.
+
 ---
 
 ## Remaining Work
