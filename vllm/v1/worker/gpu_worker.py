@@ -919,6 +919,14 @@ class Worker(WorkerBase):
                 if fake_output is not None:
                     estimated_latency_s = cost_estimate["total_estimated_us"] / 1_000_000
 
+                    # In CUDA mock mode, add CUDA sync overhead that's
+                    # missing because CUDA calls are no-ops. Profiled per GPU.
+                    if os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true"):
+                        cuda_sync_us = float(os.environ.get(
+                            "VLLM_EMULATOR_CUDA_SYNC_US", "0"))
+                        if cuda_sync_us > 0:
+                            estimated_latency_s += cuda_sync_us / 1e6
+
                     if self._emulator_hook.should_block and estimated_latency_s >= 0.001:
                         # Hybrid sleep: time.sleep() for bulk, busy-wait
                         # for last 1ms to eliminate OS scheduling jitter

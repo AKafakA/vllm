@@ -211,6 +211,14 @@ class ExecutorEmulatorHook:
         self._step_count += 1
         self._virtual_time_us += latency_us
 
+        # In CUDA mock mode, add synchronous CUDA overhead.
+        # Only for prefill steps (new requests) — this simulates GPU
+        # memory management and CUDA sync that happens when processing
+        # new request prefills on real hardware.
+        cuda_sync_us = float(os.environ.get("VLLM_EMULATOR_CUDA_SYNC_US", "0"))
+        if cuda_sync_us > 0 and len(scheduler_output.scheduled_new_reqs) > 0:
+            time.sleep(cuda_sync_us / 1e6)
+
         # Create fake output
         fake_output = self._create_fake_output(scheduler_output)
         if fake_output is None:
