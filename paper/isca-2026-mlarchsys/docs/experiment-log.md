@@ -393,7 +393,9 @@ Three model sizes validated on RTX 3060: 0.5B, 1.5B, 3B — all <5% error with s
 - Both instances initialized NIXL connector successfully
 - Both got OOM killed: model (2.9GB) + KV cache + NIXL buffers > 12GB RTX 3060
 - P2pNcclConnector also failed (needs P2P DMA, not available on consumer PCIe)
-- **Conclusion**: PD disagg needs ≥24GB GPUs (A30/A100). Defer to CloudLab.
+- **0.5B smoke test with NixlConnector**: Both instances started, NIXL initialized, served requests successfully. Step-cycle traces collected (800 prefill + 1400 decode records). Confirms the emulator architecture works with PD disagg.
+
+**Conclusion**: PD disagg works with NIXL on small models. Full eval (1.5B+) needs ≥24GB GPUs (A30/A100). Defer to CloudLab.
 
 The emulator's approach is inherently compatible with PD disagg because:
 1. Each vLLM instance (prefill/decode) has its own worker hook
