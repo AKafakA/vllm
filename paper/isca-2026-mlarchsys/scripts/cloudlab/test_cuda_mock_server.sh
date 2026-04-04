@@ -14,7 +14,9 @@ echo "=== GPU vLLM + CUDA Mock on CPU Host ==="
 
 # Key: VLLM_EMULATOR_MOCK_CUDA must be imported BEFORE vllm
 # We use a wrapper that imports the mock first
-# Use -c to import mock before running the module
+# Use CUDA stubs + mock for GPU vLLM on CPU
+STUB_DIR="${HOME}/vllm-emulator/cuda_stubs"
+LD_LIBRARY_PATH="${STUB_DIR}:${LD_LIBRARY_PATH:-}" \
 VLLM_EMULATOR_MOCK_CUDA=1 \
 VLLM_EMULATOR_ENABLE_ORACLE=1 \
 VLLM_EMULATOR_PROFILE_PACK="${PROFILE_DIR}/serving-0.5b-tp1.json" \

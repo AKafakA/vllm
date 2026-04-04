@@ -30,7 +30,7 @@ class EmulatorPlatform(Platform):
     """
     
     _enum = PlatformEnum.OOT
-    device_name = "Emulator"
+    device_name = "cuda"  # Must match torch device name
     # device_type determines torch.device() — must be "cuda" when using
     # CUDA mock, "cpu" otherwise. Set dynamically in check_and_update_config.
     device_type: str = "cuda"
@@ -94,6 +94,11 @@ class EmulatorPlatform(Platform):
                 "vllm.v1.worker.gpu_worker.Worker"
             )
     
+    @classmethod
+    def check_if_supports_dtype(cls, dtype: "torch.dtype") -> None:
+        """Emulator supports all dtypes."""
+        pass
+
     @classmethod
     def is_pin_memory_available(cls) -> bool:
         """Pin memory not available in emulator."""

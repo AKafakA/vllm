@@ -93,6 +93,24 @@ def install():
     torch.cuda.current_stream = lambda device=None: FakeStream()
     torch.cuda.default_stream = lambda device=None: FakeStream()
 
+    # Mock CUDA RNG functions
+    torch.cuda.manual_seed = lambda seed: None
+    torch.cuda.manual_seed_all = lambda seed: None
+    torch.cuda.seed = lambda: None
+    torch.cuda.seed_all = lambda: None
+    torch.cuda.initial_seed = lambda: 0
+
+    # Mock C-level CUDA init to prevent "no NVIDIA driver" error
+    if hasattr(torch._C, '_cuda_init'):
+        torch._C._cuda_init = lambda: None
+    if hasattr(torch._C, '_cuda_getDeviceCount'):
+        torch._C._cuda_getDeviceCount = lambda: int(os.environ.get(
+            "VLLM_EMULATOR_NUM_GPUS", "1"))
+    if hasattr(torch._C, '_cuda_getDevice'):
+        torch._C._cuda_getDevice = lambda: 0
+    if hasattr(torch._C, '_cuda_setDevice'):
+        torch._C._cuda_setDevice = lambda x: None
+
     # Also mock torch.accelerator (used by newer vLLM code)
     if hasattr(torch, 'accelerator'):
         torch.accelerator.device_count = torch.cuda.device_count
