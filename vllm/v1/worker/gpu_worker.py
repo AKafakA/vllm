@@ -846,7 +846,16 @@ class Worker(WorkerBase):
                     estimated_latency_s = cost_estimate["total_estimated_us"] / 1_000_000
 
                     if self._emulator_hook.should_block and estimated_latency_s >= 0.001:
-                        time.sleep(estimated_latency_s)
+                        # Hybrid sleep: time.sleep() for bulk, busy-wait
+                        # for last 1ms to eliminate OS scheduling jitter
+                        # (~80us per sleep call on Linux).
+                        end = time.perf_counter() + estimated_latency_s
+                        busywait_s = 0.001  # 1ms busy-wait tail
+                        sleep_s = estimated_latency_s - busywait_s
+                        if sleep_s > 0:
+                            time.sleep(sleep_s)
+                        while time.perf_counter() < end:
+                            pass
 
                     # Store for sample_tokens() (v0.18.1 async flow)
                     self._emulator_pending_output = fake_output
