@@ -345,6 +345,15 @@ KV offloading (`--kv-offloading-size 2 --kv-offloading-backend native --disable-
 
 The emulator works transparently with KV offloading — the serving profile captures KV transfer overhead as part of the step cycle time. No emulator code changes needed.
 
+### PD Disaggregation (Not tested — hardware limitation)
+
+PD disaggregation (P2pNcclConnector) failed on 2×RTX 3060: the P2P NCCL connector requires P2P DMA between GPUs which consumer GPUs on PCIe don't support. Needs NVLink-connected GPUs (A100, H100) — defer to CloudLab Apr 12-16.
+
+The emulator's approach is inherently compatible with PD disagg because:
+1. Each vLLM instance (prefill/decode) has its own worker hook
+2. The serving profile captures per-instance step cycle time including KV transfer
+3. No emulator code changes needed for PD disagg
+
 ---
 
 ## Remaining Work
