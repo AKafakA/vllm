@@ -132,6 +132,14 @@ class ExecutorEmulatorHook:
             total_tokens, has_prefill=has_prefill)
         latency_us += self._step_overhead_us
 
+        # Add prefill-specific overhead: accounts for CUDA graph warmup
+        # and scheduling overhead on prefill steps that the profile
+        # underestimates (profiled at high load where GPU is warm).
+        prefill_overhead_us = float(os.environ.get(
+            "VLLM_EMULATOR_PREFILL_OVERHEAD_US", "0"))
+        if prefill_overhead_us > 0 and has_prefill:
+            latency_us += prefill_overhead_us
+
         # Add decode-specific overhead: accounts for output processing,
         # sampling, and scheduling overhead that is cheaper with fake
         # outputs than with real GPU outputs.
