@@ -127,7 +127,9 @@ class ExecutorEmulatorHook:
             If blocking: sleeps then returns output directly
         """
         total_tokens = scheduler_output.total_num_scheduled_tokens
-        latency_us = self._oracle.estimate_step_latency_us(total_tokens)
+        has_prefill = len(scheduler_output.scheduled_new_reqs) > 0
+        latency_us = self._oracle.estimate_step_latency_us(
+            total_tokens, has_prefill=has_prefill)
         latency_us += self._step_overhead_us
 
         # Add decode-specific overhead: accounts for output processing,

@@ -129,6 +129,16 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         # 2D forward pass profile (optional, most accurate)
         self._forward_pass_2d = profile_pack.get("forward_pass_2d", [])
 
+        # Separate prefill/decode forward_pass (for step-type-aware estimation)
+        self._prefill_forward_pass = sorted(
+            profile_pack.get("prefill_forward_pass", []),
+            key=lambda s: s["total_tokens"],
+        )
+        self._decode_forward_pass = sorted(
+            profile_pack.get("decode_forward_pass", []),
+            key=lambda s: s["total_tokens"],
+        )
+
     @property
     def gpu_model(self) -> str:
         return self._gpu_model
@@ -228,13 +238,14 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         return self._decode_pw_a * (active_seqs ** self._decode_pw_b)
 
     def estimate_step_latency_us(
-        self, total_tokens: int, avg_context_len: int = 0
+        self, total_tokens: int, avg_context_len: int = 0,
+        has_prefill: bool = False,
     ) -> float:
         """Estimate latency for one forward pass.
 
-        If a 2D profile (forward_pass_2d) is available, uses bilinear
-        interpolation over (total_tokens, avg_context_len).  Falls back
-        to 1D forward_pass or prefill oracle otherwise.
+        If has_prefill is True and a prefill_forward_pass section exists,
+        uses the prefill-specific profile (different CUDA graph path).
+        Otherwise uses the combined forward_pass.
         """
         if total_tokens <= 0:
             return 0.0
@@ -243,16 +254,26 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         if self._forward_pass_2d and avg_context_len > 0:
             return self._estimate_2d(total_tokens, avg_context_len)
 
-        # 1D fallback
-        if not self._forward_pass_samples:
+        # Step-type-aware lookup: use prefill or decode section
+        samples = self._forward_pass_samples  # default
+        if has_prefill and self._prefill_forward_pass:
+            samples = self._prefill_forward_pass
+        elif not has_prefill and self._decode_forward_pass:
+            samples = self._decode_forward_pass
+
+        if not samples:
+            # Fall back to combined
+            samples = self._forward_pass_samples
+        if not samples:
             return self.estimate_prefill_latency_us(total_tokens, batch_size=1)
 
-        xs = [float(s["total_tokens"]) for s in self._forward_pass_samples]
-        ys = [float(s["latency_us"]) for s in self._forward_pass_samples]
+        xs = [float(s["total_tokens"]) for s in samples]
+        ys = [float(s["latency_us"]) for s in samples]
 
         if xs[0] <= total_tokens <= xs[-1]:
             return _interpolate_linear(xs, ys, float(total_tokens))
 
+        # Extrapolate using power-law from the combined profile
         return self._fwd_pw_a * (total_tokens ** self._fwd_pw_b)
 
     def _estimate_2d(self, total_tokens: int, avg_context_len: int) -> float:

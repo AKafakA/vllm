@@ -184,7 +184,9 @@ class GpuWorkerHook:
             )
 
         # Unified: one forward pass for all tokens
-        batch_latency = self._oracle.estimate_step_latency_us(total_tokens)
+        has_prefill = len(scheduler_output.scheduled_new_reqs) > 0
+        batch_latency = self._oracle.estimate_step_latency_us(
+            total_tokens, has_prefill=has_prefill)
 
         # Add per-step overhead constant (calibrated)
         batch_latency += self._step_overhead_us
