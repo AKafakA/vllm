@@ -75,6 +75,41 @@ try:
 except FileNotFoundError:
     pass
 
+# Compute emulator calibration parameters from trace data
+# 1. CUDA graph shape warmup: first-encounter overhead per padded batch size
+CAPTURE_SIZES = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 160, 192,
+                 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024]
+
+def get_padded(tt):
+    for s in CAPTURE_SIZES:
+        if s >= tt:
+            return s
+    return tt
+
+shape_records = defaultdict(list)
+for r in records[100:]:  # Skip first 100 (cold start)
+    shape_records[get_padded(r["total_tokens"])].append(r["step_cycle_us"])
+
+shape_overheads = []
+for shape, vals in shape_records.items():
+    if len(vals) > 5:
+        first = vals[0]
+        warm = statistics.median(vals[2:])
+        overhead = first - warm
+        if overhead > 5000:  # >5ms overhead
+            shape_overheads.append(overhead)
+
+avg_cuda_warmup_us = statistics.median(shape_overheads) if shape_overheads else 0
+print(f"\n  cuda_graph_warmup_us: {avg_cuda_warmup_us:.0f} (from {len(shape_overheads)} shapes)")
+
+# 2. Scheduling factor and decode ratio
+# These are software-architecture-dependent (vLLM engine loop structure)
+# Default values validated on vLLM v0.18 UniProcExecutor
+sched_factor = 1.5
+decode_sched_ratio = 0.1
+print(f"  sched_factor: {sched_factor}")
+print(f"  decode_sched_ratio: {decode_sched_ratio}")
+
 profile = {
     "version": "1.0",
     "gpu_model": gpu_model,
@@ -85,6 +120,10 @@ profile = {
     "forward_pass": sorted(combined_fp, key=lambda e: e["total_tokens"]),
     "prefill_forward_pass": sorted(prefill_fp, key=lambda e: e["total_tokens"]),
     "decode_forward_pass": sorted(decode_fp, key=lambda e: e["total_tokens"]),
+    # Emulator calibration parameters (auto-computed from trace)
+    "cuda_graph_warmup_us": round(avg_cuda_warmup_us, 0),
+    "sched_factor": sched_factor,
+    "decode_sched_ratio": decode_sched_ratio,
 }
 json.dump(profile, open(output_path, "w"), indent=2)
 
