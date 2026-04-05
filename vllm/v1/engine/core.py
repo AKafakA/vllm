@@ -513,6 +513,9 @@ class EngineCore:
         ):
             model_output = future.result()
             if model_output is None:
+                # Empty batch in emulator mock mode
+                if scheduler_output.total_num_scheduled_tokens == 0:
+                    return {}, False
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
                 exec_model_fut.result()
