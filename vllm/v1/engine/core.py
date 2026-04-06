@@ -629,28 +629,6 @@ class EngineCore:
             scheduler_output, model_output
         )
 
-        # Debug: track batch queue step + request completion
-        _bq_step = getattr(self, '_bq_step_count', 0) + 1
-        self._bq_step_count = _bq_step
-        num_sched = len(scheduler_output.num_scheduled_tokens)
-        num_finished = 0
-        if engine_core_outputs and isinstance(engine_core_outputs, dict):
-            for _cidx, eco in engine_core_outputs.items():
-                if hasattr(eco, 'finished_requests') and eco.finished_requests:
-                    num_finished += len(eco.finished_requests)
-                if hasattr(eco, 'outputs'):
-                    pass  # outputs tracked below
-        num_has_requests = 1 if self.scheduler.has_requests() else 0
-        if (_bq_step <= 5
-                or (num_sched >= 25 and _bq_step % 10 == 0)
-                or _bq_step % 500 == 0
-                or num_finished > 0):
-            print(f"[BQStep] #{_bq_step} sched={num_sched} "
-                  f"finished={num_finished} "
-                  f"has_reqs={num_has_requests} "
-                  f"queue={len(batch_queue)} "
-                  f"mo_reqs={len(model_output.req_ids) if model_output else 0}")
-
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
@@ -1274,6 +1252,12 @@ class EngineCoreProc(EngineCore):
             self._ttft_tracer = _TTFTTracer()
         else:
             self._ttft_tracer = None
+
+        # Note: pipeline compensation for TTFT was investigated extensively
+        # (see docs/benchmarking/ttft-compensation-attempts.md) but all
+        # approaches either fail at rate=1 or degrade E2E at rate=2+.
+        # The TTFT underestimation at low rates is an inherent limitation
+        # of timer-based emulation with async scheduling.
 
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.

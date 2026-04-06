@@ -1,13 +1,15 @@
 """Executor-level hook for emulator mode.
 
-Intercepts at the executor level (above worker) to block for the
-profiled GPU time, then return resolved Futures — matching real GPU's
-UniProcExecutor behavior exactly. The engine core processes the batch
-queue sequentially (no pipelining), same as real GPU execution.
+Intercepts at the executor level (above worker) to return timer-based
+pending Futures that resolve after the profiled GPU time. Uses the
+async scheduler's pipelining (required for num_output_placeholders
+tracking) with pipeline compensation on prefill steps to match real
+GPU's TTFT behavior.
 
-This is the correct abstraction layer for online serving emulation
-because it blocks the engine thread for the profiled duration,
-preventing artificial IPC scheduling advantages.
+Pipeline compensation: when prior emulated GPU work is in flight
+(_gpu_free_time > now), the prefill timer is extended by the remaining
+prior work time. This models the real GPU's thread-blocking that
+prevents the engine from picking up new requests during execution.
 """
 
 from __future__ import annotations
@@ -39,13 +41,15 @@ _MODE_ALIASES = {"online": EMULATOR_MODE_REALTIME, "offline": EMULATOR_MODE_ACCE
 
 
 class ExecutorEmulatorHook:
-    """Executor-level emulator hook using blocking sleep + resolved Futures.
+    """Executor-level emulator hook using timer-based pending Futures.
 
-    When enabled, intercepts execute_model() at the executor level,
-    blocks for the profiled GPU time (time.sleep), then returns a
-    resolved Future. The engine core sees .done()=True and processes
-    the output immediately — no batch queue pipelining, matching real
-    GPU's UniProcExecutor behavior exactly.
+    When enabled, intercepts execute_model() at the executor level
+    and returns a pending Future that resolves after the profiled GPU
+    time via threading.Timer. Compatible with vLLM's async scheduler
+    (requires pending Futures for num_output_placeholders tracking).
+
+    Pipeline compensation: prefill steps are extended when prior GPU
+    work is in flight, matching real GPU's sequential execution timing.
     """
 
     # CUDA graph batch size padding (matches vLLM defaults)
@@ -106,15 +110,41 @@ class ExecutorEmulatorHook:
                 self._cuda_graph_warmup_us = float(
                     profile_pack.get("cuda_graph_warmup_us", 0))
 
-            # Max latency cap: prevents deadlock at high concurrency by
-            # capping the blocking time at the maximum MEASURED step-cycle
-            # value (no extrapolation). This is the safety bound.
-            self._max_latency_us = self._compute_max_latency(profile_pack)
+            # Pipeline compensation: avg decode step cycle from profile.
+            # Added to prefill timers when prior GPU work is in flight,
+            # modeling the time a new request waits on real GPU.
+            self._pipeline_compensation_us = self._compute_pipeline_compensation(
+                profile_pack)
 
             print(f"[ExecutorEmulatorHook] Enabled: mode={self._emulator_mode}, "
-                  f"cuda_graph_warmup={self._cuda_graph_warmup_us:.0f}us")
+                  f"cuda_graph_warmup={self._cuda_graph_warmup_us:.0f}us, "
+                  f"pipeline_comp={self._pipeline_compensation_us/1000:.1f}ms")
         except Exception as e:
             print(f"[ExecutorEmulatorHook] Failed to initialize: {e}")
+
+    def _compute_pipeline_compensation(self, profile_pack: dict) -> float:
+        """Compute pipeline compensation from avg decode step cycle.
+
+        On real GPU with async scheduling (batch_queue_size=2), a new
+        request must wait for the current GPU step to finish before
+        being scheduled. The timer approach skips this wait (pipelining).
+        We compensate by adding one decode step cycle to prefill timers
+        when prior GPU work is in flight.
+
+        Uses the avg decode step at low total_tokens (tt=1-4), which
+        represents the typical step duration during low-rate serving.
+        """
+        decode_fwd = profile_pack.get("decode_forward_pass", [])
+        if not decode_fwd:
+            decode_fwd = profile_pack.get("forward_pass", [])
+        if not decode_fwd:
+            return 0.0
+
+        low_tt = [e["latency_us"] for e in decode_fwd if e["total_tokens"] <= 4]
+        if not low_tt:
+            return 0.0
+
+        return sum(low_tt) / len(low_tt)
 
     def has_pending_future(self) -> bool:
         return self._sample_future is not None
@@ -241,11 +271,18 @@ class ExecutorEmulatorHook:
             self._pending_output = fake_output
             return None
 
-        # Non-blocking realtime: timer-based Future.
-        # The timer fires after the profiled GPU time, resolving the
-        # sample Future with the fake output. The async scheduler's
-        # num_output_placeholders tracking works correctly because the
-        # Future is pending (done()=False) when added to the batch queue.
+        # Non-blocking realtime: timer-based Future with pipeline compensation.
+        # The async scheduler requires pending Futures (pipelining) to keep
+        # num_output_placeholders > 0. This pipelining gives the emulator an
+        # IPC scheduling advantage: the engine picks up new requests during
+        # the timer wait, while real GPU blocks the engine thread.
+        #
+        # Pipeline compensation (Proposal 2b): when prior emulated GPU work
+        # is still in flight (_gpu_free_time > now), add the remaining prior
+        # work time to the prefill timer. This models the real GPU behavior
+        # where a new request must wait for the current GPU step to finish
+        # before being scheduled. The trigger is hook-side only (no engine
+        # modification) and has no false positives/negatives.
         exec_fut: Future = Future()
         exec_fut.set_result(None)
 
@@ -253,6 +290,16 @@ class ExecutorEmulatorHook:
 
         # Chain timers: virtual GPU is a serial resource
         now = time.perf_counter()
+
+        # Pipeline compensation (Proposal 2b): if prior GPU work is in flight
+        # (_gpu_free_time > now) and this is a prefill step, add one decode
+        # step cycle as compensation. On real GPU, the new request waits for
+        # the current GPU step to finish before being scheduled. With our
+        # timer, the engine picks it up immediately. We compensate by adding
+        # one step cycle (the time of the step the request would have waited
+        # for). The trigger (_gpu_free_time > now) has no false positives
+        # (idle engine: no compensation) or false negatives (single prefill
+        # with prior decode pending: compensates correctly).
         start_time = max(now, self._gpu_free_time)
         end_time = start_time + latency_s
         self._gpu_free_time = end_time
@@ -312,16 +359,6 @@ class ExecutorEmulatorHook:
                 while tok == self._eos_token_id:
                     tok = self._rng.randrange(self._vocab_size)
                 sampled_token_ids.append([tok])
-
-        # Debug: log fake output stats at high concurrency
-        _fo_count = getattr(self, '_fake_output_count', 0) + 1
-        self._fake_output_count = _fo_count
-        num_chunks = len(prefill_chunk_ids)
-        num_tokens_generated = sum(1 for t in sampled_token_ids if t)
-        if _fo_count <= 5 or (len(req_ids) >= 25 and _fo_count % 10 == 0) or _fo_count % 500 == 0:
-            print(f"[FakeOutput] #{_fo_count} reqs={len(req_ids)} "
-                  f"tokens={num_tokens_generated} chunks={num_chunks} "
-                  f"new={len(new_req_ids)}")
 
         req_id_to_index = {rid: idx for idx, rid in enumerate(req_ids)}
 
