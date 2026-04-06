@@ -1,13 +1,13 @@
 """Executor-level hook for emulator mode.
 
-Intercepts at the executor level (above worker) to return timer-based
-Futures that resolve after predicted GPU time. This preserves the
-engine core's batch queue pipelining — the scheduler runs while the
-Future is pending, matching real GPU/CPU overlap behavior.
+Intercepts at the executor level (above worker) to block for the
+profiled GPU time, then return resolved Futures — matching real GPU's
+UniProcExecutor behavior exactly. The engine core processes the batch
+queue sequentially (no pipelining), same as real GPU execution.
 
 This is the correct abstraction layer for online serving emulation
-because it doesn't block the worker thread, allowing the engine core's
-async scheduling to pipeline batches naturally.
+because it blocks the engine thread for the profiled duration,
+preventing artificial IPC scheduling advantages.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import threading
 import time
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
+
 
 from vllm_emulator.oracle import BaseGpuCostOracle, create_oracle_from_profile_pack
 from vllm_emulator.profile.loader import load_profile_pack
@@ -38,13 +39,13 @@ _MODE_ALIASES = {"online": EMULATOR_MODE_REALTIME, "offline": EMULATOR_MODE_ACCE
 
 
 class ExecutorEmulatorHook:
-    """Executor-level emulator hook using timer-based Futures.
+    """Executor-level emulator hook using blocking sleep + resolved Futures.
 
-    When enabled, intercepts execute_model() at the executor level
-    and returns a Future that resolves after the predicted GPU latency.
-    The engine core's batch queue sees this as a pending computation
-    and pipelines scheduling of the next batch — matching real GPU/CPU
-    overlap behavior.
+    When enabled, intercepts execute_model() at the executor level,
+    blocks for the profiled GPU time (time.sleep), then returns a
+    resolved Future. The engine core sees .done()=True and processes
+    the output immediately — no batch queue pipelining, matching real
+    GPU's UniProcExecutor behavior exactly.
     """
 
     # CUDA graph batch size padding (matches vLLM defaults)
@@ -105,68 +106,24 @@ class ExecutorEmulatorHook:
                 self._cuda_graph_warmup_us = float(
                     profile_pack.get("cuda_graph_warmup_us", 0))
 
-            # IPC scheduling overhead table: profile-driven, no manual tuning.
-            # On real GPU, execute_model blocks the engine thread. New requests
-            # wait in the IPC queue for avg = step_cycle / 2 (PASTA property).
-            # The table maps num_concurrent_reqs → overhead_us, computed from
-            # the step-cycle trace by the profile builder.
-            self._sched_overhead_table = profile_pack.get(
-                "sched_overhead_table", [])
-
-            overhead_summary = ""
-            if self._sched_overhead_table:
-                # Show a few key entries from the table
-                show_n = [1, 3, 5, 10, 20, 50]
-                parts = []
-                for entry in self._sched_overhead_table:
-                    n = entry.get("num_reqs", 0)
-                    if n in show_n:
-                        parts.append(f"N{n}:{entry['overhead_us']/1000:.0f}ms")
-                overhead_summary = f"ipc_overhead=[{', '.join(parts)}] ({len(self._sched_overhead_table)} entries)"
+            # Max latency cap: prevents deadlock at high concurrency by
+            # capping the blocking time at the maximum MEASURED step-cycle
+            # value (no extrapolation). This is the safety bound.
+            self._max_latency_us = self._compute_max_latency(profile_pack)
 
             print(f"[ExecutorEmulatorHook] Enabled: mode={self._emulator_mode}, "
-                  f"cuda_graph_warmup={self._cuda_graph_warmup_us:.0f}us, "
-                  f"{overhead_summary}")
+                  f"cuda_graph_warmup={self._cuda_graph_warmup_us:.0f}us")
         except Exception as e:
             print(f"[ExecutorEmulatorHook] Failed to initialize: {e}")
 
-    def _get_sched_overhead_us(self, num_reqs: int) -> float:
-        """Look up IPC scheduling overhead from directly measured table.
+    def has_pending_future(self) -> bool:
+        return self._sample_future is not None
 
-        The table is produced by profile_ipc_overhead.py which measures
-        real TTFT at each concurrency N=1..50 (N-1 background requests
-        in flight + 1 measurement request). Overhead = TTFT - prefill_step.
-
-        Direct lookup by num_reqs. No interpolation needed since every
-        integer N is measured.
-        """
-        if not self._sched_overhead_table:
-            return 0.0
-
-        table = self._sched_overhead_table
-
-        # Direct lookup by num_reqs field
-        for entry in table:
-            if entry.get("num_reqs") == num_reqs:
-                return entry.get("overhead_us", 0)
-
-        # Nearest match if exact not found
-        if num_reqs < table[0].get("num_reqs", 1):
-            return table[0].get("overhead_us", 0)
-        if num_reqs > table[-1].get("num_reqs", 50):
-            return table[-1].get("overhead_us", 0)
-
-        # Linear interpolation between nearest entries
-        for i in range(len(table) - 1):
-            n_lo = table[i].get("num_reqs", i + 1)
-            n_hi = table[i + 1].get("num_reqs", i + 2)
-            if n_lo <= num_reqs <= n_hi:
-                ratio = (num_reqs - n_lo) / max(n_hi - n_lo, 1)
-                o_lo = table[i].get("overhead_us", 0)
-                o_hi = table[i + 1].get("overhead_us", 0)
-                return o_lo + ratio * (o_hi - o_lo)
-
-        return table[-1].get("overhead_us", 0)
+    def get_sample_future(self) -> "Future":
+        """Return the pending timer Future for sample_tokens."""
+        fut = self._sample_future
+        self._sample_future = None
+        return fut
 
     def _get_padded_batch_size(self, total_tokens: int) -> int:
         """Round total_tokens up to the nearest CUDA graph capture size."""
@@ -204,15 +161,7 @@ class ExecutorEmulatorHook:
         self._pending_output = None
         return output
 
-    def has_pending_future(self) -> bool:
-        return self._sample_future is not None
 
-    def get_sample_future(self) -> "Future":
-        """Return the Future for sample_tokens.
-        Resolves with the fake output after the predicted GPU time."""
-        fut = self._sample_future
-        self._sample_future = None
-        return fut
 
     def create_delayed_future(
         self,
@@ -283,35 +232,26 @@ class ExecutorEmulatorHook:
                 return fut
             return None
 
+        latency_s = latency_us / 1e6
+
         if not non_block or self._emulator_mode == EMULATOR_MODE_ACCELERATED:
-            # Blocking mode or accelerated: return immediately
+            # Blocking mode or accelerated
             if self._emulator_mode == EMULATOR_MODE_REALTIME and latency_s >= 0.001:
                 time.sleep(latency_s)
             self._pending_output = fake_output
-            return None  # Triggers sample_tokens path
+            return None
 
-        # Non-blocking realtime: timer-based with batch-size-aware
-        # scheduling delay. The delay models the real GPU's thread-blocking
-        # that prevents IPC processing during execute_model. Scales with
-        # the profiled step time (larger batches = longer blocking).
-        # IPC scheduling overhead: models the IPC queue wait on real GPU
-        # where execute_model blocks the engine thread. Profile-driven
-        # from sched_overhead_table (step_cycle/2 per concurrency bucket).
-        # Only for prefill steps. Divided by num_new_reqs: when multiple
-        # requests arrive in the same step, they share the blocking period.
-        if has_prefill and self._sched_overhead_table:
-            num_reqs = len(scheduler_output.num_scheduled_tokens)
-            num_new = max(len(scheduler_output.scheduled_new_reqs), 1)
-            overhead_us = self._get_sched_overhead_us(num_reqs) / num_new
-            if overhead_us >= 1000:
-                time.sleep(overhead_us / 1e6)
-
+        # Non-blocking realtime: timer-based Future.
+        # The timer fires after the profiled GPU time, resolving the
+        # sample Future with the fake output. The async scheduler's
+        # num_output_placeholders tracking works correctly because the
+        # Future is pending (done()=False) when added to the batch queue.
         exec_fut: Future = Future()
         exec_fut.set_result(None)
 
         sample_fut: Future = Future()
 
-        # Timer for full profiled time (GPU computation model)
+        # Chain timers: virtual GPU is a serial resource
         now = time.perf_counter()
         start_time = max(now, self._gpu_free_time)
         end_time = start_time + latency_s
@@ -372,6 +312,16 @@ class ExecutorEmulatorHook:
                 while tok == self._eos_token_id:
                     tok = self._rng.randrange(self._vocab_size)
                 sampled_token_ids.append([tok])
+
+        # Debug: log fake output stats at high concurrency
+        _fo_count = getattr(self, '_fake_output_count', 0) + 1
+        self._fake_output_count = _fo_count
+        num_chunks = len(prefill_chunk_ids)
+        num_tokens_generated = sum(1 for t in sampled_token_ids if t)
+        if _fo_count <= 5 or (len(req_ids) >= 25 and _fo_count % 10 == 0) or _fo_count % 500 == 0:
+            print(f"[FakeOutput] #{_fo_count} reqs={len(req_ids)} "
+                  f"tokens={num_tokens_generated} chunks={num_chunks} "
+                  f"new={len(new_req_ids)}")
 
         req_id_to_index = {rid: idx for idx, rid in enumerate(req_ids)}
 

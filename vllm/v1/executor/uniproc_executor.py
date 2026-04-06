@@ -137,8 +137,9 @@ class UniProcExecutor(Executor):
     def sample_tokens(  # type: ignore[override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        # Emulator: sample_tokens returns a Future that waits for the
-        # execute_model timer to fire, then returns the fake output.
+        # Emulator: return the pending timer Future from execute_model.
+        # The Future resolves after the profiled GPU time, keeping the
+        # async scheduler's num_output_placeholders tracking correct.
         emu_hook = getattr(self, '_emulator_executor_hook', None)
         if emu_hook is not None and emu_hook.is_enabled and emu_hook.has_pending_future():
             if non_block:
