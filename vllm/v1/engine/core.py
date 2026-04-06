@@ -82,6 +82,107 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
+class _TTFTTracer:
+    """Traces per-request TTFT breakdown within the EngineCore.
+
+    Tracks timing at key points:
+    - t_arrive: request enters EngineCore (from IPC queue)
+    - t_scheduled: request first appears in a scheduler output (prefill scheduled)
+    - t_output: first output token produced for the request
+
+    EngineCore TTFT = t_output - t_arrive
+    Scheduling wait = t_scheduled - t_arrive (waiting for engine to schedule)
+    Execution time = t_output - t_scheduled (GPU + output processing)
+
+    The scheduling and output events may happen in DIFFERENT step_fn calls
+    (due to batch queue pipelining), so they are tracked independently.
+
+    Enabled by VLLM_EMULATOR_TRACE_TTFT=1.
+    """
+
+    def __init__(self):
+        self._arrival_times: dict[str, float] = {}
+        self._scheduled_times: dict[str, float] = {}
+        self._first_output: set[str] = set()
+        self._count = 0
+        self._log_interval = 20  # Log summary every N requests
+        self._ttft_samples: list[dict] = []
+        self._step_count = 0
+
+    def on_request_arrive(self, req_id: str):
+        """Called when request enters EngineCore from IPC queue."""
+        self._arrival_times[req_id] = time.perf_counter()
+
+    def on_pre_step(self, batch_queue_depth: int):
+        """Called before step_fn."""
+        self._pre_step_time = time.perf_counter()
+        self._pre_step_queue_depth = batch_queue_depth
+        self._step_count += 1
+
+    def on_post_step(self, scheduler_output, outputs):
+        """Called after step_fn produces output (or None for pipelined steps)."""
+        t_now = time.perf_counter()
+
+        # Track scheduling: record when each new request first gets scheduled
+        if scheduler_output is not None:
+            for req in scheduler_output.scheduled_new_reqs:
+                rid = req.req_id
+                if rid not in self._scheduled_times and rid in self._arrival_times:
+                    self._scheduled_times[rid] = self._pre_step_time
+
+        # Track first output: scan all output request_ids
+        if not outputs or not isinstance(outputs, dict):
+            return
+
+        for _client_idx, engine_outputs in outputs.items():
+            if not hasattr(engine_outputs, 'outputs'):
+                continue
+            for out in engine_outputs.outputs:
+                rid = out.request_id
+                if rid not in self._first_output:
+                    self._first_output.add(rid)
+                    if rid in self._arrival_times or rid in self._scheduled_times:
+                        t_arrive = self._arrival_times.pop(rid, t_now)
+                        t_sched = self._scheduled_times.pop(rid, t_now)
+
+                        ttft_ms = (t_now - t_arrive) * 1000
+                        sched_delay_ms = (t_sched - t_arrive) * 1000
+                        exec_ms = (t_now - t_sched) * 1000
+                        queue_depth = getattr(self, '_pre_step_queue_depth', 0)
+
+                        self._count += 1
+                        num_reqs = 0
+                        if scheduler_output is not None:
+                            num_reqs = len(scheduler_output.num_scheduled_tokens)
+
+                        self._ttft_samples.append({
+                            "ttft_ms": ttft_ms,
+                            "sched_delay_ms": sched_delay_ms,
+                            "exec_ms": exec_ms,
+                            "num_reqs": num_reqs,
+                            "queue_depth": queue_depth,
+                        })
+
+                        if self._count <= 20 or self._count % self._log_interval == 0:
+                            print(f"[TTFT-TRACE] #{self._count} req={rid[:12]} "
+                                  f"ttft={ttft_ms:.1f}ms "
+                                  f"(wait={sched_delay_ms:.1f}ms + "
+                                  f"exec={exec_ms:.1f}ms) "
+                                  f"num_reqs={num_reqs} "
+                                  f"qdepth={queue_depth} "
+                                  f"step={self._step_count}")
+
+                        # Periodic summary
+                        if self._count > 0 and self._count % self._log_interval == 0:
+                            recent = self._ttft_samples[-self._log_interval:]
+                            avg_ttft = sum(s["ttft_ms"] for s in recent) / len(recent)
+                            avg_sched = sum(s["sched_delay_ms"] for s in recent) / len(recent)
+                            avg_exec = sum(s["exec_ms"] for s in recent) / len(recent)
+                            print(f"[TTFT-TRACE] Summary (last {len(recent)}): "
+                                  f"avg_ttft={avg_ttft:.1f}ms "
+                                  f"(wait={avg_sched:.1f}ms + exec={avg_exec:.1f}ms)")
+
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -1146,6 +1247,12 @@ class EngineCoreProc(EngineCore):
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
+        # TTFT tracer: tracks per-request timing through the engine
+        if os.environ.get("VLLM_EMULATOR_TRACE_TTFT", "").lower() in ("1", "true"):
+            self._ttft_tracer = _TTFTTracer()
+        else:
+            self._ttft_tracer = None
+
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
@@ -1194,8 +1301,21 @@ class EngineCoreProc(EngineCore):
         if _step_tracer is not None:
             _step_t0 = time.perf_counter()
 
+        # TTFT trace: record batch queue depth before step
+        tracer = getattr(self, '_ttft_tracer', None)
+        if tracer is not None:
+            tracer.on_pre_step(
+                batch_queue_depth=len(self.batch_queue) if self.batch_queue is not None else 0)
+
         # Step the engine core.
         outputs, model_executed = self.step_fn()
+
+        # TTFT trace: track scheduling (even for pipelined steps with no output)
+        # and first output per request
+        if tracer is not None:
+            so = getattr(self, '_last_scheduler_output', None)
+            tracer.on_post_step(so, outputs)
+
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
@@ -1280,6 +1400,10 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             if self._reject_add_in_shutdown(req):
                 return
+            # TTFT trace: mark when request enters EngineCore
+            tracer = getattr(self, '_ttft_tracer', None)
+            if tracer is not None:
+                tracer.on_request_arrive(req.request_id)
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
