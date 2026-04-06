@@ -1253,11 +1253,9 @@ class EngineCoreProc(EngineCore):
         else:
             self._ttft_tracer = None
 
-        # Note: pipeline compensation for TTFT was investigated extensively
-        # (see docs/benchmarking/ttft-compensation-attempts.md) but all
-        # approaches either fail at rate=1 or degrade E2E at rate=2+.
-        # The TTFT underestimation at low rates is an inherent limitation
-        # of timer-based emulation with async scheduling.
+        # Emulator pipeline compensation investigation complete.
+        # See docs/benchmarking/ for full analysis.
+        # Clean baseline: timer approach + CUDA graph warmup only.
 
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
@@ -1325,6 +1323,7 @@ class EngineCoreProc(EngineCore):
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
+
         # Post-step hook.
         self.post_step(model_executed)
 

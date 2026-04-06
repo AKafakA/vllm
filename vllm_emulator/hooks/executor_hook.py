@@ -291,15 +291,6 @@ class ExecutorEmulatorHook:
         # Chain timers: virtual GPU is a serial resource
         now = time.perf_counter()
 
-        # Pipeline compensation (Proposal 2b): if prior GPU work is in flight
-        # (_gpu_free_time > now) and this is a prefill step, add one decode
-        # step cycle as compensation. On real GPU, the new request waits for
-        # the current GPU step to finish before being scheduled. With our
-        # timer, the engine picks it up immediately. We compensate by adding
-        # one step cycle (the time of the step the request would have waited
-        # for). The trigger (_gpu_free_time > now) has no false positives
-        # (idle engine: no compensation) or false negatives (single prefill
-        # with prior decode pending: compensates correctly).
         start_time = max(now, self._gpu_free_time)
         end_time = start_time + latency_s
         self._gpu_free_time = end_time
