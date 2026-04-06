@@ -75,7 +75,7 @@ try:
 except FileNotFoundError:
     pass
 
-# Compute emulator calibration parameters from trace data
+# Compute emulator calibration parameters from trace + bench results
 # 1. CUDA graph shape warmup: first-encounter overhead per padded batch size
 CAPTURE_SIZES = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 160, 192,
                  224, 256, 320, 384, 448, 512, 640, 768, 896, 1024]
@@ -102,13 +102,21 @@ for shape, vals in shape_records.items():
 avg_cuda_warmup_us = statistics.median(shape_overheads) if shape_overheads else 0
 print(f"\n  cuda_graph_warmup_us: {avg_cuda_warmup_us:.0f} (from {len(shape_overheads)} shapes)")
 
-# 2. Scheduling factor and decode ratio
-# These are software-architecture-dependent (vLLM engine loop structure)
-# Default values validated on vLLM v0.18 UniProcExecutor
-sched_factor = 1.5
-decode_sched_ratio = 0.1
-print(f"  sched_factor: {sched_factor}")
-print(f"  decode_sched_ratio: {decode_sched_ratio}")
+# 2. IPC scheduling overhead: directly measured per concurrent request count.
+# Loaded from ipc_overhead.json produced by profile_ipc_overhead.py.
+# Each entry: {num_reqs: N, overhead_us: X} measured with N-1 background
+# requests in flight + 1 measurement request.
+import os
+ipc_overhead_path = os.path.join(os.path.dirname(output_path), "ipc_overhead.json")
+sched_overhead_table = []
+if os.path.exists(ipc_overhead_path):
+    sched_overhead_table = json.load(open(ipc_overhead_path))
+    print(f"\n  Loaded IPC overhead table: {len(sched_overhead_table)} entries")
+    for e in sched_overhead_table:
+        if e["num_reqs"] in [1, 2, 3, 5, 10, 20, 30, 50]:
+            print(f"    N={e['num_reqs']:3d}: overhead={e['overhead_us']/1000:.1f}ms")
+else:
+    print(f"\n  WARNING: {ipc_overhead_path} not found. Run profile_ipc_sweep.sh first.")
 
 profile = {
     "version": "1.0",
@@ -122,8 +130,7 @@ profile = {
     "decode_forward_pass": sorted(decode_fp, key=lambda e: e["total_tokens"]),
     # Emulator calibration parameters (auto-computed from trace)
     "cuda_graph_warmup_us": round(avg_cuda_warmup_us, 0),
-    "sched_factor": sched_factor,
-    "decode_sched_ratio": decode_sched_ratio,
+    "sched_overhead_table": sched_overhead_table,
 }
 json.dump(profile, open(output_path, "w"), indent=2)
 

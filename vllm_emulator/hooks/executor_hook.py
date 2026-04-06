@@ -98,99 +98,75 @@ class ExecutorEmulatorHook:
         try:
             profile_pack = load_profile_pack(profile_path)
             self._oracle = create_oracle_from_profile_pack(profile_pack)
-
-            # Decode scheduling ratio: how much of the prefill sched delay
-            # applies to decode steps. From profile or env, default 0.1.
-            # This is hardware/software-dependent and should be profiled.
-            self._decode_sched_ratio = float(
-                os.environ.get("VLLM_EMULATOR_DECODE_SCHED_RATIO",
-                               str(profile_pack.get("decode_sched_ratio", 0.1))))
             self._enabled = True
-
-            # Auto-derive scheduling delay from profile:
-            # On real GPU, execute_model blocks the engine thread, preventing
-            # IPC processing. New requests wait ~half a step cycle before being
-            # picked up. The timer approach doesn't block, giving the emulator
-            # an artificial IPC advantage. We compensate by sleeping for
-            # avg_step_time * sched_factor before each timer.
-            sched_delay_env = os.environ.get("VLLM_EMULATOR_SCHED_DELAY_US")
-            if sched_delay_env is not None:
-                self._sched_delay_us = float(sched_delay_env)
-            else:
-                self._sched_delay_us = self._compute_sched_delay(profile_pack)
 
             # CUDA graph warmup: from profile or env
             if self._cuda_graph_warmup_us == 0:
                 self._cuda_graph_warmup_us = float(
                     profile_pack.get("cuda_graph_warmup_us", 0))
 
+            # IPC scheduling overhead table: profile-driven, no manual tuning.
+            # On real GPU, execute_model blocks the engine thread. New requests
+            # wait in the IPC queue for avg = step_cycle / 2 (PASTA property).
+            # The table maps num_concurrent_reqs → overhead_us, computed from
+            # the step-cycle trace by the profile builder.
+            self._sched_overhead_table = profile_pack.get(
+                "sched_overhead_table", [])
+
+            overhead_summary = ""
+            if self._sched_overhead_table:
+                # Show a few key entries from the table
+                show_n = [1, 3, 5, 10, 20, 50]
+                parts = []
+                for entry in self._sched_overhead_table:
+                    n = entry.get("num_reqs", 0)
+                    if n in show_n:
+                        parts.append(f"N{n}:{entry['overhead_us']/1000:.0f}ms")
+                overhead_summary = f"ipc_overhead=[{', '.join(parts)}] ({len(self._sched_overhead_table)} entries)"
+
             print(f"[ExecutorEmulatorHook] Enabled: mode={self._emulator_mode}, "
-                  f"sched_delay={self._sched_delay_us:.0f}us, "
-                  f"decode_sched_ratio={self._decode_sched_ratio:.2f}, "
-                  f"cuda_graph_warmup={self._cuda_graph_warmup_us:.0f}us")
+                  f"cuda_graph_warmup={self._cuda_graph_warmup_us:.0f}us, "
+                  f"{overhead_summary}")
         except Exception as e:
             print(f"[ExecutorEmulatorHook] Failed to initialize: {e}")
 
-    def _compute_sched_delay(self, profile_pack: dict) -> float:
-        """Compute scheduling delay from profile's average decode step time.
+    def _get_sched_overhead_us(self, num_reqs: int) -> float:
+        """Look up IPC scheduling overhead from directly measured table.
 
-        On real GPU with UniProcExecutor, execute_model blocks the engine
-        thread for the full step duration. New requests arriving during
-        this block wait in the IPC queue. Average wait ≈ step_time / 2.
+        The table is produced by profile_ipc_overhead.py which measures
+        real TTFT at each concurrency N=1..50 (N-1 background requests
+        in flight + 1 measurement request). Overhead = TTFT - prefill_step.
 
-        We use the decode_forward_pass profile at low total_tokens (tt=1-4)
-        as representative of the step time at low concurrency (rate=1).
-        A scaling factor of 0.5 converts step_time to average IPC wait.
+        Direct lookup by num_reqs. No interpolation needed since every
+        integer N is measured.
         """
-        decode_fwd = profile_pack.get("decode_forward_pass", [])
-        if not decode_fwd:
-            decode_fwd = profile_pack.get("forward_pass", [])
-
-        # Use low-tt entries (typical at rate=1 with few concurrent requests)
-        low_tt_latencies = [
-            e["latency_us"] for e in decode_fwd
-            if e["total_tokens"] <= 4
-        ]
-        if not low_tt_latencies:
+        if not self._sched_overhead_table:
             return 0.0
 
-        avg_step_us = sum(low_tt_latencies) / len(low_tt_latencies)
-        self._avg_step_latency_us = avg_step_us  # Store for batch-size scaling
-        # Factor from profile or default. Prefill-weighted (decode gets reduced ratio).
-        sched_factor = float(profile_pack.get("sched_factor", 1.5))
-        return avg_step_us * sched_factor
+        table = self._sched_overhead_table
 
-    def _get_sched_delay_s(
-        self, step_latency_us: float, has_prefill: bool
-    ) -> float:
-        """Compute scheduling delay for this step.
+        # Direct lookup by num_reqs field
+        for entry in table:
+            if entry.get("num_reqs") == num_reqs:
+                return entry.get("overhead_us", 0)
 
-        Models IPC blocking: on real GPU, execute_model blocks the engine
-        thread, preventing new request pickup from IPC queue. This delay
-        mainly affects TTFT (new requests waiting to be scheduled).
+        # Nearest match if exact not found
+        if num_reqs < table[0].get("num_reqs", 1):
+            return table[0].get("overhead_us", 0)
+        if num_reqs > table[-1].get("num_reqs", 50):
+            return table[-1].get("overhead_us", 0)
 
-        For prefill steps (new request arriving): full delay — models the
-        IPC wait time before the request gets its first step.
-        For decode-only steps: minimal delay — ongoing requests don't
-        experience IPC wait (they're already scheduled).
+        # Linear interpolation between nearest entries
+        for i in range(len(table) - 1):
+            n_lo = table[i].get("num_reqs", i + 1)
+            n_hi = table[i + 1].get("num_reqs", i + 2)
+            if n_lo <= num_reqs <= n_hi:
+                ratio = (num_reqs - n_lo) / max(n_hi - n_lo, 1)
+                o_lo = table[i].get("overhead_us", 0)
+                o_hi = table[i + 1].get("overhead_us", 0)
+                return o_lo + ratio * (o_hi - o_lo)
 
-        The delay scales with step latency (batch-size-aware).
-        """
-        if self._sched_delay_us <= 0:
-            return 0.0
-
-        # Scale by ratio of current step latency to average
-        scale = 1.0
-        if hasattr(self, '_avg_step_latency_us') and self._avg_step_latency_us > 0:
-            scale = step_latency_us / self._avg_step_latency_us
-
-        if has_prefill:
-            # Full delay for prefill: new request waited in IPC queue
-            return self._sched_delay_us * scale / 1e6
-        else:
-            # Reduced delay for decode: ongoing requests don't wait in IPC.
-            # Ratio from profile (decode_sched_ratio), defaults to 0.1.
-            return self._sched_delay_us * scale * self._decode_sched_ratio / 1e6
+        return table[-1].get("overhead_us", 0)
 
     def _get_padded_batch_size(self, total_tokens: int) -> int:
         """Round total_tokens up to the nearest CUDA graph capture size."""
@@ -318,9 +294,17 @@ class ExecutorEmulatorHook:
         # scheduling delay. The delay models the real GPU's thread-blocking
         # that prevents IPC processing during execute_model. Scales with
         # the profiled step time (larger batches = longer blocking).
-        sched_delay_s = self._get_sched_delay_s(latency_us, has_prefill)
-        if sched_delay_s >= 0.001:
-            time.sleep(sched_delay_s)
+        # IPC scheduling overhead: models the IPC queue wait on real GPU
+        # where execute_model blocks the engine thread. Profile-driven
+        # from sched_overhead_table (step_cycle/2 per concurrency bucket).
+        # Only for prefill steps. Divided by num_new_reqs: when multiple
+        # requests arrive in the same step, they share the blocking period.
+        if has_prefill and self._sched_overhead_table:
+            num_reqs = len(scheduler_output.num_scheduled_tokens)
+            num_new = max(len(scheduler_output.scheduled_new_reqs), 1)
+            overhead_us = self._get_sched_overhead_us(num_reqs) / num_new
+            if overhead_us >= 1000:
+                time.sleep(overhead_us / 1e6)
 
         exec_fut: Future = Future()
         exec_fut.set_result(None)
