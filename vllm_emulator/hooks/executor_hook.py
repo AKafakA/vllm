@@ -105,10 +105,13 @@ class ExecutorEmulatorHook:
             self._oracle = create_oracle_from_profile_pack(profile_pack)
             self._enabled = True
 
-            # CUDA graph warmup: from profile or env
-            if self._cuda_graph_warmup_us == 0:
-                self._cuda_graph_warmup_us = float(
-                    profile_pack.get("cuda_graph_warmup_us", 0))
+            # CUDA graph warmup: disabled by default. Real GPU pre-compiles
+            # all graphs at startup, and adequate warmup (200 prompts) ensures
+            # no cold-start during benchmarking. The warmup model was adding
+            # false overhead (+44ms per new shape) that doesn't exist on real
+            # GPU after warmup. Enable via VLLM_EMULATOR_CUDA_GRAPH_WARMUP_US
+            # only for cold-start analysis.
+            # (Previously loaded from profile: profile_pack.get("cuda_graph_warmup_us"))
 
             # Pipeline compensation: avg decode step cycle from profile.
             # Added to prefill timers when prior GPU work is in flight,

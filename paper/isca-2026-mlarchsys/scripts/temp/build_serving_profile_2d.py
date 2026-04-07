@@ -37,7 +37,8 @@ for r in records:
         decode_by_tt[tt].append(r["step_cycle_us"])
 
 def build_section(by_tt, label):
-    section = []
+    # First pass: compute raw medians
+    raw_medians = {}
     for tt in sorted(by_tt):
         lats = by_tt[tt]
         if len(lats) < 2:
@@ -45,11 +46,34 @@ def build_section(by_tt, label):
         med = statistics.median(lats)
         filtered = [v for v in lats if v > 5000 and v < med * 3]
         if len(filtered) >= 2:
-            section.append({
-                "total_tokens": tt,
-                "latency_us": round(statistics.median(filtered), 1),
-                "num_samples": len(filtered),
-            })
+            raw_medians[tt] = statistics.median(filtered)
+
+    # Second pass: cross-reference with neighbors to detect outlier buckets.
+    # A bucket's median should be within 3x of its nearest neighbors.
+    # This catches cold-start contamination in sparse buckets (e.g., tt=256
+    # having 78ms when tt=258 has 17ms — the 256 bucket is an outlier).
+    section = []
+    sorted_tts = sorted(raw_medians.keys())
+    for i, tt in enumerate(sorted_tts):
+        med = raw_medians[tt]
+        # Find nearest neighbors within ±10 tt
+        neighbors = [raw_medians[t] for t in sorted_tts
+                     if abs(t - tt) <= 10 and t != tt]
+        if neighbors:
+            neighbor_med = statistics.median(neighbors)
+            if med > neighbor_med * 3:
+                # This bucket is >3x its neighbors — likely cold-start outlier
+                print(f"    WARNING: {label} tt={tt} median={med/1000:.1f}ms "
+                      f"is {med/neighbor_med:.1f}x neighbors ({neighbor_med/1000:.1f}ms), "
+                      f"replacing with neighbor median")
+                med = neighbor_med
+
+        lats = by_tt[tt]
+        section.append({
+            "total_tokens": tt,
+            "latency_us": round(med, 1),
+            "num_samples": len(lats),
+        })
     print(f"  {label}: {len(section)} buckets")
     return section
 

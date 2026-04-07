@@ -1,48 +1,30 @@
-"""Profile IPC scheduling overhead as a function of concurrent requests.
+"""Two-pass IPC overhead profiling: measures the timer pipelining advantage.
 
-For each N=1..max_n:
-  1. Start N-1 background requests (long output, keep engine busy)
-  2. Send 1 measurement request via streaming
-  3. Measure TTFT of the measurement request
-  4. IPC_overhead(N) = measured_TTFT - profiled_prefill_step_time
+Pass 1: N-sweep on REAL GPU → real_TTFT(N) for N=1..max_n
+Pass 2: N-sweep on EMULATOR (same profile, no IPC overhead) → emu_TTFT(N)
+Result: overhead(N) = max(0, real_TTFT(N) - emu_TTFT(N))
 
-This measures the real IPC overhead at steady-state concurrency N,
-not burst arrival overhead.
+This captures the EXACT timer pipelining advantage at each concurrency
+level. Rate-independent, profile once, works at any dynamic workload.
 
-Output: JSON array of {num_reqs, mean_ttft_us, overhead_us}.
 Usage:
-    python3 profile_ipc_overhead.py <port> <model> <profile_path> <output_path> [max_n]
+    # Pass 1: real GPU server running on PORT
+    python3 profile_ipc_overhead.py --pass1 --port 8100 --model MODEL --output real_ttft.json
+
+    # Pass 2: emulator server running on PORT (with initial profile, no IPC overhead)
+    python3 profile_ipc_overhead.py --pass2 --port 8100 --model MODEL --output emu_ttft.json
+
+    # Compute delta:
+    python3 profile_ipc_overhead.py --compute --real real_ttft.json --emu emu_ttft.json --output ipc_overhead.json
 """
+import argparse
 import json
 import requests
-import sys
 import threading
 import time
 
-port = int(sys.argv[1])
-model = sys.argv[2]
-profile_path = sys.argv[3]
-output_path = sys.argv[4]
-max_n = int(sys.argv[5]) if len(sys.argv) > 5 else 50
 
-base_url = f"http://localhost:{port}"
-
-# Get profiled prefill step time at tt≈256
-profile = json.load(open(profile_path))
-prefill_step_us = 0
-for section in ["prefill_forward_pass", "forward_pass"]:
-    for e in profile.get(section, []):
-        if 250 <= e["total_tokens"] <= 270:
-            prefill_step_us = e["latency_us"]
-            break
-    if prefill_step_us > 0:
-        break
-
-print(f"Profiled prefill step: {prefill_step_us/1000:.1f}ms")
-print(f"Sweeping N=1..{max_n}")
-
-
-def send_background_request():
+def send_background_request(base_url, model):
     """Send a request to keep the engine busy (same workload as benchmark)."""
     try:
         requests.post(
@@ -55,7 +37,7 @@ def send_background_request():
         pass
 
 
-def measure_ttft(prompt_words=40):
+def measure_ttft(base_url, model, prompt_words=40):
     """Send a streaming request and measure TTFT in microseconds."""
     prompt = "measurement " * prompt_words
     t0 = time.perf_counter()
@@ -75,54 +57,109 @@ def measure_ttft(prompt_words=40):
     return -1
 
 
-results = []
-NUM_MEASUREMENTS = 15  # More samples for stable median
+def run_nsweep(base_url, model, max_n, num_measurements=15):
+    """Run N-sweep: for each N, start N-1 background, measure 1 TTFT."""
+    results = []
 
-for n in range(1, max_n + 1):
-    # Start N-1 background requests staggered over time
-    # to simulate different lifecycle stages (like real serving)
-    bg_threads = []
-    for i in range(n - 1):
-        t = threading.Thread(target=send_background_request)
-        t.start()
-        bg_threads.append(t)
-        time.sleep(0.3)  # Stagger: requests at different decode stages
+    for n in range(1, max_n + 1):
+        # Start N-1 background requests staggered over time
+        bg_threads = []
+        for i in range(n - 1):
+            t = threading.Thread(target=send_background_request,
+                                 args=(base_url, model))
+            t.start()
+            bg_threads.append(t)
+            time.sleep(0.3)
 
-    # Wait for background requests to reach steady-state decode
-    # At 256 input tokens, prefill takes ~20ms. Decode starts immediately.
-    # Wait 3s so background requests are deep in decode (not prefill).
-    if n > 1:
-        time.sleep(3.0)
+        # Wait for background to reach steady-state decode
+        if n > 1:
+            time.sleep(3.0)
 
-    # Measure TTFT spread over time to capture different engine states
-    ttft_samples = []
-    for _ in range(NUM_MEASUREMENTS):
-        ttft_us = measure_ttft()
-        if ttft_us > 0:
-            ttft_samples.append(ttft_us)
-        time.sleep(0.3)  # Spread measurements across engine cycle states
+        # Measure TTFT spread over time
+        ttft_samples = []
+        for _ in range(num_measurements):
+            ttft_us = measure_ttft(base_url, model)
+            if ttft_us > 0:
+                ttft_samples.append(ttft_us)
+            time.sleep(0.3)
 
-    # Wait for background to finish
-    for t in bg_threads:
-        t.join(timeout=120)
+        # Wait for background to finish
+        for t in bg_threads:
+            t.join(timeout=120)
 
-    if ttft_samples:
-        ttft_samples.sort()
-        median_ttft_us = ttft_samples[len(ttft_samples) // 2]
-        overhead_us = max(0, median_ttft_us - prefill_step_us)
+        if ttft_samples:
+            ttft_samples.sort()
+            median_ttft_us = ttft_samples[len(ttft_samples) // 2]
+            results.append({
+                "num_reqs": n,
+                "median_ttft_us": round(median_ttft_us, 0),
+                "num_samples": len(ttft_samples),
+            })
+            print(f"  N={n:3d}: ttft={median_ttft_us/1000:.1f}ms  "
+                  f"(n={len(ttft_samples)}, "
+                  f"p25={ttft_samples[len(ttft_samples)//4]/1000:.1f}ms, "
+                  f"p75={ttft_samples[3*len(ttft_samples)//4]/1000:.1f}ms)")
+        else:
+            print(f"  N={n:3d}: FAILED")
+
+    return results
+
+
+def compute_overhead(real_path, emu_path):
+    """Compute overhead(N) = max(0, real_TTFT(N) - emu_TTFT(N))."""
+    real_data = json.load(open(real_path))
+    emu_data = json.load(open(emu_path))
+
+    # Build lookup by num_reqs
+    emu_by_n = {e["num_reqs"]: e["median_ttft_us"] for e in emu_data}
+
+    results = []
+    for r in real_data:
+        n = r["num_reqs"]
+        real_ttft = r["median_ttft_us"]
+        emu_ttft = emu_by_n.get(n, real_ttft)  # Default: no overhead
+        overhead = max(0, real_ttft - emu_ttft)
         results.append({
             "num_reqs": n,
-            "median_ttft_us": round(median_ttft_us, 0),
-            "overhead_us": round(overhead_us, 0),
-            "num_samples": len(ttft_samples),
+            "overhead_us": round(overhead, 0),
+            "real_ttft_us": round(real_ttft, 0),
+            "emu_ttft_us": round(emu_ttft, 0),
         })
-        print(f"  N={n:3d}: ttft={median_ttft_us/1000:.1f}ms  "
-              f"overhead={overhead_us/1000:.1f}ms  "
-              f"(n={len(ttft_samples)}, "
-              f"p25={ttft_samples[len(ttft_samples)//4]/1000:.1f}ms, "
-              f"p75={ttft_samples[3*len(ttft_samples)//4]/1000:.1f}ms)")
-    else:
-        print(f"  N={n:3d}: FAILED")
+        print(f"  N={n:3d}: real={real_ttft/1000:.1f}ms  "
+              f"emu={emu_ttft/1000:.1f}ms  "
+              f"overhead={overhead/1000:.1f}ms")
 
-json.dump(results, open(output_path, "w"), indent=2)
-print(f"\nSaved {len(results)} entries to {output_path}")
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pass1", action="store_true", help="Run N-sweep on real GPU")
+    parser.add_argument("--pass2", action="store_true", help="Run N-sweep on emulator")
+    parser.add_argument("--compute", action="store_true", help="Compute delta from pass1+pass2")
+    parser.add_argument("--port", type=int, default=8100)
+    parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--output", required=True, help="Output JSON path")
+    parser.add_argument("--real", help="Pass1 results (for --compute)")
+    parser.add_argument("--emu", help="Pass2 results (for --compute)")
+    parser.add_argument("--max-n", type=int, default=30, help="Max concurrent requests")
+    args = parser.parse_args()
+
+    if args.compute:
+        print("=== Computing IPC overhead (real - emu) ===")
+        results = compute_overhead(args.real, args.emu)
+        json.dump(results, open(args.output, "w"), indent=2)
+        print(f"\nSaved {len(results)} entries to {args.output}")
+        return
+
+    base_url = f"http://localhost:{args.port}"
+    label = "REAL GPU" if args.pass1 else "EMULATOR"
+    print(f"=== N-sweep on {label} (N=1..{args.max_n}) ===")
+
+    results = run_nsweep(base_url, args.model, args.max_n)
+    json.dump(results, open(args.output, "w"), indent=2)
+    print(f"\nSaved {len(results)} entries to {args.output}")
+
+
+if __name__ == "__main__":
+    main()

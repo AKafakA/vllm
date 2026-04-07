@@ -110,6 +110,11 @@ class EmulatorPlatform(Platform):
         return False
     
     @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        """Return fake SM count (108 for A100-like emulation)."""
+        return 108
+
+    @classmethod
     def support_static_graph_mode(cls) -> bool:
         """Static graph mode not supported in emulator."""
         return False
@@ -118,11 +123,13 @@ class EmulatorPlatform(Platform):
 def emulator_platform_plugin() -> str | None:
     """
     Platform plugin entry point.
-    Only activates when VLLM_EMULATOR_ENABLE_ORACLE is set,
-    so real GPU profiling/serving works normally when the
-    emulator package is installed but not enabled.
+    Only activates when BOTH VLLM_EMULATOR_ENABLE_ORACLE and
+    VLLM_EMULATOR_MOCK_CUDA are set. On machines with real GPU,
+    the executor hook approach uses the native CUDA platform —
+    the emulator platform is only needed for CPU-only (Path B).
     """
     import os
-    if os.environ.get("VLLM_EMULATOR_ENABLE_ORACLE", "").lower() in ("1", "true", "yes"):
+    if (os.environ.get("VLLM_EMULATOR_ENABLE_ORACLE", "").lower() in ("1", "true", "yes")
+            and os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true", "yes")):
         return "vllm_emulator.platform.EmulatorPlatform"
     return None
