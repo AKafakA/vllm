@@ -162,11 +162,38 @@ if os.path.exists(offline_trace_path):
 else:
     print(f"\n  No offline trace found at {offline_trace_path}")
 
+# Compute overhead_per_request_us for 2D oracle.
+# Uses linear regression: step_cycle = a + b*total_tokens + c*num_requests
+# The per-request overhead c captures host-side costs that scale with concurrency.
+overhead_per_request_us = 0.0
+try:
+    import numpy as np
+    # Use decode-only steps (no prefill noise)
+    decode_records = [r for r in records[200:] if r.get("num_new_reqs", 0) == 0
+                      and r.get("num_decode_seqs", 0) > 0]
+    if len(decode_records) >= 20:
+        X = np.array([[r["total_tokens"], r["num_decode_seqs"]] for r in decode_records])
+        y = np.array([r["step_cycle_us"] for r in decode_records])
+        # Add intercept: y = a + b*tt + c*n_reqs
+        X_aug = np.column_stack([np.ones(len(X)), X])
+        # Least squares fit
+        coeffs, _, _, _ = np.linalg.lstsq(X_aug, y, rcond=None)
+        intercept, coeff_tt, coeff_nreqs = coeffs
+        overhead_per_request_us = max(0, coeff_nreqs)  # clamp non-negative
+        print(f"\n  2D regression (decode-only, {len(decode_records)} records):")
+        print(f"    latency = {intercept/1000:.1f}ms + {coeff_tt/1000:.2f}ms*tt + {coeff_nreqs/1000:.2f}ms*n_reqs")
+        print(f"    overhead_per_request_us = {overhead_per_request_us:.0f} ({overhead_per_request_us/1000:.2f}ms)")
+    else:
+        print(f"\n  Not enough decode records for 2D regression ({len(decode_records)})")
+except Exception as e:
+    print(f"\n  2D regression failed: {e}")
+
 profile = {
     "version": "1.0",
     "gpu_model": gpu_model,
     "model_name": model_name,
     "profile_type": "serving_step_cycle_2d",
+    "overhead_per_request_us": round(overhead_per_request_us, 1),
     "prefill": [],
     "decode": [],
     "forward_pass": sorted(combined_fp, key=lambda e: e["total_tokens"]),

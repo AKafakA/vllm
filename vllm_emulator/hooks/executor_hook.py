@@ -222,22 +222,26 @@ class ExecutorEmulatorHook:
         total_tokens = scheduler_output.total_num_scheduled_tokens
         has_prefill = len(scheduler_output.scheduled_new_reqs) > 0
 
+        # Count decode requests for hybrid/2d modes
+        new_req_ids = {r.req_id for r in scheduler_output.scheduled_new_reqs}
+        num_decode = sum(
+            1 for rid in scheduler_output.num_scheduled_tokens
+            if rid not in new_req_ids
+        )
+        num_total_reqs = len(scheduler_output.num_scheduled_tokens)
+
         # 1. Estimate latency from profile
         latency_us = self._oracle.estimate_step_latency_us(
             total_tokens,
             has_prefill=has_prefill,
             profile_section=self._profile_usage,
+            num_requests=num_total_reqs,
+            oracle_mode=self._oracle_mode,
         )
 
-        # 2. Hybrid overhead: per-request host-side cost
-        # Models output dispatch, IPC, KV bookkeeping that scale with
-        # concurrent requests but aren't in the step-cycle profile.
-        if self._overhead_per_req_us > 0:
-            new_req_ids = {r.req_id for r in scheduler_output.scheduled_new_reqs}
-            num_decode = sum(
-                1 for rid in scheduler_output.num_scheduled_tokens
-                if rid not in new_req_ids
-            )
+        # 2. Hybrid overhead: per-request host-side cost (only in hybrid mode)
+        # In 2d mode, the oracle already includes per-request overhead.
+        if self._oracle_mode == "hybrid" and self._overhead_per_req_us > 0:
             latency_us += self._overhead_per_req_us * num_decode
 
         # 3. Scheduling compensation: when prior GPU work is in flight

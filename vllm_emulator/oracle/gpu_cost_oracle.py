@@ -147,6 +147,12 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             key=lambda s: s["total_tokens"],
         )
 
+        # 2D profile: per-request latency overhead from step-cycle data.
+        # Computed as slope of latency vs num_requests at similar total_tokens.
+        # Stored in profile as "overhead_per_request_us".
+        self._2d_overhead_per_req_us = float(
+            profile_pack.get("overhead_per_request_us", 0))
+
     @property
     def gpu_model(self) -> str:
         return self._gpu_model
@@ -248,14 +254,17 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
     def estimate_step_latency_us(
         self, total_tokens: int, avg_context_len: int = 0,
         has_prefill: bool = False, profile_section: str = "online",
+        num_requests: int = 0, oracle_mode: str = "step_cycle",
     ) -> float:
         """Estimate latency for one forward pass.
 
         Args:
             total_tokens: Total tokens in the batch
-            avg_context_len: Average context length (for 2D lookup)
+            avg_context_len: Average context length (for legacy 2D lookup)
             has_prefill: Whether batch contains new prefill requests
             profile_section: "online" or "offline" — selects profile data
+            num_requests: Number of requests in batch (for 2d mode)
+            oracle_mode: "step_cycle", "hybrid", or "2d"
 
         Profile selection:
           offline → offline_forward_pass (if available, else fall through)
@@ -265,6 +274,12 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         """
         if total_tokens <= 0:
             return 0.0
+
+        # 2D mode: 1D base + per-request overhead from regression
+        if oracle_mode == "2d" and self._2d_overhead_per_req_us > 0 and num_requests > 0:
+            # Get base latency from 1D profile (same as step_cycle mode)
+            base = self._estimate_1d(total_tokens, has_prefill, profile_section)
+            return base + self._2d_overhead_per_req_us * num_requests
 
         # Offline profile: step-cycles from LLM() path with CUDA graphs
         if profile_section == "offline" and self._offline_forward_pass:
@@ -303,6 +318,15 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         # Extrapolate using power-law from the combined profile
         return self._fwd_pw_a * (total_tokens ** self._fwd_pw_b)
+
+    def _estimate_1d(self, total_tokens: int, has_prefill: bool,
+                     profile_section: str) -> float:
+        """1D base latency estimation (no per-request overhead).
+        Used by both step_cycle mode directly and 2d mode as the base."""
+        return self.estimate_step_latency_us(
+            total_tokens, has_prefill=has_prefill,
+            profile_section=profile_section,
+            oracle_mode="step_cycle")  # force 1D to avoid recursion
 
     def _estimate_2d(self, total_tokens: int, avg_context_len: int) -> float:
         """Bilinear interpolation over the 2D forward_pass profile.
