@@ -1,15 +1,14 @@
 """Executor-level hook for emulator mode.
 
-Intercepts at the executor level (above worker) to return timer-based
-pending Futures that resolve after the profiled GPU time. Uses the
-async scheduler's pipelining (required for num_output_placeholders
-tracking) with pipeline compensation on prefill steps to match real
-GPU's TTFT behavior.
+Intercepts execute_model() at the executor level to return timer-based
+pending Futures that resolve after the profiled GPU time.
 
-Pipeline compensation: when prior emulated GPU work is in flight
-(_gpu_free_time > now), the prefill timer is extended by the remaining
-prior work time. This models the real GPU's thread-blocking that
-prevents the engine from picking up new requests during execution.
+Architecture:
+  - Path A (GPU host) or Path B (CPU-only): determined by platform
+  - Mode: realtime (sleep) or accelerated (no sleep)
+  - Usage: online or offline (determines profile section)
+  - Async engine: pending Future via threading.Timer (required by scheduler)
+  - Sync engine: blocking sleep + direct return
 """
 
 from __future__ import annotations
@@ -18,8 +17,7 @@ import os
 import threading
 import time
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any
-
+from typing import TYPE_CHECKING
 
 from vllm_emulator.oracle import BaseGpuCostOracle, create_oracle_from_profile_pack
 from vllm_emulator.profile.loader import load_profile_pack
@@ -28,58 +26,44 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.outputs import ModelRunnerOutput
 
-# Reuse env var names from gpu_hook
 ORACLE_ENABLED_ENV = "VLLM_EMULATOR_ENABLE_ORACLE"
 ORACLE_PROFILE_PATH_ENV = "VLLM_EMULATOR_PROFILE_PACK"
 ORACLE_MODE_ENV = "VLLM_EMULATOR_MODE"
-STEP_OVERHEAD_ENV = "VLLM_EMULATOR_STEP_OVERHEAD_US"
-DECODE_OVERHEAD_ENV = "VLLM_EMULATOR_DECODE_OVERHEAD_US"
 
 EMULATOR_MODE_REALTIME = "realtime"
 EMULATOR_MODE_ACCELERATED = "accelerated"
-_MODE_ALIASES = {"online": EMULATOR_MODE_REALTIME, "offline": EMULATOR_MODE_ACCELERATED}
+_MODE_ALIASES = {"online": EMULATOR_MODE_REALTIME}
 
 
 class ExecutorEmulatorHook:
-    """Executor-level emulator hook using timer-based pending Futures.
+    """Executor-level emulator hook.
 
-    When enabled, intercepts execute_model() at the executor level
-    and returns a pending Future that resolves after the profiled GPU
-    time via threading.Timer. Compatible with vLLM's async scheduler
-    (requires pending Futures for num_output_placeholders tracking).
+    Modes:
+      realtime: time.sleep() for predicted latency (wall-clock accurate)
+      accelerated: no sleep (fast simulation)
 
-    Pipeline compensation: prefill steps are extended when prior GPU
-    work is in flight, matching real GPU's sequential execution timing.
+    Async engine (non_block=True):
+      Returns pending Future via threading.Timer. Required by vLLM's
+      async scheduler — num_output_placeholders must be > 0 when the
+      next batch is scheduled. Resolved Future deadlocks.
+
+    Sync engine (non_block=False):
+      Blocking sleep + direct output return. No Future needed.
     """
-
-    # CUDA graph batch size padding (matches vLLM defaults)
-    # When total_tokens doesn't match a captured size, vLLM pads up.
-    # First time a new padded size is seen in a session, there's overhead
-    # from CUDA graph selection/warmup. We model this as extra latency.
-    CUDA_GRAPH_CAPTURE_SIZES = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128,
-                                 160, 192, 224, 256, 320, 384, 448, 512,
-                                 640, 768, 896, 1024]
 
     def __init__(self):
         self._oracle: BaseGpuCostOracle | None = None
         self._enabled = False
         self._emulator_mode = EMULATOR_MODE_REALTIME
-        self._step_overhead_us = 0.0
-        self._pending_output = None  # For sample_tokens
-        self._sample_future = None  # Future for sample_tokens to return
-        self._gpu_free_time = 0.0  # When the virtual GPU becomes free
+        self._profile_usage = "online"  # "online" or "offline"
+        self._sample_future: Future | None = None
+        self._gpu_free_time = 0.0  # Virtual GPU timeline for timer chaining
 
-        # CUDA graph shape warmup tracking
-        # First encounter of a padded batch shape adds overhead (~80-100ms)
-        # to model CUDA graph selection/warmup. This is critical for
-        # rate=1 accuracy where batch shapes change frequently.
-        self._seen_shapes: set[int] = set()
-        self._cuda_graph_warmup_us = 0.0  # Set from env or profile
-
-        # Fake output generation (simplified — reuses gpu_hook logic)
+        # Fake output generation
         self._rng = __import__("random").Random(42)
         self._vocab_size = 32000
         self._eos_token_id = 2
+        self._debug_count = 0
 
         self._initialize()
 
@@ -93,49 +77,55 @@ class ExecutorEmulatorHook:
 
         mode = os.environ.get(ORACLE_MODE_ENV, EMULATOR_MODE_REALTIME).lower()
         mode = _MODE_ALIASES.get(mode, mode)
+        if mode not in (EMULATOR_MODE_REALTIME, EMULATOR_MODE_ACCELERATED):
+            print(f"[ExecutorEmulatorHook] Unknown mode '{mode}', using realtime")
+            mode = EMULATOR_MODE_REALTIME
         self._emulator_mode = mode
 
-        self._step_overhead_us = float(os.environ.get(STEP_OVERHEAD_ENV, "0"))
-        self._decode_overhead_us = float(os.environ.get(DECODE_OVERHEAD_ENV, "0"))
-        self._cuda_graph_warmup_us = float(os.environ.get(
-            "VLLM_EMULATOR_CUDA_GRAPH_WARMUP_US", "0"))
+        # Profile usage: online vs offline (auto-detected or env override)
+        self._profile_usage = os.environ.get(
+            "VLLM_EMULATOR_PROFILE_USAGE", "online").lower()
+
+        # Oracle mode: step_cycle (default), hybrid, or 2d
+        self._oracle_mode = os.environ.get(
+            "VLLM_EMULATOR_ORACLE_MODE", "step_cycle").lower()
+
+        # Hybrid mode: per-request overhead added to step-cycle
+        # Models host-side costs (output dispatch, IPC, KV bookkeeping)
+        # that scale with concurrent requests and aren't in the profile.
+        # Calibrate: (real_TPOT - emu_TPOT) / avg_concurrent_reqs
+        self._overhead_per_req_us = float(os.environ.get(
+            "VLLM_EMULATOR_OVERHEAD_PER_REQ_US", "0"))
 
         try:
             profile_pack = load_profile_pack(profile_path)
             self._oracle = create_oracle_from_profile_pack(profile_pack)
             self._enabled = True
 
-            # CUDA graph warmup: disabled by default. Real GPU pre-compiles
-            # all graphs at startup, and adequate warmup (200 prompts) ensures
-            # no cold-start during benchmarking. The warmup model was adding
-            # false overhead (+44ms per new shape) that doesn't exist on real
-            # GPU after warmup. Enable via VLLM_EMULATOR_CUDA_GRAPH_WARMUP_US
-            # only for cold-start analysis.
-            # (Previously loaded from profile: profile_pack.get("cuda_graph_warmup_us"))
-
-            # Pipeline compensation: avg decode step cycle from profile.
-            # Added to prefill timers when prior GPU work is in flight,
-            # modeling the time a new request waits on real GPU.
-            self._pipeline_compensation_us = self._compute_pipeline_compensation(
+            # Pipeline scheduling compensation (profile-derived).
+            self._sched_compensation_us = self._compute_sched_compensation(
                 profile_pack)
 
+            # Auto-calibrate overhead_per_req from profile if not set manually
+            if self._oracle_mode == "hybrid" and self._overhead_per_req_us == 0:
+                self._overhead_per_req_us = self._calibrate_overhead_per_req(
+                    profile_pack)
+
             print(f"[ExecutorEmulatorHook] Enabled: mode={self._emulator_mode}, "
-                  f"cuda_graph_warmup={self._cuda_graph_warmup_us:.0f}us, "
-                  f"pipeline_comp={self._pipeline_compensation_us/1000:.1f}ms")
+                  f"oracle={self._oracle_mode}, usage={self._profile_usage}, "
+                  f"sched_comp={self._sched_compensation_us/1000:.1f}ms, "
+                  f"overhead/req={self._overhead_per_req_us/1000:.2f}ms")
         except Exception as e:
             print(f"[ExecutorEmulatorHook] Failed to initialize: {e}")
 
-    def _compute_pipeline_compensation(self, profile_pack: dict) -> float:
-        """Compute pipeline compensation from avg decode step cycle.
+    def _compute_sched_compensation(self, profile_pack: dict) -> float:
+        """Derive scheduling compensation from avg decode step-cycle.
 
-        On real GPU with async scheduling (batch_queue_size=2), a new
-        request must wait for the current GPU step to finish before
-        being scheduled. The timer approach skips this wait (pipelining).
-        We compensate by adding one decode step cycle to prefill timers
-        when prior GPU work is in flight.
+        On real GPU, a new request waits on average half a decode step
+        before being scheduled. This is the pipelining advantage the
+        emulator has over real GPU.
 
-        Uses the avg decode step at low total_tokens (tt=1-4), which
-        represents the typical step duration during low-rate serving.
+        Returns avg_decode_step_us / 2 (expected wait time).
         """
         decode_fwd = profile_pack.get("decode_forward_pass", [])
         if not decode_fwd:
@@ -147,37 +137,54 @@ class ExecutorEmulatorHook:
         if not low_tt:
             return 0.0
 
-        return sum(low_tt) / len(low_tt)
+        avg_step = sum(low_tt) / len(low_tt)
+        return avg_step / 2  # Half-step: average wait for mid-step arrival
 
-    def has_pending_future(self) -> bool:
-        return self._sample_future is not None
+    def _calibrate_overhead_per_req(self, profile_pack: dict) -> float:
+        """Auto-calibrate per-request overhead from profile data.
 
-    def get_sample_future(self) -> "Future":
-        """Return the pending timer Future for sample_tokens."""
-        fut = self._sample_future
-        self._sample_future = None
-        return fut
+        The overhead represents host-side costs (output dispatch, IPC,
+        KV bookkeeping) that scale with the number of concurrent requests
+        and are NOT captured in the step-cycle profile.
 
-    def _get_padded_batch_size(self, total_tokens: int) -> int:
-        """Round total_tokens up to the nearest CUDA graph capture size."""
-        for size in self.CUDA_GRAPH_CAPTURE_SIZES:
-            if size >= total_tokens:
-                return size
-        return total_tokens  # Beyond max capture size
-
-    def _get_shape_warmup_us(self, total_tokens: int) -> float:
-        """Return extra latency if this is a new batch shape.
-
-        Models CUDA graph selection/warmup overhead for the first time
-        a padded batch size is encountered in a session.
+        Estimated from the gap between step-cycle at high vs low
+        concurrency, normalized by request count difference.
         """
-        if self._cuda_graph_warmup_us <= 0:
+        decode_fwd = profile_pack.get("decode_forward_pass", [])
+        if len(decode_fwd) < 2:
             return 0.0
-        padded = self._get_padded_batch_size(total_tokens)
-        if padded in self._seen_shapes:
+
+        # Step-cycle at tt=1 (1 request): baseline cost
+        low = [e["latency_us"] for e in decode_fwd if e["total_tokens"] <= 2]
+        # Step-cycle at tt=5-10 (5-10 requests): higher concurrency
+        high = [e["latency_us"] for e in decode_fwd
+                if 5 <= e["total_tokens"] <= 10]
+
+        if not low or not high:
             return 0.0
-        self._seen_shapes.add(padded)
-        return self._cuda_graph_warmup_us
+
+        avg_low = sum(low) / len(low)
+        avg_high = sum(high) / len(high)
+
+        # Average tt for each group
+        avg_tt_low = sum(e["total_tokens"] for e in decode_fwd
+                         if e["total_tokens"] <= 2) / len(low)
+        avg_tt_high = sum(e["total_tokens"] for e in decode_fwd
+                          if 5 <= e["total_tokens"] <= 10) / len(high)
+
+        # Overhead per additional request
+        tt_diff = avg_tt_high - avg_tt_low
+        if tt_diff <= 0:
+            return 0.0
+
+        lat_diff = avg_high - avg_low
+        overhead = lat_diff / tt_diff  # us per additional token/request
+
+        # Clamp to reasonable range (0 to 500us per request)
+        overhead = max(0.0, min(overhead, 500.0))
+        return overhead
+
+    # --- Public API ---
 
     @property
     def is_enabled(self) -> bool:
@@ -186,156 +193,157 @@ class ExecutorEmulatorHook:
     def should_use_oracle(self, scheduler_output: "SchedulerOutput") -> bool:
         return self._enabled and scheduler_output.total_num_scheduled_tokens > 0
 
-    def has_pending_output(self) -> bool:
-        return self._pending_output is not None
+    def has_pending_future(self) -> bool:
+        return self._sample_future is not None
 
-    def get_pending_output(self):
-        output = self._pending_output
-        self._pending_output = None
-        return output
+    def get_sample_future(self) -> "Future":
+        fut = self._sample_future
+        self._sample_future = None
+        return fut
 
-
+    # --- Core ---
 
     def create_delayed_future(
         self,
         scheduler_output: "SchedulerOutput",
         non_block: bool = False,
     ) -> "Future | ModelRunnerOutput | None":
-        """Create a Future that resolves after predicted GPU time.
+        """Create output with predicted GPU latency.
+
+        Args:
+            scheduler_output: Current batch from scheduler
+            non_block: True = async engine (must return Future),
+                       False = sync engine (can return output directly)
 
         Returns:
-            If non_block: Future that resolves after predicted latency
-            If blocking: sleeps then returns output directly
+            Async engine: exec Future (resolved) + sample Future (pending/resolved)
+            Sync engine: None (output stored internally)
         """
         total_tokens = scheduler_output.total_num_scheduled_tokens
         has_prefill = len(scheduler_output.scheduled_new_reqs) > 0
+
+        # 1. Estimate latency from profile
         latency_us = self._oracle.estimate_step_latency_us(
-            total_tokens, has_prefill=has_prefill)
-        latency_us += self._step_overhead_us
+            total_tokens,
+            has_prefill=has_prefill,
+            profile_section=self._profile_usage,
+        )
 
-        # CUDA graph shape warmup: first encounter of a new padded
-        # batch size adds overhead (graph selection, cache miss, etc.)
-        shape_warmup_us = self._get_shape_warmup_us(total_tokens)
-        latency_us += shape_warmup_us
-
-        # Add prefill-specific overhead
-        prefill_overhead_us = float(os.environ.get(
-            "VLLM_EMULATOR_PREFILL_OVERHEAD_US", "0"))
-        if prefill_overhead_us > 0 and has_prefill:
-            latency_us += prefill_overhead_us
-
-        # Cold-start warmup ramp: first few prefills after server startup
-        # have elevated latency due to CUDA graph compilation/caching.
-        # Decays over the first N prefill steps.
-        if has_prefill:
-            cold_start_us = float(os.environ.get(
-                "VLLM_EMULATOR_COLD_START_US", "0"))
-            if cold_start_us > 0:
-                prefill_count = getattr(self, '_prefill_count', 0)
-                if prefill_count == 0:
-                    latency_us += cold_start_us  # First: full cold start
-                elif prefill_count == 1:
-                    latency_us += cold_start_us * 0.3  # Second: partial warmup
-                # Third+: no extra overhead (warm)
-                self._prefill_count = prefill_count + 1
-
-        # Add decode-specific overhead: accounts for output processing,
-        # sampling, and scheduling overhead that is cheaper with fake
-        # outputs than with real GPU outputs.
-        if self._decode_overhead_us > 0:
+        # 2. Hybrid overhead: per-request host-side cost
+        # Models output dispatch, IPC, KV bookkeeping that scale with
+        # concurrent requests but aren't in the step-cycle profile.
+        if self._overhead_per_req_us > 0:
             new_req_ids = {r.req_id for r in scheduler_output.scheduled_new_reqs}
             num_decode = sum(
                 1 for rid in scheduler_output.num_scheduled_tokens
                 if rid not in new_req_ids
             )
-            if num_decode > 0:
-                latency_us += self._decode_overhead_us
+            latency_us += self._overhead_per_req_us * num_decode
+
+        # 3. Scheduling compensation: when prior GPU work is in flight
+        # and this batch has new prefill requests, add half a decode
+        # step to model the wait time on real GPU.
+        # On real GPU, execute_model() blocks → new requests wait.
+        # The timer approach skips this wait (pipelining advantage).
+        if has_prefill and self._sched_compensation_us > 0:
+            now = time.perf_counter()
+            if self._gpu_free_time > now:
+                latency_us += self._sched_compensation_us
 
         latency_s = latency_us / 1e6
 
-        # Create fake output — never return None for non_block mode,
-        # as the engine core expects a Future, not None.
+        # 2. Create fake output
         fake_output = self._create_fake_output(scheduler_output)
         if fake_output is None:
             if non_block:
-                # Return a resolved Future(None) that the engine can handle
-                # via its empty-batch path
                 fut: Future = Future()
                 fut.set_result(None)
                 return fut
             return None
 
-        latency_s = latency_us / 1e6
+        # 3. Dispatch based on engine type
+        if not non_block:
+            return self._handle_sync(latency_s, fake_output)
+        else:
+            return self._handle_async(latency_s, fake_output,
+                                      total_tokens, scheduler_output)
 
-        if not non_block or self._emulator_mode == EMULATOR_MODE_ACCELERATED:
-            # Blocking mode or accelerated
-            if self._emulator_mode == EMULATOR_MODE_REALTIME and latency_s >= 0.001:
-                time.sleep(latency_s)
-            self._pending_output = fake_output
-            return None
+    def _handle_sync(self, latency_s: float, fake_output) -> None:
+        """Sync engine: blocking sleep + direct output."""
+        if self._emulator_mode == EMULATOR_MODE_REALTIME and latency_s >= 0.001:
+            time.sleep(latency_s)
+        # Store for caller to retrieve via has_pending_output/get_pending_output
+        self._pending_output = fake_output
+        return None
 
-        # Non-blocking realtime: timer-based Future with pipeline compensation.
-        # The async scheduler requires pending Futures (pipelining) to keep
-        # num_output_placeholders > 0. This pipelining gives the emulator an
-        # IPC scheduling advantage: the engine picks up new requests during
-        # the timer wait, while real GPU blocks the engine thread.
-        #
-        # Pipeline compensation (Proposal 2b): when prior emulated GPU work
-        # is still in flight (_gpu_free_time > now), add the remaining prior
-        # work time to the prefill timer. This models the real GPU behavior
-        # where a new request must wait for the current GPU step to finish
-        # before being scheduled. The trigger is hook-side only (no engine
-        # modification) and has no false positives/negatives.
+    def _handle_async(self, latency_s: float, fake_output,
+                      total_tokens: int,
+                      scheduler_output: "SchedulerOutput") -> "Future":
+        """Async engine: timer-based pending Future.
+
+        The async scheduler REQUIRES pending Futures to keep
+        num_output_placeholders > 0 for the next schedule() call.
+        Resolved Futures cause deadlock (num_new_tokens = 0).
+        """
         exec_fut: Future = Future()
         exec_fut.set_result(None)
 
         sample_fut: Future = Future()
 
-        # Chain timers: virtual GPU is a serial resource
-        now = time.perf_counter()
+        if self._emulator_mode == EMULATOR_MODE_REALTIME:
+            # Timer: pending Future resolves after profiled latency.
+            # Chain timers serially — virtual GPU is a serial resource.
+            now = time.perf_counter()
+            start_time = max(now, self._gpu_free_time)
+            end_time = start_time + latency_s
+            self._gpu_free_time = end_time
+            delay = end_time - now
 
-        start_time = max(now, self._gpu_free_time)
-        end_time = start_time + latency_s
-        self._gpu_free_time = end_time
-        delay = end_time - now
-
-        def _resolve():
-            sample_fut.set_result(fake_output)
-
-        if delay >= 0.001:
-            timer = threading.Timer(delay, _resolve)
-            timer.daemon = True
-            timer.start()
+            if delay >= 0.001:
+                timer = threading.Timer(delay,
+                                        lambda: sample_fut.set_result(fake_output))
+                timer.daemon = True
+                timer.start()
+            else:
+                sample_fut.set_result(fake_output)
         else:
-            _resolve()
+            # Accelerated: resolve immediately (no sleep, virtual time)
+            sample_fut.set_result(fake_output)
 
         self._sample_future = sample_fut
 
-        # Debug: log prediction
-        if hasattr(self, '_debug_count'):
-            self._debug_count += 1
-        else:
-            self._debug_count = 1
+        # Debug logging
+        self._debug_count += 1
         if self._debug_count <= 10 or self._debug_count % 100 == 0:
-            extra = f" shape_warmup={shape_warmup_us:.0f}us" if shape_warmup_us > 0 else ""
+            n_reqs = len(scheduler_output.num_scheduled_tokens)
+            n_new = len(scheduler_output.scheduled_new_reqs)
             print(f"[ExecutorHook] step={self._debug_count} tt={total_tokens} "
-                  f"latency={latency_us:.0f}us sleep={latency_s*1000:.1f}ms{extra}")
+                  f"reqs={n_reqs} new={n_new} "
+                  f"latency={latency_s*1000:.1f}ms")
 
         return exec_fut
+
+    # --- Output helpers ---
+
+    def has_pending_output(self) -> bool:
+        return getattr(self, '_pending_output', None) is not None
+
+    def get_pending_output(self):
+        output = self._pending_output
+        self._pending_output = None
+        return output
 
     def _create_fake_output(
         self, scheduler_output: "SchedulerOutput"
     ) -> "ModelRunnerOutput | None":
         """Create minimal fake ModelRunnerOutput."""
         from vllm.v1.outputs import ModelRunnerOutput
-
         import numpy as np
 
         req_ids = list(scheduler_output.num_scheduled_tokens.keys())
         if not req_ids:
             return None
 
-        # Check which are prefill chunks vs decode
         new_req_ids = {req.req_id for req in scheduler_output.scheduled_new_reqs}
         prefill_chunk_ids = set()
         for req in scheduler_output.scheduled_new_reqs:

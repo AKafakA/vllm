@@ -142,6 +142,26 @@ if os.path.exists(ipc_overhead_path):
 else:
     print(f"\n  WARNING: {ipc_overhead_path} not found. Run profile_ipc_sweep.sh first.")
 
+# Build offline_forward_pass from offline trace (if available).
+# The offline trace captures step-cycle via LLM() path (bench throughput)
+# with CUDA graphs at production batch sizes. Decode-only steps
+# (num_new_reqs=0) give the correct latency for offline inference.
+offline_trace_path = os.path.join(os.path.dirname(step_cycle_file), "offline_step_cycle.jsonl")
+offline_fp = []
+if os.path.exists(offline_trace_path):
+    offline_records = []
+    for line in open(offline_trace_path):
+        r = json.loads(line)
+        if "total_tokens" in r:
+            offline_records.append(r)
+    offline_by_tt = defaultdict(list)
+    for r in offline_records:
+        offline_by_tt[r["total_tokens"]].append(r["step_cycle_us"])
+    offline_fp = build_section(offline_by_tt, "offline_forward_pass")
+    print(f"\n  Loaded offline trace: {len(offline_records)} decode-only steps")
+else:
+    print(f"\n  No offline trace found at {offline_trace_path}")
+
 profile = {
     "version": "1.0",
     "gpu_model": gpu_model,
@@ -152,6 +172,7 @@ profile = {
     "forward_pass": sorted(combined_fp, key=lambda e: e["total_tokens"]),
     "prefill_forward_pass": sorted(prefill_fp, key=lambda e: e["total_tokens"]),
     "decode_forward_pass": sorted(decode_fp, key=lambda e: e["total_tokens"]),
+    "offline_forward_pass": sorted(offline_fp, key=lambda e: e["total_tokens"]),
     # Emulator calibration parameters (auto-computed from trace)
     "cuda_graph_warmup_us": round(avg_cuda_warmup_us, 0),
     "sched_overhead_table": sched_overhead_table,
@@ -167,5 +188,11 @@ for tt in [1, 5, 10, 256, 260, 265, 270]:
     d = dec_map.get(tt, 0)
     if p > 0 or d > 0:
         print(f"  tt={tt:>4}: prefill={p/1000:.1f}ms, decode={d/1000:.1f}ms, ratio={p/d:.1f}x" if d > 0 else f"  tt={tt:>4}: prefill={p/1000:.1f}ms, decode=N/A")
+
+if offline_fp:
+    off_map = {e["total_tokens"]: e["latency_us"] for e in offline_fp}
+    print(f"\nOffline forward_pass at key tt values:")
+    for tt in sorted(off_map.keys()):
+        print(f"  tt={tt:>4}: {off_map[tt]/1000:.1f}ms")
 
 print(f"\nSaved to {output_path}")

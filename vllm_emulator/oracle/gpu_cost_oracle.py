@@ -139,6 +139,14 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             key=lambda s: s["total_tokens"],
         )
 
+        # Offline forward_pass: decode step-cycle via LLM() path with CUDA
+        # graphs. Used for offline (bench throughput) emulation where batch
+        # sizes are large and step-cycle ≈ pure forward pass.
+        self._offline_forward_pass = sorted(
+            profile_pack.get("offline_forward_pass", []),
+            key=lambda s: s["total_tokens"],
+        )
+
     @property
     def gpu_model(self) -> str:
         return self._gpu_model
@@ -239,23 +247,43 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
     def estimate_step_latency_us(
         self, total_tokens: int, avg_context_len: int = 0,
-        has_prefill: bool = False,
+        has_prefill: bool = False, profile_section: str = "online",
     ) -> float:
         """Estimate latency for one forward pass.
 
-        If has_prefill is True and a prefill_forward_pass section exists,
-        uses the prefill-specific profile (different CUDA graph path).
-        Otherwise uses the combined forward_pass.
+        Args:
+            total_tokens: Total tokens in the batch
+            avg_context_len: Average context length (for 2D lookup)
+            has_prefill: Whether batch contains new prefill requests
+            profile_section: "online" or "offline" — selects profile data
+
+        Profile selection:
+          offline → offline_forward_pass (if available, else fall through)
+          online + has_prefill → prefill_forward_pass
+          online + no prefill → decode_forward_pass
+          fallback → combined forward_pass
         """
         if total_tokens <= 0:
             return 0.0
 
-        # Try 2D lookup first
+        # Offline profile: step-cycles from LLM() path with CUDA graphs
+        if profile_section == "offline" and self._offline_forward_pass:
+            off_samples = self._offline_forward_pass
+            xs = [float(s["total_tokens"]) for s in off_samples]
+            ys = [float(s["latency_us"]) for s in off_samples]
+            if xs[0] <= total_tokens <= xs[-1]:
+                return _interpolate_linear(xs, ys, float(total_tokens))
+            # Beyond range: extrapolate up, fall through for below
+            if total_tokens > xs[-1] and len(xs) >= 2:
+                a, b = _fit_power_law(xs, ys)
+                return a * (total_tokens ** b)
+
+        # 2D lookup (if available)
         if self._forward_pass_2d and avg_context_len > 0:
             return self._estimate_2d(total_tokens, avg_context_len)
 
-        # Step-type-aware lookup: use prefill or decode section
-        samples = self._forward_pass_samples  # default
+        # Online profile: step-type-aware lookup
+        samples = self._forward_pass_samples  # default (combined)
         if has_prefill and self._prefill_forward_pass:
             samples = self._prefill_forward_pass
         elif not has_prefill and self._decode_forward_pass:

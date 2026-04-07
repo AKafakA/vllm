@@ -198,12 +198,25 @@ vllm-emulator/
 
 ---
 
-### Phase 4: Paper & Upstream (P3)
+### Phase 4: E2E Evaluation & Accuracy (P2.5+)
+
+| Task | Status | Notes |
+|------|--------|-------|
+| P2.6: Executor-level hook (Path A) | ✅ DONE | Timer-based Future, online TPOT/E2E <1% |
+| P2.7: Offline profile + mode | 🔄 IN PROGRESS | offline_forward_pass section, needs cross-validation |
+| P2.8: Path B CPU-only emulation | ❌ BLOCKED | CUDA mock activation, attention backend issues |
+| P2.9: Cross-validation | ❌ NOT STARTED | Profile A → Benchmark B, ShareGPT, BurstGPT |
+| P2.10: Multi-rate validation | ❌ NOT STARTED | 1000 prompts, rates 1-16, variance measurement |
+| P2.11: Multi-GPU/model eval | ❌ NOT STARTED | 0.5B, 1.5B, 3B; RTX3060, A100, A30 |
+| P2.12: Feature demos | ❌ NOT STARTED | PD separation, CPU offload (needs Path B) |
+| P2.13: Cluster-level emulation | ❌ NOT STARTED | N CPU hosts → M vLLM instances |
+
+### Phase 5: Paper & Upstream (P3)
 
 | Task | Status |
 |------|--------|
-| P2.4: Workshop Paper | ❌ NOT_STARTED |
-| vLLM Patch Submission | ❌ NOT_STARTED |
+| P3.1: Workshop Paper | ❌ NOT_STARTED |
+| P3.2: vLLM Patch Submission | ❌ NOT_STARTED |
 
 ---
 
@@ -247,11 +260,18 @@ export VLLM_EMULATOR_BLOCKING_MODE=offline
 | Date | Task |
 |------|------|
 | Mar 13, 2026 | Code review + Roadmap update |
-| Mar 14, 2026 | P1.2: Offload Cost Oracle (oracle + hook) |
-| Mar 15, 2026 | P1.3: Network Cost Oracle (oracle + hook) |
-| **Mar 20, 2026** | **P1.2/P1.3: vLLM integration wiring complete** |
-| Mar 21-24, 2026 | Final testing before testbed expiry |
-| Post-expiry | Workshop paper writing |
+| Mar 14-20, 2026 | P1.2/P1.3: Offload + Network Cost Oracle complete |
+| Apr 2-5, 2026 | E2E evaluation: sweep profiling, step-cycle profiling, online serving |
+| Apr 6, 2026 | Executor hook timer approach: TPOT/E2E/throughput <1% at rates 1-4 |
+| Apr 7, 2026 | Discovery: online ≠ offline. Offline profile + bench throughput approach |
+| **Apr 7-9** | **Path B (CPU-only): debug + get working (HIGHEST PRIORITY)** |
+| Apr 7-9 | Cross-validation, dynamic workloads on Vast |
+| Apr 9, 2026 | Vast expires → migrate to dev-gpu-wd312 (released until needed) |
+| Apr 9-12 | Continue on dev-gpu: accuracy validation, feature demos |
+| Apr 12-16 | CloudLab available: multi-GPU eval (A100, A30, V100) |
+| Apr 16-25 | Paper writing, feature demos |
+| Apr 26-May 6 | CloudLab: final evaluation, camera-ready |
+| **May 6, 2026** | **NeurIPS deadline** |
 
 ---
 
@@ -282,15 +302,38 @@ export VLLM_EMULATOR_BLOCKING_MODE=offline
 
 ---
 
-## 11. Next Steps
+## 11. Next Steps (Updated Apr 7)
 
 - [x] Review and approve RFC design
 - [x] P0.1-P0.4: Foundation complete
-- [x] P1.1: GPU Cost Oracle complete
-- [x] P2.1: CLI Integration complete
-- [x] P2.2: Testing Infrastructure complete
-- [x] P2.3: Documentation complete
+- [x] P1.1-P1.3: All Cost Oracles complete
+- [x] P2.1-P2.3: CLI, Testing, Documentation complete
 - [x] P2.5.2: PD Separation complete
-- [x] Mar 14: P1.2 Offload Cost Oracle
+- [x] P2.6: Executor hook (Path A online) — TPOT/E2E/throughput <1%
+- [x] P2.7: Offline profile discovery — separate LLM() path profiling
+- [ ] **P2.8: PATH B CPU-ONLY (HIGHEST PRIORITY)**
+- [ ] P2.9: Cross-validation with unseen workloads
+- [ ] P2.10: Multi-rate + 1000-prompt + dynamic workload validation
+- [ ] P2.11: Multi-GPU/model evaluation
+- [ ] P2.12: Feature demos (PD sep, CPU offload)
+- [ ] P2.13: Cluster-level emulation design
+- [ ] P3.1: Workshop paper writing
+
+### Known Issues to Investigate
+1. **Online results suspiciously uniform** — same error % at rates 1/2/4,
+   no queueing effect on TTFT at high rates. Needs fresh baselines + 1000 prompts.
+2. **Offline overfitting** — profiled same workload as benchmark. Need cross-validation.
+3. **TTFT +26-32%** — architectural limitation of async scheduler pipelining.
+   May be acceptable if framed as "steady-state" vs "transient" metric.
+4. **1000-prompt offline hang** — power-law extrapolation at high tt (prefill chunks)
+   causes excessive sleep. Need to cap extrapolation or extend profile range.
+
+### Resources
+- **Vast RTX 3060**: expires Apr 9. Active development.
+- **dev-gpu-wd312 RTX 8000**: released for now. Spin up after Vast expires (Apr 9).
+- **CloudLab**: Apr 12-16 (A100/A30/V100), Apr 26-May 6 (final eval).
+- **CSD3 A100**: available anytime (batch only).
+
+See `docs/benchmarking/progress-apr7.md` for full details.
 - [x] Mar 15: P1.3 Network Cost Oracle
 - [ ] P2.4: Workshop Paper

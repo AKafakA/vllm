@@ -677,7 +677,7 @@ class EngineArgs:
         """
         import os
 
-        _mode_aliases = {"online": "realtime", "offline": "accelerated"}
+        _mode_aliases = {"online": "realtime"}
 
         # 1. Resolve emulator_mode: CLI flag > env var
         if self.emulator_mode is None:

@@ -243,3 +243,11 @@ vllm/grpc/vllm_engine_pb2.pyi
 # Ignore generated cpu headers
 csrc/cpu/cpu_attn_dispatch_generated.h
 paper/
+# Local Codex notes
+paper/codex/CODEX.md
+docs/benchmarking/codex-*
+docs/benchmarking/handoff-*
+docs/benchmarking/progress-*
+docs/benchmarking/refactor-*
+docs/benchmarking/offline-fix-*
+docs/benchmarking/offline-architecture*

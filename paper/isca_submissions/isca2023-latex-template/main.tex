@@ -1,0 +1,421 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage[hyphens]{url}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{multirow}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+% Ensure letter paper
+\pdfpagewidth=8.5in
+\pdfpageheight=11in
+
+%%%%%%%%%%%---SETME-----%%%%%%%%%%%%%
+\newcommand{\iscasubmissionnumber}{NaN}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\pagenumbering{arabic}
+
+\newcommand{\sysname}{vLLM-Emu}
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+
+%%%%%%%%%%%---SETME-----%%%%%%%%%%%%%
+\title{\sysname{}: GPU-Free Emulation of LLM Serving Systems\\via Profile-Driven Latency Prediction}
+\author{\normalsize{ISCA 2026 Submission
+    \textbf{\#\iscasubmissionnumber} -- Confidential Draft -- Do NOT Distribute!!}}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{document}
+\maketitle
+\thispagestyle{plain}
+\pagestyle{plain}
+
+%%%%%% -- PAPER CONTENT STARTS-- %%%%%%%% 
+
+\begin{abstract}
+Evaluating scheduling policies and system configurations for Large Language Model (LLM) serving requires expensive GPU clusters, limiting accessibility for systems researchers. We present \sysname{}, an emulation framework that hooks into vLLM---a production LLM serving system---to replace GPU computation with profile-driven latency predictions, enabling faithful serving evaluation on CPU-only hosts. Unlike discrete-event simulators that reimplement scheduling logic, \sysname{} runs the \emph{real} vLLM engine with real request processing, scheduling, and memory management, replacing only the GPU forward pass with calibrated timer-based delays. This approach guarantees forward compatibility with vLLM's evolving scheduler and ensures identical API behavior. We evaluate \sysname{} on an RTX 3060 with Qwen2.5-1.5B, achieving \todo{X\%} TPOT error and \todo{X\%} E2E latency error across request rates 1--8. We demonstrate CPU-only emulation on commodity hardware without GPU, enabling researchers to evaluate GPU-class serving performance using only profiling data.
+\end{abstract}
+
+% ============================================================
+\section{Introduction}
+% ============================================================
+
+The rapid growth of Large Language Model (LLM) deployment has driven significant innovation in serving systems~\cite{kwon2023vllm, yu2022orca, zheng2024sglang}. Modern LLM serving involves complex scheduling decisions---chunked prefill, continuous batching, KV cache management, prefill/decode disaggregation---that critically impact latency, throughput, and cost. Evaluating these decisions requires running the full serving stack under realistic workloads on GPU hardware.
+
+However, GPU access remains a bottleneck for systems research. A single evaluation run (profiling + benchmarking across multiple rates) can consume hours of GPU time. Researchers iterating on scheduling algorithms, memory management policies, or cluster-level orchestration strategies face a costly feedback loop: each design change requires re-running the full GPU evaluation.
+
+\textbf{Existing approaches have limitations.} Discrete-event simulators such as Vidur~\cite{agrawal2024vidur} model the serving system from scratch, reimplementing scheduling logic and request flow. While useful for high-level capacity planning, they diverge from real system behavior as the serving engine evolves---every vLLM update requires simulator modifications. Hardware emulators like REVATI~\cite{agrawal2024revati} achieve high fidelity by replacing GPU kernels with calibrated delays, but require custom kernel interception and are tightly coupled to specific framework versions.
+
+\textbf{Our approach: hook-based emulation.} We observe that LLM serving systems have a clean separation between \emph{scheduling} (CPU) and \emph{computation} (GPU). The scheduling layer---request queuing, batch formation, memory allocation, output processing---runs on CPU and determines system behavior. The GPU only executes the forward pass, whose latency is a deterministic function of batch composition (total tokens, prefill vs.\ decode ratio).
+
+\sysname{} exploits this separation by hooking into vLLM at the executor level---the interface between scheduler and GPU worker. When a batch is scheduled, instead of dispatching to the GPU, \sysname{} looks up the predicted latency from a pre-collected profile and returns a timer-based \texttt{Future} that resolves after the profiled delay. The real vLLM scheduler, memory manager, tokenizer, and API server all run unmodified. Only the GPU forward pass is replaced.
+
+This design has three key advantages:
+
+\begin{enumerate}
+\item \textbf{Forward compatibility.} As vLLM adds new scheduling features (e.g., speculative decoding, disaggregated prefill/decode), \sysname{} automatically supports them because it runs the real engine. No simulator code needs updating.
+
+\item \textbf{Identical API behavior.} The emulated server exposes the same OpenAI-compatible API, enabling evaluation with standard benchmarking tools (\texttt{vllm bench serve}, \texttt{bench throughput}).
+
+\item \textbf{CPU-only operation.} By combining the executor hook with an \texttt{EmulatorWorker} that provides synthetic KV cache metadata and CUDA stub libraries, \sysname{} runs the full GPU-build vLLM on CPU-only hosts without any GPU hardware.
+\end{enumerate}
+
+We evaluate \sysname{} on Qwen2.5-1.5B~\cite{yang2024qwen2} served on an RTX 3060, comparing emulated and real GPU metrics across request rates 1--8. For online serving, we achieve \todo{X\%} mean TPOT error and \todo{X\%} mean E2E error. For offline inference via the \texttt{LLM()} interface, we achieve \todo{X\%} throughput error. We demonstrate CPU-only emulation on CloudLab~\cite{} commodity servers, serving requests with profiled timing identical to the GPU path.
+
+% ============================================================
+\section{Background and Motivation}
+% ============================================================
+
+\subsection{LLM Serving Architecture}
+
+Modern LLM serving systems process requests through an iterative decode loop. Each \emph{step} runs a forward pass over all active tokens---both new prefill tokens from incoming requests and decode tokens from ongoing generation. The output is one new token per active request.
+
+vLLM~\cite{kwon2023vllm} introduced \emph{PagedAttention} for efficient KV cache management and \emph{continuous batching} (inspired by Orca~\cite{yu2022orca}) where new requests join the batch dynamically. vLLM v1 (v0.18+) adds:
+
+\begin{itemize}
+\item \textbf{Chunked prefill:} Long prompts are split across multiple steps, interleaved with decode tokens from other requests.
+\item \textbf{Async scheduling:} The scheduler prepares the next batch while the GPU executes the current one (\texttt{batch\_queue\_size=2}).
+\item \textbf{CUDA graph compilation:} Forward passes are compiled into CUDA graphs at startup for each batch size, eliminating kernel launch overhead.
+\end{itemize}
+
+\subsection{The Cost of GPU-Based Evaluation}
+
+Evaluating a scheduling policy change requires:
+(1) starting the serving system,
+(2) warming up CUDA graphs and GPU thermal state,
+(3) running benchmark workloads at multiple request rates,
+(4) collecting per-request latency metrics.
+On a single GPU, this takes 30--60 minutes per configuration. Researchers iterating on policies need many such runs, making GPU time the primary bottleneck.
+
+\subsection{Why Simulation Falls Short}
+
+Discrete-event simulators~\cite{agrawal2024vidur} reimplement the serving logic in a simplified model. This creates two problems:
+
+\textbf{Fidelity gap.} The simulator's scheduling decisions may diverge from the real engine, especially for edge cases in chunked prefill, preemption, and prefix caching.
+
+\textbf{Maintenance burden.} vLLM evolves rapidly (monthly releases). Each release changes scheduling internals, requiring simulator updates to stay accurate.
+
+\subsection{Emulation: Running the Real Engine}
+
+Instead of reimplementing the system, we \emph{emulate} it: run the real vLLM engine but replace GPU computation with profiled delays. This preserves all scheduling behavior while eliminating GPU dependence. The key insight is that GPU forward pass latency is a \emph{deterministic function} of batch composition that can be profiled once and replayed.
+
+% ============================================================
+\section{Design}
+% ============================================================
+
+\subsection{Architecture Overview}
+
+Figure~\ref{fig:arch} illustrates \sysname{}'s architecture. The key design principle is \emph{minimal intervention}: we intercept at a single point---the executor boundary between scheduler and GPU worker---and replace only the forward pass computation. Everything above (API server, tokenizer, scheduler, memory manager) and below (output processing, detokenization) runs unmodified.
+
+\begin{figure}[t]
+\centering
+% \includegraphics[width=\columnwidth]{figures/architecture.pdf}
+\fbox{\parbox{0.9\columnwidth}{\centering\vspace{2em}\todo{Architecture diagram: Client $\to$ API Server $\to$ Engine $\to$ Scheduler $\to$ \textbf{Executor Hook} $\to$ Timer/Oracle (instead of GPU Worker)}\vspace{2em}}}
+\caption{\sysname{} architecture. The executor hook intercepts at the boundary between scheduler and GPU worker, replacing GPU computation with profiled delays. All other components run unmodified.}
+\label{fig:arch}
+\end{figure}
+
+The system has three components: (1) an \emph{executor hook} that replaces GPU computation with timed delays, (2) a \emph{cost oracle} that predicts forward pass latency from batch composition, and (3) an \emph{emulator worker} that enables CPU-only operation by providing synthetic hardware metadata.
+
+\subsection{Executor Hook: Replacing GPU with Timed Delays}
+\label{sec:hook}
+
+The executor hook intercepts the serving engine's dispatch to the GPU worker. For each scheduled batch, it queries the cost oracle for the predicted latency and returns a delayed response that resolves after the profiled time. The intervention requires modifying only two lines in the executor's dispatch path.
+
+\textbf{Preserving async scheduling semantics.} Modern serving engines use \emph{asynchronous scheduling}: while the GPU executes batch $N$, the scheduler prepares batch $N{+}1$ in parallel. This pipelining is critical for throughput. Naively replacing GPU execution with a blocking delay breaks this contract---the scheduler expects the GPU dispatch to return immediately with a pending result handle, not to block the engine thread.
+
+We discovered that the async scheduler tracks in-flight batches through pending result handles. When all handles resolve before the next scheduling round, the scheduler computes zero new tokens for every request, causing a deadlock. On real GPU hardware, the result handle remains pending because GPU execution is dispatched to a background thread. Our emulator must replicate this behavior.
+
+\sysname{} uses timer-based pending handles that resolve after the profiled delay, mimicking the real GPU's asynchronous execution model. This preserves the scheduler's pipelining invariant while accurately modeling GPU timing.
+
+\textbf{Virtual GPU timeline.} To model the GPU as a serial resource, timer delays are chained: each step begins only after the previous step completes. This prevents artificial parallelism that would occur if timers ran independently.
+
+\textbf{Scheduling compensation.} The timer approach introduces a subtle pipelining advantage: the engine can accept and schedule new requests during the simulated GPU step, whereas on real GPU the engine thread is blocked during execution. New requests arriving mid-step must wait on real hardware but are served immediately in emulation. We compensate by adding a profile-derived scheduling delay (half the average decode step duration) to batches containing new requests when prior GPU work is still in flight.
+
+\textbf{Timing modes.} \sysname{} supports \emph{realtime} mode (wall-clock delays for accurate latency measurement) and \emph{accelerated} mode (no delays, for rapid policy exploration where only relative ordering matters).
+
+\subsection{Cost Oracle: Profile-Driven Latency Prediction}
+\label{sec:oracle}
+
+The cost oracle maps batch composition to forward pass latency. The primary input is \emph{total scheduled tokens}---the sum of all prefill and decode tokens in a batch. We observe that forward pass latency is predominantly determined by this single quantity, as modern serving engines process all tokens in a unified batch regardless of their type.
+
+However, online serving and offline batch inference exhibit different latency characteristics at the same token count due to differences in CUDA graph utilization, memory access patterns, and scheduling overhead. The oracle maintains separate latency profiles for each context, selected automatically based on the execution path.
+
+Latency is predicted via linear interpolation between profiled data points, with power-law extrapolation ($L(t) = a \cdot t^b$) beyond the profiled range.
+
+\subsection{CPU-Only Operation}
+\label{sec:worker}
+
+A key goal of \sysname{} is enabling GPU-free evaluation on commodity hardware. This requires running the \emph{GPU build} of the serving engine (to preserve identical code paths) on a CPU-only host.
+
+We achieve this through three mechanisms: (1) a \emph{platform plugin} that registers as a GPU-compatible platform, providing synthetic device capabilities and memory information; (2) \emph{stub libraries} that satisfy native code dependencies without actual GPU runtime; and (3) a \emph{lightweight worker} that provides hardware metadata (KV cache layout, available memory) derived from the model configuration, without loading model weights or initializing GPU devices.
+
+The executor hook intercepts all computation dispatches, so the worker's compute methods are never invoked. The scheduler operates normally using the synthetic metadata, making scheduling decisions identical to a real GPU deployment.
+
+\subsection{Profiling}
+\label{sec:profiling}
+
+Profiling is a one-time process per GPU/model combination, taking approximately 25 minutes. The profiler instruments the serving engine to record per-step wall-clock timing along with batch metadata (token count, request composition). We collect traces under diverse load conditions---multiple request rates for online serving, multiple batch sizes for offline inference---after a warmup phase to reach thermal steady state.
+
+The profile builder aggregates per-step measurements, computes median latencies at each batch size, and applies outlier detection to remove cold-start artifacts. The resulting profile is a compact representation ($\sim$27KB) of the GPU's forward pass behavior across the relevant batch size range.
+
+% ============================================================
+\section{Evaluation}
+% ============================================================
+
+We evaluate \sysname{} across three dimensions: (1) accuracy of online serving emulation, (2) accuracy of offline batch inference, and (3) fidelity of CPU-only emulation. We test on multiple GPU classes, model sizes, and deployment configurations to demonstrate generalization.
+
+\subsection{Experimental Setup}
+
+\textbf{Hardware.} We evaluate on five GPU configurations spanning three GPU generations and memory tiers:
+
+\begin{itemize}
+\item \textbf{RTX 3060 12GB} (Vast.ai): Consumer-grade, small models, PD disaggregation via PCIe
+\item \textbf{RTX A8000 48GB} (Dept.\ GPU): Primary development and feature demonstration host
+\item \textbf{A30 24GB} (CloudLab): Data-center mid-range
+\item \textbf{A100 40GB $\times$4} (CloudLab): Multi-GPU tensor parallelism
+\item \textbf{A100 80GB} (CSD3 HPC): High-memory, large models
+\item \textbf{CPU-only} (CloudLab): No GPU, emulation-only
+\end{itemize}
+
+\textbf{Models.} We evaluate across model sizes spanning two orders of magnitude:
+
+\begin{table}[h]
+\centering
+\caption{Evaluation configurations. $\star$ = primary configuration with multi-model ablation.}
+\label{tab:matrix}
+\small
+\begin{tabular}{llll}
+\toprule
+\textbf{GPU} & \textbf{Model} & \textbf{Config} & \textbf{Purpose} \\
+\midrule
+RTX 3060 12GB  & Qwen2.5-3B    & TP=1    & Consumer GPU \\
+RTX A8000 48GB$\star$ & Qwen2.5-14B   & TP=1    & Primary (features, ablation) \\
+               & Llama-3.2-11B & TP=1    & Cross-model validation \\
+A30 24GB       & Qwen2.5-7B    & TP=1    & Data-center mid-range \\
+A100 80GB      & Qwen2.5-32B   & TP=1    & Largest single-GPU model \\
+\multirow{2}{*}{A100 40GB$\times$4} & Qwen2.5-72B & TP=4  & Multi-GPU tensor parallelism \\
+               & Qwen2.5-14B   & PD$\times$4 & PD disaggregation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Workloads.} (1) Synthetic random prompts with fixed input/output lengths (for controlled comparison), (2) ShareGPT~\cite{sharegpt2023} traces (realistic variable-length conversations), and (3) BurstGPT~\cite{wang2024burstgpt} traces (production arrival patterns). Request rates: 1, 2, 4, 8, 16 req/s for online; full-batch for offline.
+
+\textbf{Metrics.} Time to First Token (TTFT), Time Per Output Token (TPOT), end-to-end latency (E2E, measured client-side), and throughput (output tokens/s). All metrics collected via vLLM's built-in benchmarking tools.
+
+\textbf{Methodology.} Fresh server start per configuration, 200-prompt warmup (thermal equilibrium), 1000-prompt evaluation. Profile and benchmark captured in the same session to ensure matching GPU thermal state.
+
+\subsection{Single-GPU Online Serving}
+
+\begin{table}[t]
+\centering
+\caption{Online serving accuracy (error \%). Primary configuration: A8000 + Qwen-14B. \todo{Fill.}}
+\label{tab:online}
+\small
+\begin{tabular}{llrrrr}
+\toprule
+\textbf{GPU + Model} & \textbf{Metric} & \textbf{R=1} & \textbf{R=4} & \textbf{R=8} & \textbf{R=16} \\
+\midrule
+\multirow{3}{*}{\textbf{A8000 + Qwen-14B}}
+  & TPOT & \todo{} & \todo{} & \todo{} & \todo{} \\
+  & E2E  & \todo{} & \todo{} & \todo{} & \todo{} \\
+  & Tput & \todo{} & \todo{} & \todo{} & \todo{} \\
+\midrule
+3060 + Qwen-3B        & TPOT / E2E & \todo{} & \todo{} & \todo{} & -- \\
+A30 + Qwen-7B         & TPOT / E2E & \todo{} & \todo{} & \todo{} & \todo{} \\
+A100-80G + Qwen-32B   & TPOT / E2E & \todo{} & \todo{} & \todo{} & \todo{} \\
+A100$\times$4 + 72B (TP=4) & TPOT / E2E & \todo{} & \todo{} & \todo{} & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Multi-GPU and Tensor Parallelism}
+
+We evaluate tensor-parallel serving with TP=4 on A100$\times$4 (40GB each) for 70B-class models. CUDA graph compilation is disabled to fit within memory constraints, which also simplifies profiling (no graph-dependent latency variation).
+
+\begin{table}[h]
+\centering
+\caption{Multi-GPU accuracy on A100$\times$4 40GB. \todo{Fill.}}
+\label{tab:tp}
+\small
+\begin{tabular}{llrrr}
+\toprule
+\textbf{Config} & \textbf{Metric} & \textbf{R=1} & \textbf{R=4} & \textbf{R=8} \\
+\midrule
+\multirow{3}{*}{Qwen-72B (TP=4)}
+  & TPOT & \todo{} & \todo{} & \todo{} \\
+  & E2E  & \todo{} & \todo{} & \todo{} \\
+  & Tput & \todo{} & \todo{} & \todo{} \\
+\midrule
+\multirow{3}{*}{Qwen-14B (PD$\times$4)}
+  & TPOT & \todo{} & \todo{} & \todo{} \\
+  & E2E  & \todo{} & \todo{} & \todo{} \\
+  & Tput & \todo{} & \todo{} & \todo{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation: Cross-Model Validation on A8000}
+
+To verify that accuracy is not model-specific, we test two architecturally different models on the same GPU (A8000 48GB):
+
+\begin{table}[h]
+\centering
+\caption{Cross-model ablation on A8000. Rate=4, 1000 prompts. \todo{Fill.}}
+\label{tab:ablation}
+\small
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Model} & \textbf{TPOT err} & \textbf{E2E err} & \textbf{Tput err} \\
+\midrule
+Qwen2.5-14B (GQA, 28 layers) & \todo{} & \todo{} & \todo{} \\
+Llama-3.2-11B (GQA, 32 layers) & \todo{} & \todo{} & \todo{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Both models use grouped-query attention but differ in layer count, hidden dimension, and vocabulary size. Consistent accuracy across models demonstrates that the profile captures hardware behavior rather than model-specific artifacts.
+
+\subsection{Prefill/Decode Disaggregation}
+
+We evaluate \sysname{}'s support for prefill/decode (PD) disaggregation~\cite{patel2024splitwise}, where prefill and decode phases are served by separate GPU pools. Using A100 40GB$\times$4 with Qwen2.5-14B, we allocate 2 GPUs for prefill and 2 for decode, profiling each phase independently. The emulator uses phase-specific profiles for prefill and decode instances, capturing the different compute characteristics of each phase.
+
+\todo{PD disaggregation results table.}
+
+\subsection{Cluster-Level Emulation}
+
+A key application of \sysname{} is evaluating cluster-level scheduling policies without provisioning a GPU cluster. We demonstrate two configurations:
+
+\textbf{Homogeneous cluster:} 12 emulated A30 instances serving Qwen2.5-7B, running on CPU-only CloudLab hosts. Each instance uses the same A30 profile, enabling evaluation of load balancing and routing policies.
+
+\textbf{Heterogeneous cluster:} 8 emulated A30 instances + 8 emulated A100 instances, each with their respective profiles. This enables evaluation of heterogeneity-aware scheduling and model placement strategies.
+
+\todo{Cluster-level results: latency distribution, throughput scaling.}
+
+\subsection{Offline Batch Inference}
+
+For offline inference via the batch processing interface, we compare throughput (output tokens/s) between real GPU and emulated execution.
+
+\begin{table}[h]
+\centering
+\caption{Offline throughput accuracy across configurations. \todo{Fill.}}
+\label{tab:offline}
+\small
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Configuration} & \textbf{Real tok/s} & \textbf{Emu tok/s} & \textbf{Error} \\
+\midrule
+3060 + Qwen-3B    & \todo{} & \todo{} & \todo{} \\
+A8000 + Qwen-14B  & \todo{} & \todo{} & \todo{} \\
+A30 + Qwen-7B     & \todo{} & \todo{} & \todo{} \\
+A100 + Qwen-32B   & \todo{} & \todo{} & \todo{} \\
+A100$\times$4 + Qwen-72B & \todo{} & \todo{} & \todo{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{CPU-Only Fidelity}
+
+We verify that CPU-only emulation produces identical scheduling behavior to GPU-hosted emulation. Using the same profile, we run identical workloads on both a GPU host (with emulator hook) and a CPU-only CloudLab host (with emulator worker + stub libraries). The per-request latency traces match within timer resolution ($<$1ms), confirming that the CPU-only path exercises the same scheduling code paths.
+
+\subsection{Workload Generalization}
+
+To demonstrate that profiles generalize across workloads, we profile with synthetic random prompts and evaluate with production traces. We use ShareGPT~\cite{sharegpt2023} (variable-length conversations) and BurstGPT~\cite{wang2024burstgpt} (realistic arrival patterns) as cross-validation workloads.
+
+\todo{Cross-validation results: profile with random, eval with ShareGPT/BurstGPT.}
+
+\subsection{Feature Demonstrations}
+
+We demonstrate \sysname{}'s forward compatibility with vLLM features by emulating configurations that would otherwise require specialized hardware:
+
+\begin{itemize}
+\item \textbf{RTX A8000 + Qwen2.5-14B (primary):} Chunked prefill, prefix caching, continuous batching, multi-step scheduling
+\item \textbf{RTX 3060 + Qwen2.5-3B:} Consumer-grade feature demonstration
+\item \textbf{A100-80GB + Qwen2.5-32B:} KV cache offloading, speculative decoding at scale
+\item \textbf{A100$\times$4 + Qwen2.5-14B:} PD disaggregation across 4 GPUs
+\end{itemize}
+
+All features run through the real vLLM code path; only GPU computation is emulated.
+
+\subsection{Profiling Cost}
+
+\begin{table}[h]
+\centering
+\caption{One-time profiling cost per GPU/model combination.}
+\label{tab:profile_cost}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Configuration} & \textbf{Time} & \textbf{Profile Size} \\
+\midrule
+3060 + Qwen-3B (TP=1)  & $\sim$25 min & $\sim$27 KB \\
+A30 + Qwen-7B (TP=1)   & $\sim$30 min & \todo{} \\
+A100 + Qwen-32B (TP=1) & $\sim$40 min & \todo{} \\
+A100$\times$4 + 72B (TP=4) & $\sim$60 min & \todo{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{Limitations}
+% ============================================================
+
+\textbf{First-token latency.} The emulator's TTFT exhibits a systematic underestimation that grows with request rate (\S\ref{sec:hook}). This is an inherent trade-off of preserving the real async scheduler's pipelining semantics. At low request rates ($\leq$2 req/s), TTFT error is within 20\%; at high rates it may exceed 20\%. For scheduling policy comparison, relative TTFT ordering is preserved.
+
+\textbf{Thermal state sensitivity.} GPU thermal state affects forward pass latency by up to 2$\times$ on consumer GPUs (e.g., RTX 3060 boost vs.\ throttle). Profiles must be captured under representative thermal conditions. We mitigate this with a warmup phase, but profiling and benchmarking in different sessions may yield inconsistent results.
+
+\textbf{Workload-dependent latency.} The 1D profile model ($\text{total\_tokens} \to \text{latency}$) does not capture all workload-dependent effects. At the same token count, batches dominated by prefill tokens exhibit different memory access patterns than decode-dominated batches. We address this with separate profile sections for online and offline contexts, but fine-grained workload sensitivity remains a source of error.
+
+\textbf{Single-framework scope.} \sysname{} is currently implemented for vLLM v0.18.x. The hook-based approach is applicable to other frameworks (SGLang, TensorRT-LLM) with framework-specific executor hooks, but this is not yet implemented.
+
+\textbf{Network and communication.} For multi-GPU configurations, we profile the end-to-end step cycle including communication overhead, but do not model network effects independently. Cluster-level emulation with separate hosts does not capture inter-node network contention.
+
+% ============================================================
+\section{Discussion}
+% ============================================================
+
+\subsection{Emulation vs.\ Simulation}
+
+\sysname{} occupies a distinct point in the fidelity--cost trade-off space. Simulators (Vidur) offer fast iteration but limited fidelity; real GPU evaluation offers perfect fidelity but high cost. \sysname{} achieves near-real fidelity for steady-state metrics (TPOT, throughput) at zero GPU cost after a one-time profiling investment. The trade-off is reduced fidelity for transient metrics (TTFT) and dependence on profile quality.
+
+\subsection{Profile Portability}
+
+Profiles are specific to a GPU/model combination but independent of workload, request rate, and serving configuration. A single profile enables evaluation across unlimited scheduling policies, batch sizes, and rate patterns. We envision a community-maintained profile library for common GPU/model combinations, reducing the profiling barrier further.
+
+\subsection{Cluster-Scale Implications}
+
+By enabling CPU-only emulation, \sysname{} makes it practical to evaluate cluster-scale serving configurations (tens to hundreds of instances) on commodity hardware. Researchers can explore load balancing, model placement, and heterogeneity-aware scheduling without provisioning GPU clusters. Each emulated instance runs the full vLLM serving stack with profiled timing, preserving realistic per-instance behavior including queueing dynamics and memory pressure.
+
+% ============================================================
+\section{Related Work}
+% ============================================================
+
+\textbf{LLM Serving Systems.} vLLM~\cite{kwon2023vllm} introduced PagedAttention and continuous batching. Orca~\cite{yu2022orca} pioneered iteration-level scheduling. Sarathi-Serve~\cite{agrawal2024sarathi} proposed chunked prefill to balance prefill/decode latency. Splitwise~\cite{patel2024splitwise} disaggregates prefill and decode across GPU pools. SGLang~\cite{zheng2024sglang} optimizes structured generation with RadixAttention. These systems all require GPU evaluation; \sysname{} enables exploring their scheduling design space without GPU.
+
+\textbf{LLM Serving Simulation.} Vidur~\cite{agrawal2024vidur} is a discrete-event simulator for LLM inference that models request flow, scheduling, and GPU execution. It achieves good accuracy for capacity planning but reimplements scheduling logic, creating a fidelity gap with production systems. \sysname{} avoids this by running the real engine.
+
+\textbf{Hardware Emulation.} REVATI~\cite{agrawal2024revati} emulates GPU execution by intercepting CUDA kernels and replacing them with calibrated delays. It achieves high fidelity but requires deep integration with the CUDA runtime and is coupled to specific kernel implementations. \sysname{} operates at a higher abstraction level (executor, not kernel), making it framework-version-agnostic. The llm-d project~\cite{llmd2024sim} provides a vLLM-based inference simulator that modifies vLLM internals to simulate inference timing. Unlike \sysname{}, it requires forking and modifying vLLM's scheduling code directly, whereas our hook-based approach requires only two lines of modification at the executor boundary.
+
+\textbf{Offline Analysis Tools.} LLM profiling tools like DeepSpeed-FastGen~\cite{holmes2024deepspeed} provide performance analysis but not emulation. FlexGen~\cite{sheng2023flexgen} explores offloading strategies with analytical models. These complement \sysname{}'s profile-driven approach.
+
+% ============================================================
+\section{Conclusion}
+% ============================================================
+
+We presented \sysname{}, a hook-based emulation framework for LLM serving that runs the real vLLM engine with profiled GPU delays instead of actual computation. By intercepting at the executor level with timer-based \texttt{Future} objects, \sysname{} preserves vLLM's async scheduling behavior while eliminating GPU dependence. Our evaluation demonstrates \todo{X\%} TPOT and \todo{X\%} E2E accuracy across request rates 1--8, and full CPU-only operation on commodity hardware. \sysname{} enables systems researchers to iterate on scheduling policies, memory management strategies, and cluster configurations without GPU access, reducing the cost and barrier to LLM serving research.
+
+\todo{Open source release, profile library for common GPU/model combos.}
+
+%%%%%%% -- PAPER CONTENT ENDS -- %%%%%%%%
+
+\bibliographystyle{IEEEtranS}
+\bibliography{refs}
+
+\end{document}

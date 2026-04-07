@@ -444,7 +444,7 @@ class LLM:
         mode = (os.environ.get("VLLM_EMULATOR_MODE")
                 or os.environ.get("VLLM_EMULATOR_BLOCKING_MODE", "realtime")).lower()
         # Backward compat
-        mode = {"online": "realtime", "offline": "accelerated"}.get(mode, mode)
+        mode = {"online": "realtime"}.get(mode, mode)
         if mode == "accelerated":
             return
 
