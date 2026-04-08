@@ -65,6 +65,17 @@ class ExecutorEmulatorHook:
         self._eos_token_id = 2
         self._debug_count = 0
 
+        # Per-step trace (enabled by VLLM_EMULATOR_HOOK_TRACE=<path>)
+        self._trace_file = None
+        trace_path = os.environ.get("VLLM_EMULATOR_HOOK_TRACE", "")
+        if trace_path:
+            self._trace_file = open(trace_path, "w")
+            self._trace_file.write(
+                "step,wall_s,tt,n_reqs,n_decode,n_new,has_prefill,"
+                "oracle_us,hybrid_overhead_us,sched_comp_us,total_latency_us,"
+                "gpu_free_time,timer_delay_us\n")
+            self._last_step_wall = None
+
         self._initialize()
 
     def _initialize(self) -> None:
@@ -228,31 +239,32 @@ class ExecutorEmulatorHook:
             1 for rid in scheduler_output.num_scheduled_tokens
             if rid not in new_req_ids
         )
+        num_new = len(scheduler_output.scheduled_new_reqs)
         num_total_reqs = len(scheduler_output.num_scheduled_tokens)
 
         # 1. Estimate latency from profile
-        latency_us = self._oracle.estimate_step_latency_us(
+        oracle_us = self._oracle.estimate_step_latency_us(
             total_tokens,
             has_prefill=has_prefill,
             profile_section=self._profile_usage,
             num_requests=num_total_reqs,
             oracle_mode=self._oracle_mode,
         )
+        latency_us = oracle_us
 
         # 2. Hybrid overhead: per-request host-side cost (only in hybrid mode)
-        # In 2d mode, the oracle already includes per-request overhead.
+        hybrid_overhead_us = 0.0
         if self._oracle_mode == "hybrid" and self._overhead_per_req_us > 0:
-            latency_us += self._overhead_per_req_us * num_decode
+            hybrid_overhead_us = self._overhead_per_req_us * num_decode
+            latency_us += hybrid_overhead_us
 
         # 3. Scheduling compensation: when prior GPU work is in flight
-        # and this batch has new prefill requests, add half a decode
-        # step to model the wait time on real GPU.
-        # On real GPU, execute_model() blocks → new requests wait.
-        # The timer approach skips this wait (pipelining advantage).
+        sched_comp_applied_us = 0.0
         if has_prefill and self._sched_compensation_us > 0:
-            now = time.perf_counter()
-            if self._gpu_free_time > now:
-                latency_us += self._sched_compensation_us
+            now_check = time.perf_counter()
+            if self._gpu_free_time > now_check:
+                sched_comp_applied_us = self._sched_compensation_us
+                latency_us += sched_comp_applied_us
 
         latency_s = latency_us / 1e6
 
@@ -264,6 +276,20 @@ class ExecutorEmulatorHook:
                 fut.set_result(None)
                 return fut
             return None
+
+        # Trace: record per-step details
+        if self._trace_file is not None:
+            self._debug_count += 1
+            wall_now = time.perf_counter()
+            timer_delay_us = latency_us  # now same as total latency (no chaining)
+            self._trace_file.write(
+                f"{self._debug_count},{wall_now:.6f},{total_tokens},"
+                f"{num_total_reqs},{num_decode},{num_new},{int(has_prefill)},"
+                f"{oracle_us:.0f},{hybrid_overhead_us:.0f},"
+                f"{sched_comp_applied_us:.0f},{latency_us:.0f},"
+                f"{wall_now:.6f},{timer_delay_us:.0f}\n")
+            if self._debug_count % 500 == 0:
+                self._trace_file.flush()
 
         # 3. Dispatch based on engine type
         if not non_block:
@@ -296,9 +322,21 @@ class ExecutorEmulatorHook:
 
         if self._emulator_mode == EMULATOR_MODE_REALTIME:
             # Timer: pending Future resolves after profiled latency.
-            # Chain timers serially — virtual GPU is a serial resource.
+            #
+            # Chain timers to model GPU as serial resource, but cap
+            # the drift to prevent unbounded accumulation.
+            #
+            # With pipelining (batch_queue_size=2), the engine schedules
+            # step N+1 before N's timer fires. Uncapped chaining causes
+            # gpu_free_time to race ahead, inflating timer delays at
+            # high concurrency (the rate=8 bug). No chaining at all
+            # makes steps overlap, halving latency (too fast).
+            #
+            # Fix: cap gpu_free_time to at most 1 step ahead of now.
+            # This allows proper serialization while preventing drift.
             now = time.perf_counter()
-            start_time = max(now, self._gpu_free_time)
+            capped_free = min(self._gpu_free_time, now + latency_s)
+            start_time = max(now, capped_free)
             end_time = start_time + latency_s
             self._gpu_free_time = end_time
             delay = end_time - now
