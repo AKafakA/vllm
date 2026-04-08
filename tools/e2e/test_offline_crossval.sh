@@ -67,7 +67,7 @@ echo "  Profile records: $RECORDS"
 # Build profile
 echo ""
 echo "=== Build profile ==="
-python3 /workspace/vllm-emulator-v18/paper/isca-2026-mlarchsys/scripts/temp/build_serving_profile_2d.py \
+python3 /workspace/vllm-emulator-v18/vllm_emulator/profile/build_serving_profile.py \
     "${RESULT_DIR}/step_cycle_full.jsonl" \
     "${RESULT_DIR}/profiles/sweep-1.5b-tp1-v14.json" \
     "${RESULT_DIR}/profiles/serving-1.5b-tp1-crossval.json" \

@@ -15,7 +15,7 @@ ONLINE_DIR="/workspace/eval_results/RTX-3060-12GB/online"
 # First rebuild profile with 2D regression
 echo "=== Rebuild profile with 2D overhead ==="
 RESULT_DIR="/workspace/eval_results/RTX-3060-12GB"
-python3 /workspace/vllm-emulator-v18/paper/isca-2026-mlarchsys/scripts/temp/build_serving_profile_2d.py \
+python3 /workspace/vllm-emulator-v18/vllm_emulator/profile/build_serving_profile.py \
     "${RESULT_DIR}/step_cycle_fresh.jsonl" \
     "${RESULT_DIR}/profiles/sweep-1.5b-tp1-v14.json" \
     "${RESULT_DIR}/profiles/serving-1.5b-tp1-ablation.json" \

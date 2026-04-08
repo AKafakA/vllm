@@ -104,7 +104,7 @@ for tt_range in [(10,20), (20,50), (50,100), (100,200)]:
 # Phase 2: Rebuild profile
 echo ""
 echo "=== Phase 2: Rebuild profile ==="
-python3 /workspace/vllm-emulator-v18/paper/isca-2026-mlarchsys/scripts/temp/build_serving_profile_2d.py \
+python3 /workspace/vllm-emulator-v18/vllm_emulator/profile/build_serving_profile.py \
     "$TRACE" \
     "${RESULT_DIR}/profiles/sweep-1.5b-tp1-v14.json" \
     "${RESULT_DIR}/profiles/serving-1.5b-tp1-extended.json" \

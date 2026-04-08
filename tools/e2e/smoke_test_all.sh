@@ -74,7 +74,7 @@ run_bench() {
 echo "============================================"
 echo "=== TEST 1: Rebuild calibrated 1.5B profile ==="
 echo "============================================"
-python3 /workspace/vllm-emulator-v18/paper/isca-2026-mlarchsys/scripts/temp/build_serving_profile_2d.py \
+python3 /workspace/vllm-emulator-v18/vllm_emulator/profile/build_serving_profile.py \
     "${RESULT_DIR}/step_cycle_1.5b_full.jsonl" \
     "${RESULT_DIR}/profiles/sweep-1.5b-tp1-v14.json" \
     "${RESULT_DIR}/profiles/serving-1.5b-tp1-calibrated.json" \
