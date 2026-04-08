@@ -343,6 +343,12 @@ class ExecutorEmulatorHook:
                 return fake_output
 
             sample_fut = self._gpu_executor.submit(_gpu_step)
+
+            # Track expected completion for scheduling compensation.
+            # NOT used for timer chaining — just for detecting when
+            # the virtual GPU is busy (compensation triggers on prefill
+            # steps when gpu_free_time > now).
+            self._gpu_free_time = time.perf_counter() + latency_s
         else:
             # Accelerated: submit without sleep (still pending Future
             # until the worker picks it up — avoids deadlock)
