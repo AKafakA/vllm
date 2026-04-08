@@ -148,10 +148,13 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         )
 
         # 2D profile: per-request latency overhead from step-cycle data.
-        # Computed as slope of latency vs num_requests at similar total_tokens.
-        # Stored in profile as "overhead_per_request_us".
         self._2d_overhead_per_req_us = float(
             profile_pack.get("overhead_per_request_us", 0))
+
+        # Concurrency correction table: bucketed correction by num_requests.
+        # correction[N] = actual_step_cycle - oracle_1d_prediction at concurrency N.
+        # Positive = profile underestimates, negative = overestimates.
+        self._correction_table = profile_pack.get("correction_table", [])
 
     @property
     def gpu_model(self) -> str:
@@ -277,9 +280,14 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         # 2D mode: 1D base + per-request overhead from regression
         if oracle_mode == "2d" and self._2d_overhead_per_req_us > 0 and num_requests > 0:
-            # Get base latency from 1D profile (same as step_cycle mode)
             base = self._estimate_1d(total_tokens, has_prefill, profile_section)
             return base + self._2d_overhead_per_req_us * num_requests
+
+        # Corrected mode: 1D base + bucketed correction by num_requests
+        if oracle_mode == "corrected" and self._correction_table and num_requests > 0:
+            base = self._estimate_1d(total_tokens, has_prefill, profile_section)
+            correction = self._lookup_correction(num_requests)
+            return max(1.0, base + correction)  # clamp to positive
 
         # Offline profile: step-cycles from LLM() path with CUDA graphs
         if profile_section == "offline" and self._offline_forward_pass:
@@ -318,6 +326,29 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         # Extrapolate using power-law from the combined profile
         return self._fwd_pw_a * (total_tokens ** self._fwd_pw_b)
+
+    def _lookup_correction(self, num_requests: int) -> float:
+        """Interpolate correction from bucketed correction table."""
+        table = self._correction_table
+        if not table:
+            return 0.0
+
+        # Find bracketing entries
+        ns = [e["num_requests"] for e in table]
+        cs = [e["correction_us"] for e in table]
+
+        if num_requests <= ns[0]:
+            return cs[0]
+        if num_requests >= ns[-1]:
+            return cs[-1]
+
+        # Linear interpolation between brackets
+        for i in range(len(ns) - 1):
+            if ns[i] <= num_requests <= ns[i + 1]:
+                frac = (num_requests - ns[i]) / (ns[i + 1] - ns[i])
+                return cs[i] + frac * (cs[i + 1] - cs[i])
+
+        return cs[-1]
 
     def _estimate_1d(self, total_tokens: int, has_prefill: bool,
                      profile_section: str) -> float:

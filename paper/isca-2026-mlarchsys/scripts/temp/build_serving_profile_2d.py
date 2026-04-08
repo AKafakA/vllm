@@ -188,12 +188,74 @@ try:
 except Exception as e:
     print(f"\n  2D regression failed: {e}")
 
+# Build concurrency correction table.
+# For each concurrency bucket, compute:
+#   correction = actual_step_cycle - oracle_1d_prediction(total_tokens)
+# This captures the gap between 1D profile and reality at each concurrency.
+# Positive = profile underestimates (need to add), negative = overestimates.
+correction_table = []
+try:
+    # Build 1D oracle lookup from combined forward_pass for prediction
+    fp_map = {e["total_tokens"]: e["latency_us"] for e in combined_fp}
+    fp_tts = sorted(fp_map.keys())
+
+    def oracle_1d(tt):
+        """Simple 1D interpolation matching what the oracle does."""
+        if tt <= 0:
+            return 0
+        if tt in fp_map:
+            return fp_map[tt]
+        # Find bracketing entries
+        lo = max((t for t in fp_tts if t <= tt), default=fp_tts[0])
+        hi = min((t for t in fp_tts if t >= tt), default=fp_tts[-1])
+        if lo == hi:
+            return fp_map[lo]
+        frac = (tt - lo) / (hi - lo)
+        return fp_map[lo] + frac * (fp_map[hi] - fp_map[lo])
+
+    # Use decode-only steps (no prefill noise)
+    decode_recs = [r for r in records[200:] if r.get("num_new_reqs", 0) == 0
+                   and r.get("num_decode_seqs", 0) > 0]
+
+    # Group by concurrency bucket (width=5)
+    from collections import defaultdict as dd
+    by_conc = dd(list)
+    for r in decode_recs:
+        n = r["num_decode_seqs"]
+        by_conc[n].append(r)
+
+    # Compute correction per bucket
+    buckets = sorted(set((n // 5) * 5 for n in by_conc.keys()))
+    print(f"\n  Concurrency correction table ({len(decode_recs)} decode records):")
+    for bucket in buckets:
+        recs_in_bucket = []
+        for n in range(bucket, bucket + 5):
+            recs_in_bucket.extend(by_conc.get(n, []))
+        if len(recs_in_bucket) < 5:
+            continue
+        actual_lats = [r["step_cycle_us"] for r in recs_in_bucket]
+        predicted_lats = [oracle_1d(r["total_tokens"]) for r in recs_in_bucket]
+        actual_med = statistics.median(actual_lats)
+        predicted_med = statistics.median(predicted_lats)
+        correction = actual_med - predicted_med
+        avg_n = statistics.median([r["num_decode_seqs"] for r in recs_in_bucket])
+        correction_table.append({
+            "num_requests": round(avg_n),
+            "correction_us": round(correction, 1),
+            "num_samples": len(recs_in_bucket),
+        })
+        print(f"    N={avg_n:>3}: actual={actual_med/1000:.1f}ms, predicted={predicted_med/1000:.1f}ms, "
+              f"correction={correction/1000:+.1f}ms (n={len(recs_in_bucket)})")
+except Exception as e:
+    print(f"\n  Correction table failed: {e}")
+
 profile = {
     "version": "1.0",
     "gpu_model": gpu_model,
     "model_name": model_name,
     "profile_type": "serving_step_cycle_2d",
     "overhead_per_request_us": round(overhead_per_request_us, 1),
+    "correction_table": correction_table,
     "prefill": [],
     "decode": [],
     "forward_pass": sorted(combined_fp, key=lambda e: e["total_tokens"]),
