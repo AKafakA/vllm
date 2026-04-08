@@ -156,6 +156,19 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         # Positive = profile underestimates, negative = overestimates.
         self._correction_table = profile_pack.get("correction_table", [])
 
+        # Proper 2D table: indexed by (total_tokens, concurrency).
+        # Each entry: {tt, conc, latency_us, num_samples}.
+        # Organized as: {tt -> [(conc, latency_us), ...]} for fast lookup.
+        self._2d_table: dict[int, list[tuple[int, float]]] = {}
+        for e in profile_pack.get("step_cycle_2d_table", []):
+            tt = e["tt"]
+            self._2d_table.setdefault(tt, []).append(
+                (e["conc"], e["latency_us"]))
+        # Sort each tt's concurrency entries
+        for tt in self._2d_table:
+            self._2d_table[tt].sort()
+        self._2d_table_tts = sorted(self._2d_table.keys())
+
     @property
     def gpu_model(self) -> str:
         return self._gpu_model
@@ -278,10 +291,12 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         if total_tokens <= 0:
             return 0.0
 
-        # 2D mode: 1D base + per-request overhead from regression
-        if oracle_mode == "2d" and self._2d_overhead_per_req_us > 0 and num_requests > 0:
-            base = self._estimate_1d(total_tokens, has_prefill, profile_section)
-            return base + self._2d_overhead_per_req_us * num_requests
+        # 2D table mode: bilinear interpolation over (tt, concurrency)
+        if oracle_mode == "2d" and self._2d_table and num_requests > 0:
+            result = self._lookup_2d_table(total_tokens, num_requests)
+            if result is not None:
+                return result
+            # Fall through to 1D if 2D table doesn't cover this range
 
         # Corrected mode: 1D base + bucketed correction by num_requests
         if oracle_mode == "corrected" and self._correction_table and num_requests > 0:
@@ -349,6 +364,53 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
                 return cs[i] + frac * (cs[i + 1] - cs[i])
 
         return cs[-1]
+
+    def _lookup_2d_table(self, total_tokens: int, num_requests: int) -> float | None:
+        """Bilinear interpolation over the 2D (tt, concurrency) table.
+
+        Returns None if the table doesn't cover this (tt, conc) range.
+        """
+        tts = self._2d_table_tts
+        if not tts:
+            return None
+
+        # Clamp tt to table range
+        if total_tokens < tts[0] or total_tokens > tts[-1]:
+            return None
+
+        def _interp_conc(conc_entries: list[tuple[int, float]], conc: int) -> float:
+            """Interpolate latency for a given concurrency within one tt."""
+            if len(conc_entries) == 1:
+                return conc_entries[0][1]
+            cs = [c for c, _ in conc_entries]
+            ls = [l for _, l in conc_entries]
+            if conc <= cs[0]:
+                return ls[0]
+            if conc >= cs[-1]:
+                # Extrapolate from last two points
+                if len(cs) >= 2:
+                    slope = (ls[-1] - ls[-2]) / max(cs[-1] - cs[-2], 1)
+                    return ls[-1] + slope * (conc - cs[-1])
+                return ls[-1]
+            return _interpolate_linear(
+                [float(c) for c in cs], [float(l) for l in ls], float(conc))
+
+        # Find bracketing tt values
+        if total_tokens in self._2d_table:
+            return _interp_conc(self._2d_table[total_tokens], num_requests)
+
+        # Interpolate between two tt brackets
+        lo_tt = tts[0]
+        hi_tt = tts[-1]
+        for i in range(len(tts) - 1):
+            if tts[i] <= total_tokens <= tts[i + 1]:
+                lo_tt, hi_tt = tts[i], tts[i + 1]
+                break
+
+        lo_lat = _interp_conc(self._2d_table[lo_tt], num_requests)
+        hi_lat = _interp_conc(self._2d_table[hi_tt], num_requests)
+        frac = (total_tokens - lo_tt) / max(hi_tt - lo_tt, 1)
+        return lo_lat + frac * (hi_lat - lo_lat)
 
     def _estimate_1d(self, total_tokens: int, has_prefill: bool,
                      profile_section: str) -> float:

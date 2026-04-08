@@ -72,6 +72,19 @@ class ExecutorEmulatorHook:
         self._eos_token_id = 2
         self._debug_count = 0
 
+        # pyinstrument profiler (enabled by VLLM_EMULATOR_PYINSTRUMENT=<path>)
+        self._profiler = None
+        pyinst_path = os.environ.get("VLLM_EMULATOR_PYINSTRUMENT", "")
+        if pyinst_path:
+            try:
+                from pyinstrument import Profiler
+                self._profiler = Profiler()
+                self._profiler_output = pyinst_path
+                self._profiler.start()
+                print(f"[ExecutorEmulatorHook] pyinstrument profiling to {pyinst_path}")
+            except ImportError:
+                print("[ExecutorEmulatorHook] pyinstrument not installed")
+
         # Per-step trace (enabled by VLLM_EMULATOR_HOOK_TRACE=<path>)
         self._trace_file = None
         trace_path = os.environ.get("VLLM_EMULATOR_HOOK_TRACE", "")
@@ -125,7 +138,7 @@ class ExecutorEmulatorHook:
                 profile_pack)
 
             # Auto-calibrate overhead_per_req from profile if not set manually
-            if self._oracle_mode == "hybrid" and self._overhead_per_req_us == 0:
+            if self._oracle_mode in ("hybrid", "2d") and self._overhead_per_req_us == 0:
                 self._overhead_per_req_us = self._calibrate_overhead_per_req(
                     profile_pack)
 
@@ -259,13 +272,14 @@ class ExecutorEmulatorHook:
         )
         latency_us = oracle_us
 
-        # 2. Hybrid overhead: per-request host-side cost (only in hybrid mode)
-        # Linear: overhead * N (original, over-adds at high concurrency)
-        # Sublinear: overhead * sqrt(N) (amortized at high batch sizes)
+        # 2. Hybrid overhead: per-request host-side cost
+        # Applied in "hybrid" mode (1D base) and "2d" mode (2D table base).
+        # Captures host-side costs (scheduling, IPC, output dispatch) not in step-cycle.
+        # Linear: overhead * N | Sqrt: overhead * sqrt(N)
         # Controlled by VLLM_EMULATOR_OVERHEAD_SCALING=linear|sqrt (default linear)
         import math
         hybrid_overhead_us = 0.0
-        if self._oracle_mode == "hybrid" and self._overhead_per_req_us > 0:
+        if self._oracle_mode in ("hybrid", "2d") and self._overhead_per_req_us > 0:
             scaling = os.environ.get("VLLM_EMULATOR_OVERHEAD_SCALING", "linear")
             if scaling == "sqrt":
                 hybrid_overhead_us = self._overhead_per_req_us * math.sqrt(num_decode)
@@ -455,12 +469,22 @@ class ExecutorEmulatorHook:
 
 
     def shutdown(self):
-        """Clean up executor thread pool."""
+        """Clean up executor thread pool and save profiling data."""
         if hasattr(self, '_gpu_executor') and self._gpu_executor is not None:
             self._gpu_executor.shutdown(wait=False)
         if self._trace_file is not None:
             self._trace_file.close()
             self._trace_file = None
+        if self._profiler is not None:
+            self._profiler.stop()
+            with open(self._profiler_output, "w") as f:
+                f.write(self._profiler.output_text(unicode=True, color=False))
+            print(f"[ExecutorEmulatorHook] pyinstrument saved to {self._profiler_output}")
+            # Also save HTML version
+            html_path = self._profiler_output.replace(".txt", ".html")
+            with open(html_path, "w") as f:
+                f.write(self._profiler.output_html())
+            print(f"[ExecutorEmulatorHook] pyinstrument HTML saved to {html_path}")
 
 
 def get_executor_hook() -> ExecutorEmulatorHook | None:

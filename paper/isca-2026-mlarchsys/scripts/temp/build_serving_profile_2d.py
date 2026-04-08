@@ -249,6 +249,80 @@ try:
 except Exception as e:
     print(f"\n  Correction table failed: {e}")
 
+# =============================================
+# Build proper 2D table: (total_tokens, concurrency) → latency_us
+# Each step-cycle record has total_tokens + num_decode_seqs.
+# Bin by (tt_bucket, conc_bucket) and take median per bin.
+# This captures the real latency at each concurrency level without
+# mixing low-rate (17ms) and high-rate (113ms) data at the same tt.
+# =============================================
+CONC_BOUNDARIES = [1, 3, 5, 10, 20, 50, 100, 200, 300]  # bucket edges
+TT_BUCKET_WIDTH = 5  # group tt into width-5 buckets
+
+def conc_bucket(n):
+    """Map concurrency to bucket midpoint."""
+    for i in range(len(CONC_BOUNDARIES) - 1):
+        if CONC_BOUNDARIES[i] <= n < CONC_BOUNDARIES[i + 1]:
+            return (CONC_BOUNDARIES[i] + CONC_BOUNDARIES[i + 1]) // 2
+    return CONC_BOUNDARIES[-1]
+
+def tt_bucket(tt):
+    """Map total_tokens to bucket center."""
+    return (tt // TT_BUCKET_WIDTH) * TT_BUCKET_WIDTH + TT_BUCKET_WIDTH // 2
+
+# Use all steps (skip warmup), both prefill and decode
+step_cycle_2d_data = defaultdict(list)  # (tt_bucket, conc_bucket) -> [latency_us]
+for r in records[200:]:  # skip first 200 records (warmup)
+    tt = r["total_tokens"]
+    # Use total concurrent requests (new + decode)
+    conc = r.get("num_new_reqs", 0) + r.get("num_decode_seqs", 0)
+    if conc < 1:
+        conc = 1
+    ttb = tt_bucket(tt)
+    cb = conc_bucket(conc)
+    step_cycle_2d_data[(ttb, cb)].append(r["step_cycle_us"])
+
+step_cycle_2d_table = []
+print(f"\n  2D table (tt_bucket × conc_bucket):")
+# Build table entries with outlier filtering
+for (ttb, cb), lats in sorted(step_cycle_2d_data.items()):
+    if len(lats) < 3:  # need minimum samples
+        continue
+    med = statistics.median(lats)
+    # Filter extreme outliers (>3x median) — catches CUDA graph compilation
+    filtered = [v for v in lats if v < med * 3 and v > med / 3]
+    if len(filtered) < 2:
+        filtered = lats
+    final_lat = statistics.median(filtered)
+    step_cycle_2d_table.append({
+        "tt": ttb,
+        "conc": cb,
+        "latency_us": round(final_lat, 1),
+        "num_samples": len(lats),
+    })
+
+# Print summary at key tt values
+tt_set = sorted(set(e["tt"] for e in step_cycle_2d_table))
+conc_set = sorted(set(e["conc"] for e in step_cycle_2d_table))
+table_map = {(e["tt"], e["conc"]): e["latency_us"] for e in step_cycle_2d_table}
+print(f"    {len(step_cycle_2d_table)} cells, tt range={tt_set[0]}-{tt_set[-1]}, "
+      f"conc buckets={conc_set}")
+print(f"    Sample at key tt values (latency in ms):")
+print(f"    {'tt':>6}", end="")
+for cb in conc_set:
+    print(f"  c={cb:>3}", end="")
+print()
+for ttb in [2, 7, 12, 52, 127, 257, 262, 267, 502]:
+    if ttb in [e["tt"] for e in step_cycle_2d_table]:
+        print(f"    {ttb:>6}", end="")
+        for cb in conc_set:
+            val = table_map.get((ttb, cb))
+            if val:
+                print(f"  {val/1000:>6.1f}", end="")
+            else:
+                print(f"  {'--':>6}", end="")
+        print()
+
 profile = {
     "version": "1.0",
     "gpu_model": gpu_model,
@@ -263,6 +337,8 @@ profile = {
     "decode_forward_pass": sorted(decode_fp, key=lambda e: e["total_tokens"]),
     "offline_forward_pass": sorted(offline_fp, key=lambda e: e["total_tokens"]),
     "sweep_forward_pass": sorted(sweep_fp, key=lambda e: e["total_tokens"]),
+    # Proper 2D table: (tt, concurrency) → latency_us
+    "step_cycle_2d_table": sorted(step_cycle_2d_table, key=lambda e: (e["tt"], e["conc"])),
     # Emulator calibration parameters (auto-computed from trace)
     "cuda_graph_warmup_us": round(avg_cuda_warmup_us, 0),
     "sched_overhead_table": sched_overhead_table,
