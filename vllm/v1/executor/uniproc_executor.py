@@ -165,6 +165,9 @@ class UniProcExecutor(Executor):
     def shutdown(self) -> None:
         if worker := self.driver_worker:
             worker.shutdown()
+        emu_hook = getattr(self, '_emulator_executor_hook', None)
+        if emu_hook is not None:
+            emu_hook.shutdown()
 
 
 class ExecutorWithExternalLauncher(UniProcExecutor):

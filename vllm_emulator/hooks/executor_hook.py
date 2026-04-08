@@ -57,7 +57,14 @@ class ExecutorEmulatorHook:
         self._emulator_mode = EMULATOR_MODE_REALTIME
         self._profile_usage = "online"  # "online" or "offline"
         self._sample_future: Future | None = None
-        self._gpu_free_time = 0.0  # Virtual GPU timeline for timer chaining
+        self._gpu_free_time = 0.0  # Virtual GPU timeline (legacy, kept for capped mode)
+
+        # Single-worker executor: mimics real GPU's async_output_thread.
+        # Pending Futures are real queued work, not manual timestamps.
+        # Naturally serializes (1 worker = 1 GPU), no drift bug.
+        from concurrent.futures import ThreadPoolExecutor
+        self._gpu_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="EmulatorGPU")
 
         # Fake output generation
         self._rng = __import__("random").Random(42)
@@ -309,48 +316,37 @@ class ExecutorEmulatorHook:
     def _handle_async(self, latency_s: float, fake_output,
                       total_tokens: int,
                       scheduler_output: "SchedulerOutput") -> "Future":
-        """Async engine: timer-based pending Future.
+        """Async engine: pending Future via single-worker executor.
 
         The async scheduler REQUIRES pending Futures to keep
         num_output_placeholders > 0 for the next schedule() call.
         Resolved Futures cause deadlock (num_new_tokens = 0).
+
+        Uses a single-worker ThreadPoolExecutor to mimic real GPU's
+        async_output_thread. Each step is submitted as a task that
+        sleeps for the profiled latency then returns fake output.
+        The single worker naturally serializes (one GPU), and pending
+        Futures correspond to real queued work — no manual timestamp
+        chaining, no drift bug.
         """
         exec_fut: Future = Future()
         exec_fut.set_result(None)
 
-        sample_fut: Future = Future()
-
         if self._emulator_mode == EMULATOR_MODE_REALTIME:
-            # Timer: pending Future resolves after profiled latency.
-            #
-            # Chain timers to model GPU as serial resource, but cap
-            # the drift to prevent unbounded accumulation.
-            #
-            # With pipelining (batch_queue_size=2), the engine schedules
-            # step N+1 before N's timer fires. Uncapped chaining causes
-            # gpu_free_time to race ahead, inflating timer delays at
-            # high concurrency (the rate=8 bug). No chaining at all
-            # makes steps overlap, halving latency (too fast).
-            #
-            # Fix: cap gpu_free_time to at most 1 step ahead of now.
-            # This allows proper serialization while preventing drift.
-            now = time.perf_counter()
-            capped_free = min(self._gpu_free_time, now + latency_s)
-            start_time = max(now, capped_free)
-            end_time = start_time + latency_s
-            self._gpu_free_time = end_time
-            delay = end_time - now
+            # Submit to single-worker executor: sleeps then returns output.
+            # The worker queue naturally serializes (1 GPU).
+            # With batch_queue_size=2, at most 2 tasks are pending:
+            # one executing (sleeping), one queued. Matches real GPU.
+            def _gpu_step():
+                if latency_s >= 0.001:
+                    time.sleep(latency_s)
+                return fake_output
 
-            if delay >= 0.001:
-                timer = threading.Timer(delay,
-                                        lambda: sample_fut.set_result(fake_output))
-                timer.daemon = True
-                timer.start()
-            else:
-                sample_fut.set_result(fake_output)
+            sample_fut = self._gpu_executor.submit(_gpu_step)
         else:
-            # Accelerated: resolve immediately (no sleep, virtual time)
-            sample_fut.set_result(fake_output)
+            # Accelerated: submit without sleep (still pending Future
+            # until the worker picks it up — avoids deadlock)
+            sample_fut = self._gpu_executor.submit(lambda: fake_output)
 
         self._sample_future = sample_fut
 
@@ -426,6 +422,15 @@ class ExecutorEmulatorHook:
             prompt_logprobs_dict={},
             pooler_output=[None] * len(req_ids),
         )
+
+
+    def shutdown(self):
+        """Clean up executor thread pool."""
+        if hasattr(self, '_gpu_executor') and self._gpu_executor is not None:
+            self._gpu_executor.shutdown(wait=False)
+        if self._trace_file is not None:
+            self._trace_file.close()
+            self._trace_file = None
 
 
 def get_executor_hook() -> ExecutorEmulatorHook | None:
