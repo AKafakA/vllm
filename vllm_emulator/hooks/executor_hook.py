@@ -260,9 +260,17 @@ class ExecutorEmulatorHook:
         latency_us = oracle_us
 
         # 2. Hybrid overhead: per-request host-side cost (only in hybrid mode)
+        # Linear: overhead * N (original, over-adds at high concurrency)
+        # Sublinear: overhead * sqrt(N) (amortized at high batch sizes)
+        # Controlled by VLLM_EMULATOR_OVERHEAD_SCALING=linear|sqrt (default linear)
+        import math
         hybrid_overhead_us = 0.0
         if self._oracle_mode == "hybrid" and self._overhead_per_req_us > 0:
-            hybrid_overhead_us = self._overhead_per_req_us * num_decode
+            scaling = os.environ.get("VLLM_EMULATOR_OVERHEAD_SCALING", "linear")
+            if scaling == "sqrt":
+                hybrid_overhead_us = self._overhead_per_req_us * math.sqrt(num_decode)
+            else:
+                hybrid_overhead_us = self._overhead_per_req_us * num_decode
             latency_us += hybrid_overhead_us
 
         # 3. Scheduling compensation: when prior GPU work is in flight
