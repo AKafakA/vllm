@@ -169,6 +169,22 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             self._2d_table[tt].sort()
         self._2d_table_tts = sorted(self._2d_table.keys())
 
+    def get_max_step_cycle_us(self, num_requests: int) -> float:
+        """Get the maximum profiled step_cycle at a given concurrency.
+
+        Used by chain drift correction (Option D): caps gpu_free_time
+        drift to the maximum observed step duration at the current
+        concurrency level, derived from the 2D table.
+        """
+        if not self._2d_table:
+            return 0.0
+        max_lat = 0.0
+        for tt in self._2d_table_tts:
+            result = self._lookup_2d_table(tt, num_requests)
+            if result is not None and result > max_lat:
+                max_lat = result
+        return max_lat
+
     @property
     def gpu_model(self) -> str:
         return self._gpu_model

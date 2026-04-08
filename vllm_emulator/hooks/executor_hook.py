@@ -341,20 +341,61 @@ class ExecutorEmulatorHook:
         """Async engine: pending Future.
 
         Timer mode (VLLM_EMULATOR_TIMER_MODE):
-          pool:  ThreadPoolExecutor (default) — no drift, matches real GPU
-          chain: threading.Timer + gpu_free_time — better TTFT at low rates
-                 VLLM_EMULATOR_CHAIN_CAP: 0=uncapped, 1=capped(default), -1=no chain
+          pool:    ThreadPoolExecutor — no drift, best TPOT (Option B)
+          chain:   threading.Timer + gpu_free_time — better TTFT (Option A)
+          dcap:    Chain + profiled drift correction (Option D)
+          split:   Chain for prefill, pool for decode (Option E)
+          block:   Full engine-thread blocking (Option F)
+        Chain sub-options via VLLM_EMULATOR_CHAIN_CAP:
+          0=uncapped, 1=capped, -1=no chain
         """
         exec_fut: Future = Future()
         exec_fut.set_result(None)
 
         timer_mode = os.environ.get("VLLM_EMULATOR_TIMER_MODE", "pool")
+        has_prefill = len(scheduler_output.scheduled_new_reqs) > 0
 
-        if timer_mode == "chain":
+        # Option F: Full engine-thread blocking
+        if timer_mode == "block":
+            if self._emulator_mode == EMULATOR_MODE_REALTIME and latency_s >= 0.001:
+                time.sleep(latency_s)
+            sample_fut = self._gpu_executor.submit(lambda: fake_output)
+            self._gpu_free_time = time.perf_counter()
+            self._sample_future = sample_fut
+            self._debug_count += 1
+            if self._debug_count <= 10 or self._debug_count % 100 == 0:
+                n_reqs = len(scheduler_output.num_scheduled_tokens)
+                n_new = len(scheduler_output.scheduled_new_reqs)
+                print(f"[ExecutorHook] step={self._debug_count} tt={total_tokens} "
+                      f"reqs={n_reqs} new={n_new} "
+                      f"latency={latency_s*1000:.1f}ms mode=block")
+            return exec_fut
+
+        # Option E: Split — chain for prefill, pool for decode
+        if timer_mode == "split":
+            effective_mode = "chain" if has_prefill else "pool"
+        # Option D: Chain with profiled drift correction
+        elif timer_mode == "dcap":
+            effective_mode = "chain"
+        else:
+            effective_mode = timer_mode
+
+        if effective_mode == "chain":
             # Timer + gpu_free_time chain
             sample_fut: Future = Future()
             if self._emulator_mode == EMULATOR_MODE_REALTIME:
                 now = time.perf_counter()
+
+                # Option D drift correction: cap gpu_free_time using
+                # max profiled step_cycle at current concurrency
+                if timer_mode == "dcap":
+                    num_reqs = len(scheduler_output.num_scheduled_tokens)
+                    max_step_us = self._oracle.get_max_step_cycle_us(num_reqs)
+                    if max_step_us > 0:
+                        max_drift_s = max_step_us / 1e6
+                        self._gpu_free_time = min(
+                            self._gpu_free_time, now + max_drift_s)
+
                 chain_cap = float(os.environ.get("VLLM_EMULATOR_CHAIN_CAP", "0"))
                 if chain_cap < 0:
                     delay = latency_s
@@ -381,7 +422,7 @@ class ExecutorEmulatorHook:
             else:
                 sample_fut.set_result(fake_output)
         else:
-            # ThreadPool (default)
+            # ThreadPool
             if self._emulator_mode == EMULATOR_MODE_REALTIME:
                 def _gpu_step():
                     if latency_s >= 0.001:
@@ -401,7 +442,7 @@ class ExecutorEmulatorHook:
             n_new = len(scheduler_output.scheduled_new_reqs)
             print(f"[ExecutorHook] step={self._debug_count} tt={total_tokens} "
                   f"reqs={n_reqs} new={n_new} "
-                  f"latency={latency_s*1000:.1f}ms")
+                  f"latency={latency_s*1000:.1f}ms mode={timer_mode}")
 
         return exec_fut
 
