@@ -88,16 +88,16 @@ combined_fp = build_section(all_by_tt, "combined_forward_pass")
 
 # Merge with sweep for large tt
 max_tt = max(e["total_tokens"] for e in combined_fp) if combined_fp else 0
+sweep_fp = []
 try:
     sweep = json.load(open(sweep_profile_path))
-    added = 0
-    for e in sweep["forward_pass"]:
-        if e["total_tokens"] > max_tt:
-            combined_fp.append(e)
-            added += 1
-    print(f"  Merged {added} sweep buckets for tt>{max_tt}")
+    sweep_fp = sweep.get("forward_pass", [])
+    # Sweep (enforce_eager, no CUDA graphs) is NOT merged into the online
+    # forward_pass. It overestimates by 3-4x at tt>271 vs graph-enabled GPU.
+    # Kept as separate "sweep_forward_pass" for reference/offline/non-graph use.
+    print(f"  Sweep loaded ({len(sweep_fp)} buckets) — stored separately, NOT merged into online")
 except FileNotFoundError:
-    pass
+    print(f"  No sweep profile found")
 
 # Compute emulator calibration parameters from trace + bench results
 # 1. CUDA graph shape warmup: first-encounter overhead per padded batch size
@@ -262,6 +262,7 @@ profile = {
     "prefill_forward_pass": sorted(prefill_fp, key=lambda e: e["total_tokens"]),
     "decode_forward_pass": sorted(decode_fp, key=lambda e: e["total_tokens"]),
     "offline_forward_pass": sorted(offline_fp, key=lambda e: e["total_tokens"]),
+    "sweep_forward_pass": sorted(sweep_fp, key=lambda e: e["total_tokens"]),
     # Emulator calibration parameters (auto-computed from trace)
     "cuda_graph_warmup_us": round(avg_cuda_warmup_us, 0),
     "sched_overhead_table": sched_overhead_table,
