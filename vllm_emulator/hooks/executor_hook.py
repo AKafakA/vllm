@@ -324,43 +324,59 @@ class ExecutorEmulatorHook:
     def _handle_async(self, latency_s: float, fake_output,
                       total_tokens: int,
                       scheduler_output: "SchedulerOutput") -> "Future":
-        """Async engine: pending Future via single-worker executor.
+        """Async engine: pending Future.
 
-        The async scheduler REQUIRES pending Futures to keep
-        num_output_placeholders > 0 for the next schedule() call.
-        Resolved Futures cause deadlock (num_new_tokens = 0).
-
-        Uses a single-worker ThreadPoolExecutor to mimic real GPU's
-        async_output_thread. Each step is submitted as a task that
-        sleeps for the profiled latency then returns fake output.
-        The single worker naturally serializes (one GPU), and pending
-        Futures correspond to real queued work — no manual timestamp
-        chaining, no drift bug.
+        Timer mode (VLLM_EMULATOR_TIMER_MODE):
+          pool:  ThreadPoolExecutor (default) — no drift, matches real GPU
+          chain: threading.Timer + gpu_free_time — better TTFT at low rates
+                 VLLM_EMULATOR_CHAIN_CAP: 0=uncapped, 1=capped(default), -1=no chain
         """
         exec_fut: Future = Future()
         exec_fut.set_result(None)
 
-        if self._emulator_mode == EMULATOR_MODE_REALTIME:
-            # Submit to single-worker executor: sleeps then returns output.
-            # The worker queue naturally serializes (1 GPU).
-            # With batch_queue_size=2, at most 2 tasks are pending:
-            # one executing (sleeping), one queued. Matches real GPU.
-            def _gpu_step():
-                if latency_s >= 0.001:
-                    time.sleep(latency_s)
-                return fake_output
+        timer_mode = os.environ.get("VLLM_EMULATOR_TIMER_MODE", "pool")
 
-            sample_fut = self._gpu_executor.submit(_gpu_step)
+        if timer_mode == "chain":
+            # Timer + gpu_free_time chain
+            sample_fut: Future = Future()
+            if self._emulator_mode == EMULATOR_MODE_REALTIME:
+                now = time.perf_counter()
+                chain_cap = float(os.environ.get("VLLM_EMULATOR_CHAIN_CAP", "0"))
+                if chain_cap < 0:
+                    delay = latency_s
+                elif chain_cap == 0:
+                    start_time = max(now, self._gpu_free_time)
+                    end_time = start_time + latency_s
+                    self._gpu_free_time = end_time
+                    delay = end_time - now
+                else:
+                    max_drift = chain_cap * latency_s
+                    capped_free = min(self._gpu_free_time, now + max_drift)
+                    start_time = max(now, capped_free)
+                    end_time = start_time + latency_s
+                    self._gpu_free_time = end_time
+                    delay = end_time - now
 
-            # Track expected completion for scheduling compensation.
-            # NOT used for timer chaining — just for detecting when
-            # the virtual GPU is busy (compensation triggers on prefill
-            # steps when gpu_free_time > now).
-            self._gpu_free_time = time.perf_counter() + latency_s
+                if delay >= 0.001:
+                    timer = threading.Timer(delay,
+                        lambda: sample_fut.set_result(fake_output))
+                    timer.daemon = True
+                    timer.start()
+                else:
+                    sample_fut.set_result(fake_output)
+            else:
+                sample_fut.set_result(fake_output)
         else:
-            # Accelerated: submit without sleep (still pending Future
-            # until the worker picks it up — avoids deadlock)
-            sample_fut = self._gpu_executor.submit(lambda: fake_output)
+            # ThreadPool (default)
+            if self._emulator_mode == EMULATOR_MODE_REALTIME:
+                def _gpu_step():
+                    if latency_s >= 0.001:
+                        time.sleep(latency_s)
+                    return fake_output
+                sample_fut = self._gpu_executor.submit(_gpu_step)
+                self._gpu_free_time = time.perf_counter() + latency_s
+            else:
+                sample_fut = self._gpu_executor.submit(lambda: fake_output)
 
         self._sample_future = sample_fut
 
