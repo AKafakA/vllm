@@ -59,6 +59,8 @@ def get_request_info(requests) -> List[Dict]:
             "num_prompt_tokens": req.num_prompt_tokens,
             "num_computed_tokens": req.num_computed_tokens,
             "total_num_tokens": req.num_tokens,
+            "num_output_tokens": req.num_output_tokens,
+            "predicted_decode_tokens": req.predicted_decode_tokens,
             "arrival_time": req.arrival_time,
             "n_blocks": len(req.block_hashes),
         }

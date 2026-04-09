@@ -395,12 +395,15 @@ async def schedule_trace(raw_request: Request):
         else:
             scheduler_trace_flattened[key] = []
             for request_info in scheduler_trace[key]:
+                request_id = request_info["request_id"]
                 num_prompt_tokens = request_info["num_prompt_tokens"]
                 num_computed_tokens = request_info["num_computed_tokens"]
                 total_num_tokens = request_info["total_num_tokens"]
-                request_id = request_info["request_id"]
+                num_output_tokens = request_info.get("num_output_tokens", 0)
+                predicted_decode_tokens = request_info.get("predicted_decode_tokens", 0)
                 scheduler_trace_flattened[key].extend([request_id, num_prompt_tokens, num_computed_tokens,
-                                                       total_num_tokens])
+                                                       total_num_tokens, num_output_tokens,
+                                                       predicted_decode_tokens])
     scheduler_trace_flattened["free_gpu_blocks"] = free_gpu_blocks
     scheduler_trace_flattened["num_preempted"] = num_preempted
     encoded_scheduler_trace = orjson.dumps(scheduler_trace_flattened)
