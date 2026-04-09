@@ -172,6 +172,13 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         self._prefill_2d_table, self._prefill_2d_tts = _load_2d_table("prefill_2d_table")
         self._decode_2d_table, self._decode_2d_tts = _load_2d_table("decode_2d_table")
 
+        # Output delivery overhead table: gap between client-visible TPOT
+        # and internal step_cycle at each concurrency level.
+        # Captures token delivery cost that scales with concurrent requests.
+        # Measured during profiling: real_client_TPOT - real_step_cycle.
+        # Each entry: {num_requests, overhead_us}
+        self._output_overhead_table = profile_pack.get("output_overhead_table", [])
+
     def get_max_step_cycle_us(self, num_requests: int) -> float:
         """Get the maximum profiled step_cycle at a given concurrency.
 
@@ -328,6 +335,9 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
                     total_tokens, num_requests,
                     self._decode_2d_table, self._decode_2d_tts)
                 if result is not None:
+                    # Add output delivery overhead: gap between client TPOT
+                    # and step_cycle, profiled on real GPU.
+                    result += self._lookup_output_overhead(num_requests)
                     return result
                 # Fall back to combined 2D table
                 if self._2d_table:
@@ -335,6 +345,7 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
                         total_tokens, num_requests,
                         self._2d_table, self._2d_table_tts)
                     if result is not None:
+                        result += self._lookup_output_overhead(num_requests)
                         return result
             # Fall through to 1D for prefill or if 2D doesn't cover range
 
@@ -381,6 +392,35 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         # Extrapolate using power-law from the combined profile
         return self._fwd_pw_a * (total_tokens ** self._fwd_pw_b)
+
+    def _lookup_output_overhead(self, num_requests: int) -> float:
+        """Interpolate output delivery overhead from profiled table.
+
+        Returns overhead in microseconds. The overhead is the gap between
+        client-visible TPOT and internal step_cycle at each concurrency,
+        measured during profiling on real GPU.
+        """
+        table = self._output_overhead_table
+        if not table:
+            return 0.0
+
+        ns = [e["num_requests"] for e in table]
+        os_us = [e["overhead_us"] for e in table]
+
+        if num_requests <= ns[0]:
+            return os_us[0]
+        if num_requests >= ns[-1]:
+            # Extrapolate linearly from last two points
+            if len(ns) >= 2:
+                slope = (os_us[-1] - os_us[-2]) / max(ns[-1] - ns[-2], 1)
+                return os_us[-1] + slope * (num_requests - ns[-1])
+            return os_us[-1]
+
+        for i in range(len(ns) - 1):
+            if ns[i] <= num_requests <= ns[i + 1]:
+                frac = (num_requests - ns[i]) / (ns[i + 1] - ns[i])
+                return os_us[i] + frac * (os_us[i + 1] - os_us[i])
+        return os_us[-1]
 
     def _lookup_correction(self, num_requests: int) -> float:
         """Interpolate correction from bucketed correction table."""
