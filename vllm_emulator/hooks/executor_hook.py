@@ -273,13 +273,15 @@ class ExecutorEmulatorHook:
         latency_us = oracle_us
 
         # 2. Hybrid overhead: per-request host-side cost
-        # Applied in "hybrid" mode (1D base) and "2d" mode (2D table base).
-        # Captures host-side costs (scheduling, IPC, output dispatch) not in step-cycle.
+        # Only in "hybrid" mode (1D base). The 1D profile doesn't capture
+        # concurrency-dependent overhead, so we add it explicitly.
+        # NOT applied in "2d" mode — the 2D table already captures host-side
+        # overhead at each concurrency level (built from step_cycle data).
         # Linear: overhead * N | Sqrt: overhead * sqrt(N)
         # Controlled by VLLM_EMULATOR_OVERHEAD_SCALING=linear|sqrt (default linear)
         import math
         hybrid_overhead_us = 0.0
-        if self._oracle_mode in ("hybrid", "2d") and self._overhead_per_req_us > 0:
+        if self._oracle_mode == "hybrid" and self._overhead_per_req_us > 0:
             scaling = os.environ.get("VLLM_EMULATOR_OVERHEAD_SCALING", "linear")
             if scaling == "sqrt":
                 hybrid_overhead_us = self._overhead_per_req_us * math.sqrt(num_decode)
