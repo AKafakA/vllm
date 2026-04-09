@@ -310,31 +310,33 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         if total_tokens <= 0:
             return 0.0
 
-        # 2D table mode: bilinear interpolation over (tt, concurrency)
-        # Use separate prefill/decode tables when available (captures
-        # CUDA graph vs eager mode difference in vLLM V1).
+        # 2D table mode (Option A): 1D prefill + 2D decode.
+        # Prefill/mixed steps (eager mode): use 1D prefill_forward_pass
+        #   - Dense coverage (370+ buckets), indexed by total_tokens only
+        #   - Concurrency effect captured by hybrid per-request overhead
+        #   - Avoids sparse prefill 2D table (~1% of steps are prefill)
+        # Pure decode steps (CUDA graph): use 2D decode table
+        #   - Indexed by (total_tokens, concurrency)
+        #   - Captures CUDA graph latency at each concurrency level
         if oracle_mode == "2d" and num_requests > 0:
-            # Try step-type-specific 2D table first
-            if has_prefill and self._prefill_2d_table:
-                result = self._lookup_2d_table(
-                    total_tokens, num_requests,
-                    self._prefill_2d_table, self._prefill_2d_tts)
-                if result is not None:
-                    return result
-            elif not has_prefill and self._decode_2d_table:
+            if has_prefill:
+                # 1D lookup for prefill/mixed (eager mode)
+                # Falls through to 1D section below
+                pass
+            elif self._decode_2d_table:
                 result = self._lookup_2d_table(
                     total_tokens, num_requests,
                     self._decode_2d_table, self._decode_2d_tts)
                 if result is not None:
                     return result
-            # Fall back to combined 2D table
-            if self._2d_table:
-                result = self._lookup_2d_table(
-                    total_tokens, num_requests,
-                    self._2d_table, self._2d_table_tts)
-                if result is not None:
-                    return result
-            # Fall through to 1D if no 2D table covers this range
+                # Fall back to combined 2D table
+                if self._2d_table:
+                    result = self._lookup_2d_table(
+                        total_tokens, num_requests,
+                        self._2d_table, self._2d_table_tts)
+                    if result is not None:
+                        return result
+            # Fall through to 1D for prefill or if 2D doesn't cover range
 
         # Corrected mode: 1D base + bucketed correction by num_requests
         if oracle_mode == "corrected" and self._correction_table and num_requests > 0:
