@@ -156,18 +156,21 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         # Positive = profile underestimates, negative = overestimates.
         self._correction_table = profile_pack.get("correction_table", [])
 
-        # Proper 2D table: indexed by (total_tokens, concurrency).
-        # Each entry: {tt, conc, latency_us, num_samples}.
-        # Organized as: {tt -> [(conc, latency_us), ...]} for fast lookup.
-        self._2d_table: dict[int, list[tuple[int, float]]] = {}
-        for e in profile_pack.get("step_cycle_2d_table", []):
-            tt = e["tt"]
-            self._2d_table.setdefault(tt, []).append(
-                (e["conc"], e["latency_us"]))
-        # Sort each tt's concurrency entries
-        for tt in self._2d_table:
-            self._2d_table[tt].sort()
-        self._2d_table_tts = sorted(self._2d_table.keys())
+        # 2D tables: indexed by (total_tokens, concurrency).
+        # Split by step type: prefill (eager mode) vs decode (CUDA graph).
+        # In vLLM V1, mixed batches (prefill) run eager, pure decode uses graphs.
+        def _load_2d_table(key: str) -> tuple[dict, list]:
+            table: dict[int, list[tuple[int, float]]] = {}
+            for e in profile_pack.get(key, []):
+                tt = e["tt"]
+                table.setdefault(tt, []).append((e["conc"], e["latency_us"]))
+            for tt in table:
+                table[tt].sort()
+            return table, sorted(table.keys())
+
+        self._2d_table, self._2d_table_tts = _load_2d_table("step_cycle_2d_table")
+        self._prefill_2d_table, self._prefill_2d_tts = _load_2d_table("prefill_2d_table")
+        self._decode_2d_table, self._decode_2d_tts = _load_2d_table("decode_2d_table")
 
     def get_max_step_cycle_us(self, num_requests: int) -> float:
         """Get the maximum profiled step_cycle at a given concurrency.
@@ -308,11 +311,30 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             return 0.0
 
         # 2D table mode: bilinear interpolation over (tt, concurrency)
-        if oracle_mode == "2d" and self._2d_table and num_requests > 0:
-            result = self._lookup_2d_table(total_tokens, num_requests)
-            if result is not None:
-                return result
-            # Fall through to 1D if 2D table doesn't cover this range
+        # Use separate prefill/decode tables when available (captures
+        # CUDA graph vs eager mode difference in vLLM V1).
+        if oracle_mode == "2d" and num_requests > 0:
+            # Try step-type-specific 2D table first
+            if has_prefill and self._prefill_2d_table:
+                result = self._lookup_2d_table(
+                    total_tokens, num_requests,
+                    self._prefill_2d_table, self._prefill_2d_tts)
+                if result is not None:
+                    return result
+            elif not has_prefill and self._decode_2d_table:
+                result = self._lookup_2d_table(
+                    total_tokens, num_requests,
+                    self._decode_2d_table, self._decode_2d_tts)
+                if result is not None:
+                    return result
+            # Fall back to combined 2D table
+            if self._2d_table:
+                result = self._lookup_2d_table(
+                    total_tokens, num_requests,
+                    self._2d_table, self._2d_table_tts)
+                if result is not None:
+                    return result
+            # Fall through to 1D if no 2D table covers this range
 
         # Corrected mode: 1D base + bucketed correction by num_requests
         if oracle_mode == "corrected" and self._correction_table and num_requests > 0:
@@ -381,12 +403,22 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         return cs[-1]
 
-    def _lookup_2d_table(self, total_tokens: int, num_requests: int) -> float | None:
-        """Bilinear interpolation over the 2D (tt, concurrency) table.
+    def _lookup_2d_table(self, total_tokens: int, num_requests: int,
+                        table: dict | None = None,
+                        table_tts: list | None = None) -> float | None:
+        """Bilinear interpolation over a 2D (tt, concurrency) table.
+
+        Args:
+            table: {tt -> [(conc, latency_us), ...]} dict. Defaults to combined.
+            table_tts: sorted tt keys. Defaults to combined.
 
         Returns None if the table doesn't cover this (tt, conc) range.
         """
-        tts = self._2d_table_tts
+        if table is None:
+            table = self._2d_table
+        if table_tts is None:
+            table_tts = self._2d_table_tts
+        tts = table_tts
         if not tts:
             return None
 
@@ -412,8 +444,8 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
                 [float(c) for c in cs], [float(l) for l in ls], float(conc))
 
         # Find bracketing tt values
-        if total_tokens in self._2d_table:
-            return _interp_conc(self._2d_table[total_tokens], num_requests)
+        if total_tokens in table:
+            return _interp_conc(table[total_tokens], num_requests)
 
         # Interpolate between two tt brackets
         lo_tt = tts[0]
@@ -423,8 +455,8 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
                 lo_tt, hi_tt = tts[i], tts[i + 1]
                 break
 
-        lo_lat = _interp_conc(self._2d_table[lo_tt], num_requests)
-        hi_lat = _interp_conc(self._2d_table[hi_tt], num_requests)
+        lo_lat = _interp_conc(table[lo_tt], num_requests)
+        hi_lat = _interp_conc(table[hi_tt], num_requests)
         frac = (total_tokens - lo_tt) / max(hi_tt - lo_tt, 1)
         return lo_lat + frac * (hi_lat - lo_lat)
 

@@ -27,10 +27,14 @@ for line in open(step_cycle_file):
 
 print(f"Records: {len(records)}")
 
+# Skip warmup/sweep records for 1D sections too.
+# With CUDA graph sweep + standard warmup, skip first 5000 records.
+WARMUP_SKIP_1D = 5000
+
 # Split into prefill (has new_reqs) and decode (no new_reqs) steps
 prefill_by_tt = defaultdict(list)
 decode_by_tt = defaultdict(list)
-for r in records:
+for r in records[WARMUP_SKIP_1D:]:
     tt = r["total_tokens"]
     if r.get("num_new_reqs", 0) > 0:
         prefill_by_tt[tt].append(r["step_cycle_us"])
@@ -271,36 +275,55 @@ def tt_bucket(tt):
     """Map total_tokens to bucket center."""
     return (tt // TT_BUCKET_WIDTH) * TT_BUCKET_WIDTH + TT_BUCKET_WIDTH // 2
 
-# Use all steps (skip warmup), both prefill and decode
-step_cycle_2d_data = defaultdict(list)  # (tt_bucket, conc_bucket) -> [latency_us]
-for r in records[200:]:  # skip first 200 records (warmup)
+# Build SEPARATE 2D tables for prefill (eager mode) and decode (CUDA graph mode).
+# In vLLM V1, mixed batches (has new prefill) run in eager/piecewise mode,
+# while pure decode batches use CUDA graphs. These have fundamentally different
+# latencies at the same (tt, concurrency).
+prefill_2d_data = defaultdict(list)  # (tt_bucket, conc_bucket) -> [latency_us]
+decode_2d_data = defaultdict(list)
+step_cycle_2d_data = defaultdict(list)  # combined (backward compat)
+# Skip warmup records. With CUDA graph sweep warmup (~500 steps for 15 batch sizes
+# + 500 burst) + standard 200-prompt warmup (~2500 steps), skip first 5000 records
+# to exclude all warmup/sweep contamination. This is conservative — better to skip
+# too many than include compilation spikes in the profile.
+WARMUP_SKIP = 5000
+for r in records[WARMUP_SKIP:]:
     tt = r["total_tokens"]
-    # Use total concurrent requests (new + decode)
     conc = r.get("num_new_reqs", 0) + r.get("num_decode_seqs", 0)
     if conc < 1:
         conc = 1
     ttb = tt_bucket(tt)
     cb = conc_bucket(conc)
     step_cycle_2d_data[(ttb, cb)].append(r["step_cycle_us"])
+    if r.get("num_new_reqs", 0) > 0:
+        prefill_2d_data[(ttb, cb)].append(r["step_cycle_us"])
+    else:
+        decode_2d_data[(ttb, cb)].append(r["step_cycle_us"])
 
-step_cycle_2d_table = []
-print(f"\n  2D table (tt_bucket × conc_bucket):")
-# Build table entries with outlier filtering
-for (ttb, cb), lats in sorted(step_cycle_2d_data.items()):
-    if len(lats) < 10:  # need minimum 10 samples per cell
-        continue
-    med = statistics.median(lats)
-    # Filter extreme outliers (>3x median) — catches CUDA graph compilation
-    filtered = [v for v in lats if v < med * 3 and v > med / 3]
-    if len(filtered) < 5:
-        filtered = lats
-    final_lat = statistics.median(filtered)
-    step_cycle_2d_table.append({
-        "tt": ttb,
-        "conc": cb,
-        "latency_us": round(final_lat, 1),
-        "num_samples": len(lats),
-    })
+def build_2d_table(data, label, min_samples=10):
+    """Build filtered 2D table from (tt,conc) -> [latency] data."""
+    table = []
+    for (ttb, cb), lats in sorted(data.items()):
+        if len(lats) < min_samples:
+            continue
+        med = statistics.median(lats)
+        filtered = [v for v in lats if v < med * 3 and v > med / 3]
+        if len(filtered) < 5:
+            filtered = lats
+        final_lat = statistics.median(filtered)
+        table.append({
+            "tt": ttb,
+            "conc": cb,
+            "latency_us": round(final_lat, 1),
+            "num_samples": len(lats),
+        })
+    print(f"    {label}: {len(table)} cells")
+    return table
+
+print(f"\n  2D tables (tt_bucket × conc_bucket):")
+step_cycle_2d_table = build_2d_table(step_cycle_2d_data, "combined")
+prefill_2d_table = build_2d_table(prefill_2d_data, "prefill (eager mode)")
+decode_2d_table = build_2d_table(decode_2d_data, "decode (CUDA graph)")
 
 # Print summary at key tt values
 tt_set = sorted(set(e["tt"] for e in step_cycle_2d_table))
@@ -338,8 +361,10 @@ profile = {
     "decode_forward_pass": sorted(decode_fp, key=lambda e: e["total_tokens"]),
     "offline_forward_pass": sorted(offline_fp, key=lambda e: e["total_tokens"]),
     "sweep_forward_pass": sorted(sweep_fp, key=lambda e: e["total_tokens"]),
-    # Proper 2D table: (tt, concurrency) → latency_us
+    # 2D tables: (tt, concurrency) → latency_us
     "step_cycle_2d_table": sorted(step_cycle_2d_table, key=lambda e: (e["tt"], e["conc"])),
+    "prefill_2d_table": sorted(prefill_2d_table, key=lambda e: (e["tt"], e["conc"])),
+    "decode_2d_table": sorted(decode_2d_table, key=lambda e: (e["tt"], e["conc"])),
     # Emulator calibration parameters (auto-computed from trace)
     "cuda_graph_warmup_us": round(avg_cuda_warmup_us, 0),
     "sched_overhead_table": sched_overhead_table,

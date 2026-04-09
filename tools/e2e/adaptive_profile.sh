@@ -157,7 +157,20 @@ for ROUND in $(seq 1 $MAX_ROUNDS); do
         > /workspace/adaptive_server_r${ROUND}.log 2>&1 &
     wait_server
 
-    # Warmup
+    # CUDA graph warmup sweep: compile all padded capture sizes
+    # These steps are traced but excluded by the profile builder (skip first N records)
+    echo "  CUDA graph warmup sweep (all capture sizes)..."
+    for NP in 1 2 4 8 16 24 32 48 64 96 128 160 192 224 256; do
+        python3 -m vllm.entrypoints.cli.main bench serve --model "$MODEL" --base-url http://localhost:$PORT \
+            --dataset-name random --random-input-len 1 --random-output-len 1 \
+            --num-prompts $NP --request-rate inf > /dev/null 2>&1 || true
+    done
+    # High-concurrency burst to warm large padded sizes
+    python3 -m vllm.entrypoints.cli.main bench serve --model "$MODEL" --base-url http://localhost:$PORT \
+        --dataset-name random --random-input-len 256 --random-output-len 128 \
+        --num-prompts 500 --request-rate inf > /dev/null 2>&1 || true
+
+    # Standard warmup
     echo "  Warmup (200 prompts, rate=4)..."
     python3 -m vllm.entrypoints.cli.main bench serve --model "$MODEL" --base-url http://localhost:$PORT \
         --dataset-name random --random-input-len 256 --random-output-len 128 \
