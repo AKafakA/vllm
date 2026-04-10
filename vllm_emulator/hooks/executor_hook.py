@@ -480,14 +480,8 @@ class ExecutorEmulatorHook:
             else:
                 sample_fut.set_result(fake_output)
         else:
-            # ThreadPool with pre-blocking for GPU submission overhead.
-            # On real GPU, execute_model() blocks ~3-5ms for kernel launch
-            # before GPU starts computing. Block engine here to match.
-            # Pool sleeps for FULL step_cycle (not reduced) because pool
-            # serialization is independent of when engine submits.
+            # ThreadPool
             if self._emulator_mode == EMULATOR_MODE_REALTIME:
-                if _submission_overhead_s > 0.0005:
-                    time.sleep(_submission_overhead_s)
                 def _gpu_step():
                     if latency_s >= 0.001:
                         time.sleep(latency_s)
