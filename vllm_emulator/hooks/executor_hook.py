@@ -142,10 +142,44 @@ class ExecutorEmulatorHook:
                 self._overhead_per_req_us = self._calibrate_overhead_per_req(
                     profile_pack)
 
+            # GPU submission overhead (informational, used for diagnostics).
+            self._submission_overhead_us = float(
+                profile_pack.get("submission_overhead_us", 0))
+
+            # Worker prep surrogate: GPU-free CPU work that replaces the
+            # skipped worker.execute_model() CPU preparation. Recovers
+            # ~2-3ms per step of CPU overhead that the timer absorbs.
+            self._prep_surrogate = None
+            if os.environ.get("VLLM_EMULATOR_PREP_SURROGATE", "1") == "1":
+                try:
+                    from vllm_emulator.worker_prep_surrogate import WorkerPrepSurrogate
+                    model_cfg = profile_pack.get("model_config", {})
+                    if not model_cfg:
+                        # Try to extract from profile metadata
+                        model_cfg = {
+                            "num_hidden_layers": 28,
+                            "hidden_size": 1536,
+                            "num_attention_heads": 12,
+                            "vocab_size": 151936,
+                            "max_model_len": 4096,
+                        }
+                    self._prep_surrogate = WorkerPrepSurrogate(model_cfg)
+                except Exception as e:
+                    print(f"[ExecutorHook] Prep surrogate init failed: {e}")
+
+            # Step cadence residual: the small per-step gap (~1ms) that
+            # remains after the timer absorbs most of the submission overhead.
+            # Applied AFTER future.result() in step_with_batch_queue to
+            # break the concurrency feedback loop. Profiled from the
+            # step_cycle trace as the median "other" overhead.
+            self._step_residual_us = float(
+                profile_pack.get("step_residual_us", 0))
+
             print(f"[ExecutorEmulatorHook] Enabled: mode={self._emulator_mode}, "
                   f"oracle={self._oracle_mode}, usage={self._profile_usage}, "
                   f"sched_comp={self._sched_compensation_us/1000:.1f}ms, "
-                  f"overhead/req={self._overhead_per_req_us/1000:.2f}ms")
+                  f"overhead/req={self._overhead_per_req_us/1000:.2f}ms, "
+                  f"submit_overhead={self._submission_overhead_us/1000:.1f}ms")
         except Exception as e:
             print(f"[ExecutorEmulatorHook] Failed to initialize: {e}")
 
@@ -354,6 +388,21 @@ class ExecutorEmulatorHook:
         exec_fut: Future = Future()
         exec_fut.set_result(None)
 
+        # Worker prep surrogate: run CPU-equivalent of worker.execute_model()
+        # preparation. This blocks the engine thread for ~2-3ms, matching
+        # real GPU's CPU prep time that the hook normally skips.
+        # Do NOT subtract from latency_s — the surrogate adds real CPU work
+        # that slows the engine loop, while the timer models the GPU compute
+        # that runs in parallel on real hardware. The total step becomes:
+        # surrogate(~2ms) + timer(step_cycle) which exceeds the profiled
+        # step_cycle, but the chain's gpu_free_time accumulation uses the
+        # full step_cycle, keeping Future resolution timing correct.
+        self._last_surrogate_time_s = 0.0
+        if (self._prep_surrogate is not None
+                and self._emulator_mode == EMULATOR_MODE_REALTIME):
+            self._last_surrogate_time_s = self._prep_surrogate.run_prep_surrogate(
+                scheduler_output)
+
         timer_mode = os.environ.get("VLLM_EMULATOR_TIMER_MODE", "pool")
         has_prefill = len(scheduler_output.scheduled_new_reqs) > 0
 
@@ -398,12 +447,19 @@ class ExecutorEmulatorHook:
                         self._gpu_free_time = min(
                             self._gpu_free_time, now + max_drift_s)
 
+                # Get surrogate prep time for chain accumulation.
+                # The surrogate already ran and blocked the engine. Add its
+                # time to gpu_free_time so the chain grows at the correct
+                # rate (step_cycle + worker_prep_overhead). This prevents
+                # the chain from absorbing the surrogate time.
+                _surr_time_s = getattr(self, '_last_surrogate_time_s', 0.0)
                 chain_cap = float(os.environ.get("VLLM_EMULATOR_CHAIN_CAP", "0"))
                 if chain_cap < 0:
                     delay = latency_s
                 elif chain_cap == 0:
                     start_time = max(now, self._gpu_free_time)
-                    end_time = start_time + latency_s
+                    # Accumulate step_cycle + surrogate prep time
+                    end_time = start_time + latency_s + _surr_time_s
                     self._gpu_free_time = end_time
                     delay = end_time - now
                 else:
@@ -424,8 +480,14 @@ class ExecutorEmulatorHook:
             else:
                 sample_fut.set_result(fake_output)
         else:
-            # ThreadPool
+            # ThreadPool with pre-blocking for GPU submission overhead.
+            # On real GPU, execute_model() blocks ~3-5ms for kernel launch
+            # before GPU starts computing. Block engine here to match.
+            # Pool sleeps for FULL step_cycle (not reduced) because pool
+            # serialization is independent of when engine submits.
             if self._emulator_mode == EMULATOR_MODE_REALTIME:
+                if _submission_overhead_s > 0.0005:
+                    time.sleep(_submission_overhead_s)
                 def _gpu_step():
                     if latency_s >= 0.001:
                         time.sleep(latency_s)
@@ -433,6 +495,7 @@ class ExecutorEmulatorHook:
                 sample_fut = self._gpu_executor.submit(_gpu_step)
                 self._gpu_free_time = time.perf_counter() + latency_s
             else:
+                exec_fut.set_result(None)
                 sample_fut = self._gpu_executor.submit(lambda: fake_output)
 
         self._sample_future = sample_fut

@@ -560,13 +560,17 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
+            _t_sched = time.perf_counter()
             scheduler_output = self.scheduler.schedule()
+            _t_sched_end = time.perf_counter()
             # Store for step cycle tracer (batch info capture)
             self._last_scheduler_output = scheduler_output
             with self.log_error_detail(scheduler_output):
+                _t_exec = time.perf_counter()
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
+                _t_exec_end = time.perf_counter()
             if self.is_ec_consumer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
@@ -580,9 +584,11 @@ class EngineCore:
                     grammar_output = self.scheduler.get_grammar_bitmask(
                         scheduler_output
                     )
+                    _t_sample = time.perf_counter()
                     future = self.model_executor.sample_tokens(
                         grammar_output, non_block=True
                     )
+                    _t_sample_end = time.perf_counter()
                 else:
                     # We need to defer sampling until we have processed the model output
                     # from the prior step.
@@ -608,6 +614,7 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
+        _t_wait_start = time.perf_counter()
         with (
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
@@ -621,13 +628,31 @@ class EngineCore:
                 # call failed - raise that exception.
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
+        _t_wait_end = time.perf_counter()
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        _t_update_start = time.perf_counter()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        _t_update_end = time.perf_counter()
+
+        # Record detailed timing for step_cycle tracer
+        _step_tracer = getattr(self, '_emulator_step_tracer', None)
+        if _step_tracer is not None:
+            _detail = {
+                "wait_ms": round((_t_wait_end - _t_wait_start) * 1000, 2),
+                "update_ms": round((_t_update_end - _t_update_start) * 1000, 2),
+            }
+            try:
+                _detail["sched_ms"] = round((_t_sched_end - _t_sched) * 1000, 2)
+                _detail["exec_ms"] = round((_t_exec_end - _t_exec) * 1000, 2)
+                _detail["sample_ms"] = round((_t_sample_end - _t_sample) * 1000, 2)
+            except NameError:
+                pass
+            _step_tracer._pending_detail = _detail
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -1257,11 +1282,60 @@ class EngineCoreProc(EngineCore):
         # See docs/benchmarking/ for full analysis.
         # Clean baseline: timer approach + CUDA graph warmup only.
 
+        # Loop timing instrumentation — resets at benchmark_start marker
+        _loop_tracer = getattr(self, '_emulator_step_tracer', None)
+        _loop_count = 0
+        _bench_count = 0
+        _bench_input_us = 0.0
+        _bench_step_us = 0.0
+        _bench_between_us_total = 0.0
+        _bench_started = False
+        _loop_last_step_end = time.perf_counter()
+
         while self._handle_shutdown():
+            _lt0 = time.perf_counter()
+            _between_us = (_lt0 - _loop_last_step_end) * 1e6
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
+            _lt1 = time.perf_counter()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
+            _lt2 = time.perf_counter()
+            _loop_last_step_end = _lt2
+
+            _loop_count += 1
+
+            # Detect benchmark start via step_tracer marker
+            if _loop_tracer and not _bench_started:
+                trace_path = getattr(_loop_tracer, '_output_path', None)
+                if trace_path and _loop_count % 100 == 0:
+                    try:
+                        size = os.path.getsize(str(trace_path))
+                        # Marker written = benchmark started
+                        # Reset counters after sufficient warmup
+                        if size > 100000 and _loop_count > 1000:
+                            _bench_started = True
+                            _bench_count = 0
+                            _bench_input_us = 0.0
+                            _bench_step_us = 0.0
+                            _bench_between_us_total = 0.0
+                            print(f"[LoopTiming] Benchmark detected at iter={_loop_count}, resetting counters")
+                    except:
+                        pass
+
+            if _bench_started:
+                _bench_count += 1
+                _bench_input_us += (_lt1 - _lt0) * 1e6
+                _bench_step_us += (_lt2 - _lt1) * 1e6
+                _bench_between_us_total += _between_us
+
+                if _loop_tracer and _bench_count % 1000 == 0 and _bench_count > 0:
+                    ai = _bench_input_us / _bench_count / 1000
+                    ast = _bench_step_us / _bench_count / 1000
+                    ab = _bench_between_us_total / _bench_count / 1000
+                    print(f"[LoopTiming:bench] n={_bench_count} "
+                          f"input={ai:.2f}ms step={ast:.2f}ms "
+                          f"between={ab:.3f}ms total={ai+ast+ab:.2f}ms")
 
         raise SystemExit
 
@@ -1321,8 +1395,10 @@ class EngineCoreProc(EngineCore):
             tracer.on_post_step(so, outputs)
 
         # Put EngineCoreOutputs into the output queue.
+        _t_queue_start = time.perf_counter()
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
+        _t_queue_end = time.perf_counter()
 
         # Post-step hook.
         self.post_step(model_executed)
@@ -1342,6 +1418,13 @@ class EngineCoreProc(EngineCore):
                     num_new_reqs=len(so.scheduled_new_reqs),
                     num_decode_seqs=num_decode,
                 )
+                # Add detailed timing if available
+                detail = getattr(_step_tracer, '_pending_detail', None)
+                if detail:
+                    detail["queue_ms"] = round((_t_queue_end - _t_queue_start) * 1000, 2)
+                    detail["has_output"] = outputs is not None and len(outputs) > 0
+                    _step_tracer.set_extra_fields(detail)
+                    _step_tracer._pending_detail = None
             _step_tracer.record_step(step_us)
 
         # If no model execution happened but there are waiting requests

@@ -172,11 +172,18 @@ class StepCycleTracer:
             "num_decode_seqs": num_decode_seqs,
         }
 
+    def set_extra_fields(self, fields: dict[str, Any]) -> None:
+        """Set extra fields to be included in the next record_step() call."""
+        self._pending_extra = fields
+
     def record_step(self, step_latency_us: float) -> None:
         record: dict[str, Any] = {"step_cycle_us": round(step_latency_us, 1)}
         if self._pending_batch_info:
             record.update(self._pending_batch_info)
             self._pending_batch_info = None
+        if hasattr(self, '_pending_extra') and self._pending_extra:
+            record.update(self._pending_extra)
+            self._pending_extra = None
         self._records.append(record)
         self._step_count += 1
         if len(self._records) >= 200:
