@@ -165,17 +165,11 @@ class WorkerPrepSurrogate:
         # Phase 5b: Per-layer attention metadata construction
         # Real worker iterates over kv_cache_groups × attn_groups
         # building backend-specific metadata per layer. The CPU cost
-        # scales with BOTH num_layers AND total_tokens.
-        # At low tt (decode, tt=1-5): real exec_ms is ~1.1ms, base work
-        # already covers this. Per-layer loop only needed for larger batches.
-        # At high tt (prefill, tt=260+): real exec_ms is ~15ms, need full loop.
-        # Scale layers proportionally to total_tokens to avoid over-compensating
-        # at low concurrency (R=1 regression).
-        # Scale: tt=1→2 layers, tt=10→14, tt=20→28(full), tt=260→28(full)
-        _effective_layers = min(self._num_layers,
-                                max(2, self._num_layers * total_tokens // 20))
-        if total_tokens <= self._max_batch and _effective_layers > 1:
-            for layer_idx in range(_effective_layers):
+        # scales with BOTH num_layers AND total_tokens — for prefill
+        # steps (tt=267), the per-layer work is much heavier than
+        # decode (tt=10-20) because each layer processes all tokens.
+        if total_tokens <= self._max_batch:
+            for layer_idx in range(self._num_layers):
                 # Per-layer per-token work: scales O(num_layers × total_tokens)
                 # Real worker builds query/key/value offsets per token per layer
                 _layer_query_offsets = self._query_start_buf[:num_reqs + 1].copy()
