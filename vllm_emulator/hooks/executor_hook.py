@@ -329,11 +329,11 @@ class ExecutorEmulatorHook:
         if self._trace_file is not None:
             self._debug_count += 1
             wall_now = time.perf_counter()
-            timer_delay_us = latency_us  # now same as total latency (no chaining)
+            timer_delay_us = latency_us
             self._trace_file.write(
                 f"{self._debug_count},{wall_now:.6f},{total_tokens},"
                 f"{num_total_reqs},{num_decode},{num_new},{int(has_prefill)},"
-                f"{oracle_us:.0f},{hybrid_overhead_us:.0f},"
+                f"{oracle_us:.0f},0,"
                 f"{sched_comp_applied_us:.0f},{latency_us:.0f},"
                 f"{wall_now:.6f},{timer_delay_us:.0f}\n")
             if self._debug_count % 500 == 0:
@@ -395,11 +395,23 @@ class ExecutorEmulatorHook:
                 # rate (step_cycle + worker_prep_overhead). This prevents
                 # the chain from absorbing the surrogate time.
                 _surr_time_s = getattr(self, '_last_surrogate_time_s', 0.0)
+                _prev_gpu_free = self._gpu_free_time
+                _chain_backed_up = now < self._gpu_free_time
                 start_time = max(now, self._gpu_free_time)
                 # Accumulate step_cycle + surrogate prep time
                 end_time = start_time + latency_s + _surr_time_s
                 self._gpu_free_time = end_time
                 delay = end_time - now
+
+                # Chain diagnostics (first 30 steps + every 200)
+                if self._debug_count <= 30 or self._debug_count % 200 == 0:
+                    _chain_lag = now - _prev_gpu_free if not _chain_backed_up else _prev_gpu_free - now
+                    print(f"[ChainDiag] step={self._debug_count} tt={total_tokens} "
+                          f"surr={_surr_time_s*1000:.2f}ms "
+                          f"oracle={latency_s*1000:.1f}ms "
+                          f"delay={delay*1000:.1f}ms "
+                          f"backed_up={_chain_backed_up} "
+                          f"lag={_chain_lag*1000:.1f}ms")
 
                 if delay >= 0.001:
                     timer = threading.Timer(delay,
