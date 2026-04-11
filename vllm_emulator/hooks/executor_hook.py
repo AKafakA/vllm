@@ -400,8 +400,6 @@ class ExecutorEmulatorHook:
                 end_time = start_time + latency_s + _surr_time_s
                 self._gpu_free_time = end_time
                 delay = end_time - now
-                    self._gpu_free_time = end_time
-                    delay = end_time - now
 
                 if delay >= 0.001:
                     timer = threading.Timer(delay,
