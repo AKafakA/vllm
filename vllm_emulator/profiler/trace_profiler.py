@@ -180,7 +180,7 @@ class StepCycleTracer:
             if torch.cuda.is_available():
                 props = torch.cuda.get_device_properties(0)
                 header["gpu_name"] = props.name
-                header["gpu_memory_bytes"] = props.total_mem
+                header["gpu_memory_bytes"] = props.total_memory
                 header["gpu_sm_count"] = props.multi_processor_count
                 cap = torch.cuda.get_device_capability(0)
                 header["gpu_compute_capability"] = list(cap)
