@@ -306,24 +306,7 @@ class ExecutorEmulatorHook:
         )
         latency_us = oracle_us
 
-        # 2. Hybrid overhead: per-request host-side cost
-        # Only in "hybrid" mode (1D base). The 1D profile doesn't capture
-        # concurrency-dependent overhead, so we add it explicitly.
-        # NOT applied in "2d" mode — the 2D table already captures host-side
-        # overhead at each concurrency level (built from step_cycle data).
-        # Linear: overhead * N | Sqrt: overhead * sqrt(N)
-        # Controlled by VLLM_EMULATOR_OVERHEAD_SCALING=linear|sqrt (default linear)
-        import math
-        hybrid_overhead_us = 0.0
-        if self._oracle_mode == "hybrid" and self._overhead_per_req_us > 0:
-            scaling = os.environ.get("VLLM_EMULATOR_OVERHEAD_SCALING", "linear")
-            if scaling == "sqrt":
-                hybrid_overhead_us = self._overhead_per_req_us * math.sqrt(num_decode)
-            else:
-                hybrid_overhead_us = self._overhead_per_req_us * num_decode
-            latency_us += hybrid_overhead_us
-
-        # 3. Scheduling compensation: when prior GPU work is in flight
+        # Scheduling compensation: when prior GPU work is in flight
         sched_comp_applied_us = 0.0
         if has_prefill and self._sched_compensation_us > 0:
             now_check = time.perf_counter()
@@ -377,13 +360,8 @@ class ExecutorEmulatorHook:
         """Async engine: pending Future.
 
         Timer mode (VLLM_EMULATOR_TIMER_MODE):
-          pool:    ThreadPoolExecutor — no drift, best TPOT (Option B)
-          chain:   threading.Timer + gpu_free_time — better TTFT (Option A)
-          dcap:    Chain + profiled drift correction (Option D)
-          split:   Chain for prefill, pool for decode (Option E)
-          block:   Full engine-thread blocking (Option F)
-        Chain sub-options via VLLM_EMULATOR_CHAIN_CAP:
-          0=uncapped, 1=capped, -1=no chain
+          chain: threading.Timer + gpu_free_time chaining (default, best accuracy)
+          pool:  ThreadPoolExecutor — alternative, no chaining
         """
         exec_fut: Future = Future()
         exec_fut.set_result(None)
@@ -403,49 +381,13 @@ class ExecutorEmulatorHook:
             self._last_surrogate_time_s = self._prep_surrogate.run_prep_surrogate(
                 scheduler_output)
 
-        timer_mode = os.environ.get("VLLM_EMULATOR_TIMER_MODE", "pool")
-        has_prefill = len(scheduler_output.scheduled_new_reqs) > 0
+        timer_mode = os.environ.get("VLLM_EMULATOR_TIMER_MODE", "chain")
 
-        # Option F: Full engine-thread blocking
-        if timer_mode == "block":
-            if self._emulator_mode == EMULATOR_MODE_REALTIME and latency_s >= 0.001:
-                time.sleep(latency_s)
-            sample_fut = self._gpu_executor.submit(lambda: fake_output)
-            self._gpu_free_time = time.perf_counter()
-            self._sample_future = sample_fut
-            self._debug_count += 1
-            if self._debug_count <= 10 or self._debug_count % 100 == 0:
-                n_reqs = len(scheduler_output.num_scheduled_tokens)
-                n_new = len(scheduler_output.scheduled_new_reqs)
-                print(f"[ExecutorHook] step={self._debug_count} tt={total_tokens} "
-                      f"reqs={n_reqs} new={n_new} "
-                      f"latency={latency_s*1000:.1f}ms mode=block")
-            return exec_fut
-
-        # Option E: Split — chain for prefill, pool for decode
-        if timer_mode == "split":
-            effective_mode = "chain" if has_prefill else "pool"
-        # Option D: Chain with profiled drift correction
-        elif timer_mode == "dcap":
-            effective_mode = "chain"
-        else:
-            effective_mode = timer_mode
-
-        if effective_mode == "chain":
+        if timer_mode == "chain":
             # Timer + gpu_free_time chain
             sample_fut: Future = Future()
             if self._emulator_mode == EMULATOR_MODE_REALTIME:
                 now = time.perf_counter()
-
-                # Option D drift correction: cap gpu_free_time using
-                # max profiled step_cycle at current concurrency
-                if timer_mode == "dcap":
-                    num_reqs = len(scheduler_output.num_scheduled_tokens)
-                    max_step_us = self._oracle.get_max_step_cycle_us(num_reqs)
-                    if max_step_us > 0:
-                        max_drift_s = max_step_us / 1e6
-                        self._gpu_free_time = min(
-                            self._gpu_free_time, now + max_drift_s)
 
                 # Get surrogate prep time for chain accumulation.
                 # The surrogate already ran and blocked the engine. Add its
@@ -453,20 +395,11 @@ class ExecutorEmulatorHook:
                 # rate (step_cycle + worker_prep_overhead). This prevents
                 # the chain from absorbing the surrogate time.
                 _surr_time_s = getattr(self, '_last_surrogate_time_s', 0.0)
-                chain_cap = float(os.environ.get("VLLM_EMULATOR_CHAIN_CAP", "0"))
-                if chain_cap < 0:
-                    delay = latency_s
-                elif chain_cap == 0:
-                    start_time = max(now, self._gpu_free_time)
-                    # Accumulate step_cycle + surrogate prep time
-                    end_time = start_time + latency_s + _surr_time_s
-                    self._gpu_free_time = end_time
-                    delay = end_time - now
-                else:
-                    max_drift = chain_cap * latency_s
-                    capped_free = min(self._gpu_free_time, now + max_drift)
-                    start_time = max(now, capped_free)
-                    end_time = start_time + latency_s
+                start_time = max(now, self._gpu_free_time)
+                # Accumulate step_cycle + surrogate prep time
+                end_time = start_time + latency_s + _surr_time_s
+                self._gpu_free_time = end_time
+                delay = end_time - now
                     self._gpu_free_time = end_time
                     delay = end_time - now
 
