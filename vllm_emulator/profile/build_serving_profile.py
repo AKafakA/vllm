@@ -5,7 +5,12 @@ Prefill steps (has new_reqs) have different CUDA graph latencies than
 decode-only steps at the same total_tokens. This 2-section profile
 lets the oracle use the correct latency for each step type.
 
-Usage: python build_serving_profile_2d.py <step_cycle_file> <sweep_profile> <output> <model_name> <gpu_model>
+Usage: python build_serving_profile_2d.py <step_cycle_file> <sweep_profile> <output> [model_name] [gpu_model]
+
+If the trace file contains a _header record (auto-collected by
+StepCycleTracer), model_name and gpu_model are extracted automatically
+and the profile pack includes a model_config section. CLI args override
+the header if provided.
 """
 import json
 import statistics
@@ -15,14 +20,42 @@ from collections import defaultdict
 step_cycle_file = sys.argv[1]
 sweep_profile_path = sys.argv[2]
 output_path = sys.argv[3]
-model_name = sys.argv[4] if len(sys.argv) > 4 else "unknown"
-gpu_model = sys.argv[5] if len(sys.argv) > 5 else "unknown"
+cli_model_name = sys.argv[4] if len(sys.argv) > 4 else None
+cli_gpu_model = sys.argv[5] if len(sys.argv) > 5 else None
 
+# Parse trace: extract _header (if present) and step records
+trace_header = None
 records = []
 for line in open(step_cycle_file):
     r = json.loads(line)
-    if "total_tokens" in r:
+    if r.get("_header"):
+        trace_header = r
+    elif "total_tokens" in r:
         records.append(r)
+
+# Resolve model_name and gpu_model: CLI args > trace header > "unknown"
+model_name = cli_model_name or (trace_header or {}).get("model_name") or "unknown"
+gpu_model = cli_gpu_model or (trace_header or {}).get("gpu_name") or "unknown"
+
+# Build model_config from trace header (auto-collected from HF config + GPU)
+model_config = None
+if trace_header:
+    _MC_KEYS = ("num_hidden_layers", "hidden_size", "num_attention_heads",
+                "num_key_value_heads", "vocab_size", "intermediate_size",
+                "head_dim", "max_model_len", "block_size")
+    model_config = {k: trace_header[k] for k in _MC_KEYS if k in trace_header}
+    # GPU metadata for Path B (CPU-only emulation)
+    _GPU_KEYS = ("gpu_name", "gpu_memory_bytes", "gpu_sm_count",
+                 "gpu_compute_capability", "gpu_count")
+    gpu_config = {k: trace_header[k] for k in _GPU_KEYS if k in trace_header}
+    if gpu_config:
+        model_config["gpu"] = gpu_config
+    print(f"Trace header: gpu={gpu_model}, model={model_name}, "
+          f"layers={model_config.get('num_hidden_layers', '?')}, "
+          f"vocab={model_config.get('vocab_size', '?')}")
+else:
+    print("WARNING: No _header in trace file. GPU/model metadata not available. "
+          "Re-profile with latest StepCycleTracer to auto-collect.")
 
 print(f"Records: {len(records)}")
 
@@ -343,6 +376,9 @@ profile = {
     "cuda_graph_warmup_us": round(avg_cuda_warmup_us, 0),
     "sched_overhead_table": sched_overhead_table,
 }
+# Embed auto-collected model/GPU config (from trace header)
+if model_config:
+    profile["model_config"] = model_config
 json.dump(profile, open(output_path, "w"), indent=2)
 
 # Show key differences

@@ -19,16 +19,51 @@ else:
 DEFAULT_EMULATOR_MEMORY = 80 * 1024**3  # 80 GB
 
 
+def _load_gpu_config_from_profile() -> dict:
+    """Load GPU metadata from the profile pack (if available).
+
+    The profile pack's model_config.gpu section contains GPU properties
+    auto-collected during profiling on real hardware. This allows Path B
+    (CPU-only emulation) to accurately mimic the profiled GPU.
+    """
+    import os
+    profile_path = os.environ.get("VLLM_EMULATOR_PROFILE_PACK", "")
+    if not profile_path or not os.path.exists(profile_path):
+        return {}
+    try:
+        import json
+        with open(profile_path) as f:
+            pack = json.load(f)
+        return pack.get("model_config", {}).get("gpu", {})
+    except Exception:
+        return {}
+
+
+# Cached at class level after first access
+_GPU_CONFIG_CACHE: dict | None = None
+
+
+def _get_gpu_config() -> dict:
+    global _GPU_CONFIG_CACHE
+    if _GPU_CONFIG_CACHE is None:
+        _GPU_CONFIG_CACHE = _load_gpu_config_from_profile()
+    return _GPU_CONFIG_CACHE
+
+
 class EmulatorPlatform(Platform):
     """
     Emulator platform that simulates GPU behavior without actual GPU hardware.
-    
+
     This platform is useful for:
     - Rapid iteration on scheduling algorithms
     - Testing without GPU hardware
     - A/B testing of scheduling policies
+
+    GPU properties (SM count, compute capability, memory, name) are read
+    from the profile pack's model_config.gpu section when available,
+    falling back to A100-like defaults if no profile is loaded.
     """
-    
+
     _enum = PlatformEnum.OOT
     device_name = "cuda"  # Must match torch device name
     # device_type determines torch.device() — must be "cuda" when using
@@ -36,39 +71,46 @@ class EmulatorPlatform(Platform):
     device_type: str = "cuda"
     dispatch_key: str = "CPU"
     ray_device_key: str = ""  # Emulator doesn't support Ray
-    
+
     # Override supported dtypes to exclude fp8 (not emulated)
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.float16, torch.float32]
-    
+
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
-        """Return fake device capability (8.0 for A100-like emulation)."""
+        """Return device capability from profile pack, or A100-like default."""
         from vllm.platforms.interface import DeviceCapability
-        return DeviceCapability(major=8, minor=0)
-    
+        gpu = _get_gpu_config()
+        cc = gpu.get("gpu_compute_capability", [8, 0])
+        return DeviceCapability(major=cc[0], minor=cc[1])
+
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        """Return emulator device name."""
-        return "Emulator Device"
-    
+        """Return device name from profile pack, or generic default."""
+        gpu = _get_gpu_config()
+        return gpu.get("gpu_name", "Emulator Device")
+
     @classmethod
     def get_device_uuid(cls, device_id: int = 0) -> str:
         """Return fake UUID for emulator."""
         return f"emulator-{device_id}-0000-000000000000"
-    
+
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        """Return configured emulator memory (default 80GB)."""
+        """Return GPU memory from profile pack, env override, or default."""
         import os
-        return int(os.environ.get("VLLM_EMULATOR_MEMORY", DEFAULT_EMULATOR_MEMORY))
-    
+        env_mem = os.environ.get("VLLM_EMULATOR_MEMORY")
+        if env_mem:
+            return int(env_mem)
+        gpu = _get_gpu_config()
+        return gpu.get("gpu_memory_bytes", DEFAULT_EMULATOR_MEMORY)
+
     @classmethod
     def set_device(cls, device: torch.device) -> None:
         """No-op for emulator (no actual device)."""
         pass
-    
+
     @classmethod
     def get_current_memory_usage(cls, device=None) -> float:
         """Return fake memory usage (always 0 for now)."""
@@ -111,8 +153,9 @@ class EmulatorPlatform(Platform):
     
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
-        """Return fake SM count (108 for A100-like emulation)."""
-        return 108
+        """Return SM count from profile pack, or A100-like default."""
+        gpu = _get_gpu_config()
+        return gpu.get("gpu_sm_count", 108)
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:

@@ -156,8 +156,82 @@ class StepCycleTracer:
         self._output_path = output_path
         self._records: list[dict[str, Any]] = []
         self._step_count = 0
+        self._header_written = False
         # Stash scheduler output info set before step_fn()
         self._pending_batch_info: dict[str, Any] | None = None
+
+    def write_header(self, vllm_config: Any) -> None:
+        """Write a _header record with GPU and model metadata.
+
+        Called once at startup from EngineCore after the tracer is created.
+        Auto-collects GPU properties (via torch.cuda) and model architecture
+        (via HuggingFace config), making the trace file self-describing.
+        The profile builder reads this header to produce a self-contained
+        profile pack — no manual GPU/model configuration needed.
+        """
+        if self._header_written:
+            return
+
+        header: dict[str, Any] = {"_header": True}
+
+        # --- GPU properties ---
+        try:
+            import torch
+            if torch.cuda.is_available():
+                props = torch.cuda.get_device_properties(0)
+                header["gpu_name"] = props.name
+                header["gpu_memory_bytes"] = props.total_mem
+                header["gpu_sm_count"] = props.multi_processor_count
+                cap = torch.cuda.get_device_capability(0)
+                header["gpu_compute_capability"] = list(cap)
+                header["gpu_count"] = torch.cuda.device_count()
+        except Exception as e:
+            print(f"[StepCycleTracer] GPU metadata collection failed: {e}")
+
+        # --- Model properties (from HuggingFace config) ---
+        try:
+            model_config = vllm_config.model_config
+            header["model_name"] = model_config.model
+            header["max_model_len"] = model_config.max_model_len
+
+            hf_cfg = model_config.hf_text_config
+            for attr in ("num_hidden_layers", "hidden_size",
+                         "num_attention_heads", "num_key_value_heads",
+                         "vocab_size", "intermediate_size"):
+                val = getattr(hf_cfg, attr, None)
+                if val is not None:
+                    header[attr] = val
+
+            # head_dim: explicit or derived
+            head_dim = getattr(hf_cfg, "head_dim", None)
+            if head_dim is None and hasattr(hf_cfg, "hidden_size") and hasattr(hf_cfg, "num_attention_heads"):
+                head_dim = hf_cfg.hidden_size // hf_cfg.num_attention_heads
+            if head_dim is not None:
+                header["head_dim"] = head_dim
+        except Exception as e:
+            print(f"[StepCycleTracer] Model metadata collection failed: {e}")
+
+        # --- Scheduler/cache config ---
+        try:
+            header["block_size"] = vllm_config.cache_config.block_size
+            header["enable_chunked_prefill"] = (
+                vllm_config.scheduler_config.enable_chunked_prefill)
+            header["max_num_seqs"] = (
+                vllm_config.scheduler_config.max_num_seqs)
+        except Exception:
+            pass
+
+        # Write header as first line of trace file
+        from pathlib import Path
+        path = Path(self._output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(header) + "\n")
+        self._header_written = True
+        print(f"[StepCycleTracer] Header written: gpu={header.get('gpu_name', '?')}, "
+              f"model={header.get('model_name', '?')}, "
+              f"layers={header.get('num_hidden_layers', '?')}, "
+              f"vocab={header.get('vocab_size', '?')}")
 
     def set_batch_info(
         self,

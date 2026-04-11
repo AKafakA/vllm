@@ -323,6 +323,7 @@ class EngineCore:
                     os.environ.get("VLLM_EMULATOR_STEP_TRACE_OUTPUT",
                                    "/tmp/emulator_step_trace.jsonl")
                 )
+                self._emulator_step_tracer.write_header(vllm_config)
         except ImportError:
             pass
 

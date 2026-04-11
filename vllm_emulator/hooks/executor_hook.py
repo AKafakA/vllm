@@ -155,15 +155,11 @@ class ExecutorEmulatorHook:
                     from vllm_emulator.worker_prep_surrogate import WorkerPrepSurrogate
                     model_cfg = profile_pack.get("model_config", {})
                     if not model_cfg:
-                        # Try to extract from profile metadata
-                        model_cfg = {
-                            "num_hidden_layers": 28,
-                            "hidden_size": 1536,
-                            "num_attention_heads": 12,
-                            "vocab_size": 151936,
-                            "max_model_len": 4096,
-                        }
-                    self._prep_surrogate = WorkerPrepSurrogate(model_cfg)
+                        print("[ExecutorHook] WARNING: profile pack has no "
+                              "model_config. Re-profile with latest tracer "
+                              "to auto-collect. Surrogate disabled.")
+                    else:
+                        self._prep_surrogate = WorkerPrepSurrogate(model_cfg)
                 except Exception as e:
                     print(f"[ExecutorHook] Prep surrogate init failed: {e}")
 

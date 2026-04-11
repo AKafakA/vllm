@@ -6,7 +6,12 @@ Same as build_serving_profile.py but with stricter filtering:
 - 1D sections require >= 5 samples per bucket (vs 2 in original)
 - Sparse cells dropped; oracle interpolates over neighbors
 
-Usage: python build_serving_profile_filtered.py <step_cycle_file> <sweep_profile> <output> <model_name> <gpu_model>
+Usage: python build_serving_profile_filtered.py <step_cycle_file> <sweep_profile> <output> [model_name] [gpu_model]
+
+If the trace file contains a _header record (auto-collected by
+StepCycleTracer), model_name and gpu_model are extracted automatically
+and the profile pack includes a model_config section. CLI args override
+the header if provided.
 """
 import json
 import statistics
@@ -16,15 +21,20 @@ from collections import defaultdict
 step_cycle_file = sys.argv[1]
 sweep_profile_path = sys.argv[2]
 output_path = sys.argv[3]
-model_name = sys.argv[4] if len(sys.argv) > 4 else "unknown"
-gpu_model = sys.argv[5] if len(sys.argv) > 5 else "unknown"
+cli_model_name = sys.argv[4] if len(sys.argv) > 4 else None
+cli_gpu_model = sys.argv[5] if len(sys.argv) > 5 else None
 
+# Parse trace: extract _header and step records
+trace_header = None
 records = []
 all_raw = []
 in_profiling = False
 _marker_count = 0
 for line in open(step_cycle_file):
     r = json.loads(line)
+    if r.get("_header"):
+        trace_header = r
+        continue
     if r.get("__marker__") == "profiling_start":
         # Each round writes a marker after warmup/sweep.
         # Reset in_profiling so warmup between markers is excluded.
@@ -52,6 +62,29 @@ if not records and all_raw:
     records = all_raw[5000:]
 
 print(f"Records: {len(records)} (from {len(all_raw)} total, markers filtered)")
+
+# Resolve model_name and gpu_model: CLI args > trace header > "unknown"
+model_name = cli_model_name or (trace_header or {}).get("model_name") or "unknown"
+gpu_model = cli_gpu_model or (trace_header or {}).get("gpu_name") or "unknown"
+
+# Build model_config from trace header (auto-collected from HF config + GPU)
+model_config = None
+if trace_header:
+    _MC_KEYS = ("num_hidden_layers", "hidden_size", "num_attention_heads",
+                "num_key_value_heads", "vocab_size", "intermediate_size",
+                "head_dim", "max_model_len", "block_size")
+    model_config = {k: trace_header[k] for k in _MC_KEYS if k in trace_header}
+    _GPU_KEYS = ("gpu_name", "gpu_memory_bytes", "gpu_sm_count",
+                 "gpu_compute_capability", "gpu_count")
+    gpu_config = {k: trace_header[k] for k in _GPU_KEYS if k in trace_header}
+    if gpu_config:
+        model_config["gpu"] = gpu_config
+    print(f"Trace header: gpu={gpu_model}, model={model_name}, "
+          f"layers={model_config.get('num_hidden_layers', '?')}, "
+          f"vocab={model_config.get('vocab_size', '?')}")
+else:
+    print("WARNING: No _header in trace file. GPU/model metadata not available. "
+          "Re-profile with latest StepCycleTracer to auto-collect.")
 
 # Split into prefill (has new_reqs) and decode (no new_reqs) steps
 prefill_by_tt = defaultdict(list)
@@ -370,14 +403,6 @@ profile = {
     "version": "1.0",
     "gpu_model": gpu_model,
     "model_name": model_name,
-    "model_config": {
-        "num_hidden_layers": 28,  # TODO: extract from HF config automatically
-        "hidden_size": 1536,
-        "num_attention_heads": 12,
-        "vocab_size": 151936,
-        "max_model_len": 4096,
-        "block_size": 16,
-    },
     "profile_type": "serving_step_cycle_2d",
     "overhead_per_request_us": round(overhead_per_request_us, 1),
     "correction_table": correction_table,
@@ -396,6 +421,9 @@ profile = {
     "cuda_graph_warmup_us": round(avg_cuda_warmup_us, 0),
     "sched_overhead_table": sched_overhead_table,
 }
+# Embed auto-collected model/GPU config (from trace header)
+if model_config:
+    profile["model_config"] = model_config
 json.dump(profile, open(output_path, "w"), indent=2)
 
 # Show key differences
