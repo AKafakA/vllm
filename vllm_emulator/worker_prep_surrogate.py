@@ -48,7 +48,7 @@ class WorkerPrepSurrogate:
         self._num_computed: dict = {}   # req_id -> num computed tokens
 
         # Pre-allocated arrays for reuse (avoids allocation overhead)
-        self._max_batch = 512
+        self._max_batch = 4096  # match max_model_len
         self._positions_buf = np.zeros(self._max_batch, dtype=np.int64)
         self._seq_lens_buf = np.zeros(self._max_batch, dtype=np.int32)
         self._query_start_buf = np.zeros(self._max_batch + 1, dtype=np.int32)
@@ -164,22 +164,30 @@ class WorkerPrepSurrogate:
 
         # Phase 5b: Per-layer attention metadata construction
         # Real worker iterates over kv_cache_groups × attn_groups
-        # building backend-specific metadata per layer. This is a
-        # significant chunk of the CPU prep cost.
-        for layer_idx in range(self._num_layers):
-            # Simulate per-layer metadata: query offsets, key offsets
-            if total_tokens <= self._max_batch:
+        # building backend-specific metadata per layer. The CPU cost
+        # scales with BOTH num_layers AND total_tokens — for prefill
+        # steps (tt=267), the per-layer work is much heavier than
+        # decode (tt=10-20) because each layer processes all tokens.
+        if total_tokens <= self._max_batch:
+            for layer_idx in range(self._num_layers):
+                # Per-layer per-token work: scales O(num_layers × total_tokens)
+                # Real worker builds query/key/value offsets per token per layer
                 _layer_query_offsets = self._query_start_buf[:num_reqs + 1].copy()
                 _layer_key_offsets = self._seq_lens_buf[:num_reqs].cumsum()
-                # Simulate block table slice per layer (real worker does this)
-                _layer_blocks = self._block_table_buf[:num_reqs, :max(1, (max(self._seq_lens_buf[:num_reqs]) if num_reqs > 0 else 1) // self._block_size + 1)]
+                # Block table slice per layer (proportional to max_seq_len)
+                max_seq = max(self._seq_lens_buf[:num_reqs]) if num_reqs > 0 else 1
+                num_blk = max(1, max_seq // self._block_size + 1)
+                _layer_blocks = self._block_table_buf[:num_reqs, :num_blk]
+                # Per-token position verification (scales with total_tokens)
+                _layer_positions = self._positions_buf[:total_tokens].copy()
+                # Slot mapping per layer (real worker verifies per token)
+                _layer_slots = self._slot_mapping_buf[:total_tokens].copy()
 
         # Phase 5c: Slot mapping commit (real worker commits per-request)
         if total_tokens <= self._max_batch:
             for i, rid in enumerate(req_ids):
                 start = self._query_start_buf[i]
                 end = self._query_start_buf[i + 1]
-                # Simulate slot mapping verification (bounds check per slot)
                 _slots = self._slot_mapping_buf[start:end]
                 _valid = _slots >= 0
 

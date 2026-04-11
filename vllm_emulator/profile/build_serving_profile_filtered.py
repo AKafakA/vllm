@@ -20,21 +20,43 @@ model_name = sys.argv[4] if len(sys.argv) > 4 else "unknown"
 gpu_model = sys.argv[5] if len(sys.argv) > 5 else "unknown"
 
 records = []
+all_raw = []
+in_profiling = False
+_marker_count = 0
 for line in open(step_cycle_file):
     r = json.loads(line)
+    if r.get("__marker__") == "profiling_start":
+        # Each round writes a marker after warmup/sweep.
+        # Reset in_profiling so warmup between markers is excluded.
+        in_profiling = True
+        _marker_count += 1
+        continue
+    if r.get("__marker__"):
+        # Any other marker (rate_done, etc.) — keep in_profiling state
+        continue
     if "total_tokens" in r:
-        records.append(r)
+        all_raw.append(r)
+        if in_profiling:
+            records.append(r)
+        # Reset at likely round boundary: if we see a very early step
+        # after a large gap (new server start), turn off profiling
+        # until the next marker. Heuristic: step_cycle > 50ms at tt=1
+        # suggests CUDA graph compilation during warmup.
+        if (in_profiling and r.get("total_tokens", 0) <= 2
+                and r.get("step_cycle_us", 0) > 50000 and _marker_count > 0):
+            in_profiling = False
 
-print(f"Records: {len(records)}")
+# If no markers found (old trace format), fall back to skip-based approach
+if not records and all_raw:
+    print("  No profiling_start markers found, using skip-based fallback")
+    records = all_raw[5000:]
 
-# Skip warmup/sweep records for 1D sections too.
-# With CUDA graph sweep + standard warmup, skip first 5000 records.
-WARMUP_SKIP_1D = 5000
+print(f"Records: {len(records)} (from {len(all_raw)} total, markers filtered)")
 
 # Split into prefill (has new_reqs) and decode (no new_reqs) steps
 prefill_by_tt = defaultdict(list)
 decode_by_tt = defaultdict(list)
-for r in records[WARMUP_SKIP_1D:]:
+for r in records:
     tt = r["total_tokens"]
     if r.get("num_new_reqs", 0) > 0:
         prefill_by_tt[tt].append(r["step_cycle_us"])
@@ -261,7 +283,7 @@ except Exception as e:
 # This captures the real latency at each concurrency level without
 # mixing low-rate (17ms) and high-rate (113ms) data at the same tt.
 # =============================================
-CONC_BOUNDARIES = [1, 3, 5, 10, 20, 50, 100, 200, 300]  # bucket edges
+CONC_BOUNDARIES = [1, 2, 4, 6, 8, 12, 16, 20, 25, 30, 40, 50, 70, 100, 150, 200, 256]  # bucket edges
 TT_BUCKET_WIDTH = 5  # group tt into width-5 buckets
 
 def conc_bucket(n):
@@ -282,12 +304,9 @@ def tt_bucket(tt):
 prefill_2d_data = defaultdict(list)  # (tt_bucket, conc_bucket) -> [latency_us]
 decode_2d_data = defaultdict(list)
 step_cycle_2d_data = defaultdict(list)  # combined (backward compat)
-# Skip warmup records. With CUDA graph sweep warmup (~500 steps for 15 batch sizes
-# + 500 burst) + standard 200-prompt warmup (~2500 steps), skip first 5000 records
-# to exclude all warmup/sweep contamination. This is conservative — better to skip
-# too many than include compilation spikes in the profile.
-WARMUP_SKIP = 5000
-for r in records[WARMUP_SKIP:]:
+# Records are already filtered by profiling_start markers (or skip-based fallback).
+# No additional skip needed here.
+for r in records:
     tt = r["total_tokens"]
     conc = r.get("num_new_reqs", 0) + r.get("num_decode_seqs", 0)
     if conc < 1:
@@ -351,6 +370,14 @@ profile = {
     "version": "1.0",
     "gpu_model": gpu_model,
     "model_name": model_name,
+    "model_config": {
+        "num_hidden_layers": 28,  # TODO: extract from HF config automatically
+        "hidden_size": 1536,
+        "num_attention_heads": 12,
+        "vocab_size": 151936,
+        "max_model_len": 4096,
+        "block_size": 16,
+    },
     "profile_type": "serving_step_cycle_2d",
     "overhead_per_request_us": round(overhead_per_request_us, 1),
     "correction_table": correction_table,
