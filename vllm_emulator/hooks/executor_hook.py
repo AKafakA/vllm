@@ -133,6 +133,11 @@ class ExecutorEmulatorHook:
             self._oracle = create_oracle_from_profile_pack(profile_pack)
             self._enabled = True
 
+            # Read model metadata from profile pack (auto-collected)
+            model_cfg = profile_pack.get("model_config", {})
+            if model_cfg.get("vocab_size"):
+                self._vocab_size = model_cfg["vocab_size"]
+
             # Pipeline scheduling compensation (profile-derived).
             self._sched_compensation_us = self._compute_sched_compensation(
                 profile_pack)
