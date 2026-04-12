@@ -190,6 +190,32 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         except ImportError:
             self._np = None
 
+        # 2D distribution: (tt, conc) -> list of raw samples.
+        # Used by distribution oracle mode to capture per-concurrency
+        # variance — real GPU's tail is larger at higher concurrency.
+        self._2d_distribution = {}
+        for e in profile_pack.get("step_cycle_2d_distribution", []):
+            self._2d_distribution[(e["tt"], e["conc"])] = e
+        self._2d_dist_tts = sorted(set(k[0] for k in self._2d_distribution.keys()))
+        self._2d_dist_concs = sorted(set(k[1] for k in self._2d_distribution.keys()))
+
+        # Global decode/prefill distributions: union of all per-tt samples.
+        # Used by "distribution_global" oracle mode — breaks the feedback
+        # loop where emu's lower concurrency makes it sample from
+        # tighter-distributed buckets, making it even faster.
+        # By sampling globally, emu's step_cycle mean matches real's
+        # global mean regardless of emu's instantaneous batch shape.
+        self._global_decode_samples = []
+        for bucket in self._decode_forward_pass:
+            self._global_decode_samples.extend(bucket.get("samples", []))
+        self._global_prefill_samples = []
+        for bucket in self._prefill_forward_pass:
+            self._global_prefill_samples.extend(bucket.get("samples", []))
+        # Fallback: use combined forward_pass samples
+        self._global_combined_samples = []
+        for bucket in self._forward_pass_samples:
+            self._global_combined_samples.extend(bucket.get("samples", []))
+
     def get_max_step_cycle_us(self, num_requests: int) -> float:
         """Get the maximum profiled step_cycle at a given concurrency.
 
@@ -304,16 +330,59 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         return self._decode_pw_a * (active_seqs ** self._decode_pw_b)
 
+    def _sample_2d_distribution(
+        self, total_tokens: int, num_requests: int
+    ) -> float | None:
+        """Sample latency from 2D (tt, concurrency) distribution bucket.
+
+        This captures per-concurrency variance — real GPU's long tail at
+        N=20 is much larger than at N=8, and 1D tt-only bucketing averages
+        these together. Sampling from (tt, N) bucket preserves the correct
+        distribution for the current step's actual concurrency.
+
+        Returns None if no matching bucket found (caller falls back to 1D).
+        """
+        if not self._2d_distribution:
+            return None
+
+        # Find nearest tt bucket
+        if total_tokens <= self._2d_dist_tts[0]:
+            tt_near = self._2d_dist_tts[0]
+        elif total_tokens >= self._2d_dist_tts[-1]:
+            tt_near = self._2d_dist_tts[-1]
+        else:
+            # Linear search for nearest
+            tt_near = min(self._2d_dist_tts,
+                          key=lambda t: abs(t - total_tokens))
+
+        # Find nearest concurrency bucket for this tt
+        available_concs = [c for (tt, c) in self._2d_distribution.keys()
+                           if tt == tt_near]
+        if not available_concs:
+            return None
+        conc_near = min(available_concs, key=lambda c: abs(c - num_requests))
+
+        bucket = self._2d_distribution.get((tt_near, conc_near))
+        if not bucket:
+            return None
+
+        raw = bucket.get("samples")
+        if raw:
+            return float(self._variance_rng.choice(raw))
+        return None
+
     def _sample_with_variance(
         self, samples: list[dict], total_tokens: int
     ) -> float:
         """Sample latency preserving variance from profile distribution.
 
-        Uses p50/p90/p99 percentiles to construct a distribution per bucket.
-        This preserves the long-tail latency spikes (CUDA graph stalls,
-        memory pressure) that drive per-request queuing in real systems.
+        Primary path: bootstrap sample from bucket's raw `samples` list
+        (preserves exact empirical distribution including mean and tail).
 
-        Falls back to median if profile doesn't have variance fields.
+        Fallback path: piecewise-linear CDF from p50/p90/p99 percentiles
+        (used when profile lacks raw samples, e.g., legacy profiles).
+
+        Returns latency in microseconds.
         """
         if not samples:
             return 0.0
@@ -337,29 +406,34 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             else:
                 bucket = samples[0]
 
+        # Primary path: bootstrap from raw samples if available.
+        # This reproduces the empirical distribution exactly — matches
+        # both the mean and the tail faithfully. No synthetic CDF.
+        raw = bucket.get("samples")
+        if raw:
+            return float(self._variance_rng.choice(raw))
+
+        # Fallback path: reconstruct from p50/p90/p99 percentiles.
+        # Used when profile is from older builder without `samples` field.
         p50 = float(bucket["latency_us"])
         p90 = float(bucket.get("p90_us", p50))
         p99 = float(bucket.get("p99_us", p50))
 
-        # Sample from approximate distribution using uniform inverse CDF:
-        # 0.0-0.5: linear from p50*0.9 to p50
-        # 0.5-0.9: linear from p50 to p90
-        # 0.9-0.99: linear from p90 to p99
-        # 0.99-1.0: linear from p99 to p99*1.1
+        # Piecewise-linear CDF anchored at p50/p90/p99.
+        # NOTE: below-p50 region uses a narrower dip than before (0.98*p50)
+        # to avoid biasing the sampled mean below the real mean.
         u = self._variance_rng.random()
         if u <= 0.5:
-            # Lower half: slight dip below median
-            return p50 * 0.95 + (p50 - p50 * 0.95) * (u / 0.5)
+            # Lower half: narrow dip below median
+            return p50 * 0.98 + (p50 - p50 * 0.98) * (u / 0.5)
         elif u <= 0.9:
-            # p50 to p90
             frac = (u - 0.5) / 0.4
             return p50 + frac * (p90 - p50)
         elif u <= 0.99:
-            # p90 to p99 (long tail)
             frac = (u - 0.9) / 0.09
             return p90 + frac * (p99 - p90)
         else:
-            # p99 to p99*1.1 (extreme tail)
+            # Extreme tail
             frac = (u - 0.99) / 0.01
             return p99 + frac * (p99 * 0.1)
 
@@ -387,11 +461,37 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         if total_tokens <= 0:
             return 0.0
 
-        # Distribution mode: sample from p50/p90/p99 per bucket.
+        # Distribution_global mode: sample from the union of all samples
+        # across all tt/conc buckets. Breaks the feedback loop where emu's
+        # lower concurrency causes it to sample from tighter buckets,
+        # making it artificially faster. Global sampling preserves the
+        # real distribution's mean regardless of emu's instantaneous state.
+        if oracle_mode == "distribution_global":
+            if has_prefill and self._global_prefill_samples:
+                pool = self._global_prefill_samples
+            elif not has_prefill and self._global_decode_samples:
+                pool = self._global_decode_samples
+            elif self._global_combined_samples:
+                pool = self._global_combined_samples
+            else:
+                pool = None
+            if pool:
+                return float(self._variance_rng.choice(pool))
+            # Fall through to distribution mode if no global samples
+
+        # Distribution mode: sample from profile's distribution per bucket.
         # Preserves real GPU variance (CUDA graph stalls, memory spikes)
         # that drive per-request queuing in actual serving.
-        if oracle_mode == "distribution":
-            # Pick section based on has_prefill
+        if oracle_mode == "distribution" or oracle_mode == "distribution_global":
+            # Primary: 2D (tt, concurrency) empirical sampling — most
+            # accurate because variance depends on concurrency, not just tt.
+            if num_requests > 0 and self._2d_distribution:
+                result = self._sample_2d_distribution(total_tokens, num_requests)
+                if result is not None:
+                    return result
+
+            # Fallback: 1D (tt) empirical/CDF sampling.
+            # Pick section based on has_prefill.
             if has_prefill and self._prefill_forward_pass:
                 samples = self._prefill_forward_pass
             elif not has_prefill and self._decode_forward_pass:

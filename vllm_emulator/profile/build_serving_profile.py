@@ -106,13 +106,31 @@ def build_section(by_tt, label):
         p90 = lats[int(len(lats)*0.9)] if len(lats) >= 10 else lats[-1]
         p99 = lats[int(len(lats)*0.99)] if len(lats) >= 100 else lats[-1]
         std = statistics.stdev(lats) if len(lats) >= 2 else 0.0
+        mean = statistics.mean(lats) if lats else 0.0
+
+        # Store raw samples for empirical distribution sampling (oracle
+        # uses random.choice over this list to reproduce the real
+        # distribution's mean and tail faithfully, not just percentiles).
+        # Cap at 200 to keep profile size reasonable; uniform random
+        # sample if we have more to avoid order bias.
+        import random as _r_local
+        MAX_SAMPLES = 200
+        if len(lats) <= MAX_SAMPLES:
+            samples = [round(v, 1) for v in lats]
+        else:
+            # Use deterministic seed for reproducibility
+            rng = _r_local.Random(tt)  # tt-seeded for reproducibility
+            samples = [round(v, 1) for v in rng.sample(lats, MAX_SAMPLES)]
+
         section.append({
             "total_tokens": tt,
             "latency_us": round(med, 1),
+            "mean_us": round(mean, 1),
             "p90_us": round(p90, 1),
             "p99_us": round(p99, 1),
             "std_us": round(std, 1),
             "num_samples": len(lats),
+            "samples": samples,
         })
     print(f"  {label}: {len(section)} buckets")
     return section
@@ -323,13 +341,22 @@ for r in records[200:]:  # skip first 200 records (warmup)
     step_cycle_2d_data[(ttb, cb)].append(r["step_cycle_us"])
 
 step_cycle_2d_table = []
+step_cycle_2d_distribution = []  # (tt, conc) -> raw samples for bootstrap oracle
 print(f"\n  2D table (tt_bucket × conc_bucket):")
 # Build table entries with outlier filtering
+MAX_2D_SAMPLES = 100  # cap per (tt, conc) cell
+import random as _rnd_2d
 for (ttb, cb), lats in sorted(step_cycle_2d_data.items()):
     if len(lats) < 3:  # need minimum samples
         continue
-    med = statistics.median(lats)
-    # Filter extreme outliers (>3x median) — catches CUDA graph compilation
+    sorted_lats = sorted(lats)
+    med = statistics.median(sorted_lats)
+    mean_lat = statistics.mean(sorted_lats)
+    p90 = sorted_lats[int(len(sorted_lats)*0.9)] if len(sorted_lats) >= 10 else sorted_lats[-1]
+    p99 = sorted_lats[int(len(sorted_lats)*0.99)] if len(sorted_lats) >= 100 else sorted_lats[-1]
+    std = statistics.stdev(sorted_lats) if len(sorted_lats) >= 2 else 0.0
+
+    # Filter extreme outliers for median (>3x median) — catches CUDA graph compilation
     filtered = [v for v in lats if v < med * 3 and v > med / 3]
     if len(filtered) < 2:
         filtered = lats
@@ -339,6 +366,25 @@ for (ttb, cb), lats in sorted(step_cycle_2d_data.items()):
         "conc": cb,
         "latency_us": round(final_lat, 1),
         "num_samples": len(lats),
+    })
+
+    # Store raw samples (unfiltered, up to MAX_2D_SAMPLES) for empirical
+    # distribution sampling. Preserves the variance per (tt, conc) cell.
+    if len(lats) <= MAX_2D_SAMPLES:
+        samples_2d = [round(v, 1) for v in lats]
+    else:
+        rng_2d = _rnd_2d.Random(ttb * 1000 + cb)  # deterministic per-cell seed
+        samples_2d = [round(v, 1) for v in rng_2d.sample(lats, MAX_2D_SAMPLES)]
+    step_cycle_2d_distribution.append({
+        "tt": ttb,
+        "conc": cb,
+        "latency_us": round(final_lat, 1),  # median (for backward compat)
+        "mean_us": round(mean_lat, 1),
+        "p90_us": round(p90, 1),
+        "p99_us": round(p99, 1),
+        "std_us": round(std, 1),
+        "num_samples": len(lats),
+        "samples": samples_2d,
     })
 
 # Print summary at key tt values
@@ -379,6 +425,9 @@ profile = {
     "sweep_forward_pass": sorted(sweep_fp, key=lambda e: e["total_tokens"]),
     # Proper 2D table: (tt, concurrency) → latency_us
     "step_cycle_2d_table": sorted(step_cycle_2d_table, key=lambda e: (e["tt"], e["conc"])),
+    # 2D distribution: (tt, concurrency) → {samples, mean, p50, p90, p99}
+    # Used by distribution oracle mode for per-concurrency variance.
+    "step_cycle_2d_distribution": sorted(step_cycle_2d_distribution, key=lambda e: (e["tt"], e["conc"])),
     # Emulator calibration parameters (auto-computed from trace)
     "cuda_graph_warmup_us": round(avg_cuda_warmup_us, 0),
     "sched_overhead_table": sched_overhead_table,
