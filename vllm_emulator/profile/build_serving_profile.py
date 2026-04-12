@@ -101,10 +101,17 @@ def build_section(by_tt, label):
                       f"replacing with neighbor median")
                 med = neighbor_med
 
-        lats = by_tt[tt]
+        lats = sorted(by_tt[tt])
+        # Compute distribution stats (for variance-aware oracle)
+        p90 = lats[int(len(lats)*0.9)] if len(lats) >= 10 else lats[-1]
+        p99 = lats[int(len(lats)*0.99)] if len(lats) >= 100 else lats[-1]
+        std = statistics.stdev(lats) if len(lats) >= 2 else 0.0
         section.append({
             "total_tokens": tt,
             "latency_us": round(med, 1),
+            "p90_us": round(p90, 1),
+            "p99_us": round(p99, 1),
+            "std_us": round(std, 1),
             "num_samples": len(lats),
         })
     print(f"  {label}: {len(section)} buckets")

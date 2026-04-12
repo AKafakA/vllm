@@ -179,6 +179,17 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         # Each entry: {num_requests, overhead_us}
         self._output_overhead_table = profile_pack.get("output_overhead_table", [])
 
+        # Variance-aware sampling: preserves real GPU's long-tail latency
+        # (CUDA graph stalls, memory spikes) that 1D median profile misses.
+        # Uses numpy if available, else stdlib random.
+        import random as _rnd
+        self._variance_rng = _rnd.Random(42)
+        try:
+            import numpy as _np
+            self._np = _np
+        except ImportError:
+            self._np = None
+
     def get_max_step_cycle_us(self, num_requests: int) -> float:
         """Get the maximum profiled step_cycle at a given concurrency.
 
@@ -293,6 +304,65 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         return self._decode_pw_a * (active_seqs ** self._decode_pw_b)
 
+    def _sample_with_variance(
+        self, samples: list[dict], total_tokens: int
+    ) -> float:
+        """Sample latency preserving variance from profile distribution.
+
+        Uses p50/p90/p99 percentiles to construct a distribution per bucket.
+        This preserves the long-tail latency spikes (CUDA graph stalls,
+        memory pressure) that drive per-request queuing in real systems.
+
+        Falls back to median if profile doesn't have variance fields.
+        """
+        if not samples:
+            return 0.0
+
+        # Find the bucket (nearest total_tokens)
+        xs = [s["total_tokens"] for s in samples]
+        if total_tokens <= xs[0]:
+            bucket = samples[0]
+        elif total_tokens >= xs[-1]:
+            bucket = samples[-1]
+        else:
+            # Find nearest
+            for i in range(len(xs) - 1):
+                if xs[i] <= total_tokens <= xs[i + 1]:
+                    # Pick nearest
+                    if total_tokens - xs[i] < xs[i + 1] - total_tokens:
+                        bucket = samples[i]
+                    else:
+                        bucket = samples[i + 1]
+                    break
+            else:
+                bucket = samples[0]
+
+        p50 = float(bucket["latency_us"])
+        p90 = float(bucket.get("p90_us", p50))
+        p99 = float(bucket.get("p99_us", p50))
+
+        # Sample from approximate distribution using uniform inverse CDF:
+        # 0.0-0.5: linear from p50*0.9 to p50
+        # 0.5-0.9: linear from p50 to p90
+        # 0.9-0.99: linear from p90 to p99
+        # 0.99-1.0: linear from p99 to p99*1.1
+        u = self._variance_rng.random()
+        if u <= 0.5:
+            # Lower half: slight dip below median
+            return p50 * 0.95 + (p50 - p50 * 0.95) * (u / 0.5)
+        elif u <= 0.9:
+            # p50 to p90
+            frac = (u - 0.5) / 0.4
+            return p50 + frac * (p90 - p50)
+        elif u <= 0.99:
+            # p90 to p99 (long tail)
+            frac = (u - 0.9) / 0.09
+            return p90 + frac * (p99 - p90)
+        else:
+            # p99 to p99*1.1 (extreme tail)
+            frac = (u - 0.99) / 0.01
+            return p99 + frac * (p99 * 0.1)
+
     def estimate_step_latency_us(
         self, total_tokens: int, avg_context_len: int = 0,
         has_prefill: bool = False, profile_section: str = "online",
@@ -306,7 +376,7 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             has_prefill: Whether batch contains new prefill requests
             profile_section: "online" or "offline" — selects profile data
             num_requests: Number of requests in batch (for 2d mode)
-            oracle_mode: "step_cycle", "hybrid", or "2d"
+            oracle_mode: "step_cycle", "hybrid", "2d", or "distribution"
 
         Profile selection:
           offline → offline_forward_pass (if available, else fall through)
@@ -316,6 +386,22 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         """
         if total_tokens <= 0:
             return 0.0
+
+        # Distribution mode: sample from p50/p90/p99 per bucket.
+        # Preserves real GPU variance (CUDA graph stalls, memory spikes)
+        # that drive per-request queuing in actual serving.
+        if oracle_mode == "distribution":
+            # Pick section based on has_prefill
+            if has_prefill and self._prefill_forward_pass:
+                samples = self._prefill_forward_pass
+            elif not has_prefill and self._decode_forward_pass:
+                samples = self._decode_forward_pass
+            else:
+                samples = self._forward_pass_samples
+            # Check if samples have variance fields
+            if samples and "p90_us" in samples[0]:
+                return self._sample_with_variance(samples, total_tokens)
+            # Fall through to deterministic lookup if no variance data
 
         # 2D table mode: bilinear interpolation over (tt, concurrency).
         # Combined table includes both prefill and decode steps.
