@@ -129,7 +129,7 @@ try:
     # forward_pass. It overestimates by 3-4x at tt>271 vs graph-enabled GPU.
     # Kept as separate "sweep_forward_pass" for reference/offline/non-graph use.
     print(f"  Sweep loaded ({len(sweep_fp)} buckets) — stored separately, NOT merged into online")
-except FileNotFoundError:
+except (FileNotFoundError, json.JSONDecodeError):
     print(f"  No sweep profile found")
 
 # Compute emulator calibration parameters from trace + bench results
