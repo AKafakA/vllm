@@ -337,7 +337,7 @@ class ExecutorEmulatorHook:
                 f"{oracle_us:.0f},0,"
                 f"{sched_comp_applied_us:.0f},{latency_us:.0f},"
                 f"{wall_now:.6f},{timer_delay_us:.0f}\n")
-            if self._debug_count % 500 == 0:
+            if self._debug_count % 50 == 0:
                 self._trace_file.flush()
 
         # 3. Dispatch based on engine type

@@ -98,9 +98,11 @@ echo ""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cleanup_gpu() {
-    # Kill any vllm servers on our port
+    # Kill any vllm servers on our port and any leftover GPU processes
     fuser "${PORT}/tcp" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-    sleep 3
+    pkill -9 -f "vllm.entrypoints" 2>/dev/null || true
+    pkill -9 -f "VLLM::EngineCore" 2>/dev/null || true
+    sleep 5
 }
 
 wait_for_server() {

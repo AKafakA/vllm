@@ -36,17 +36,17 @@ source "$VENV_DIR/bin/activate"
 # SETUPTOOLS_SCM_PRETEND_VERSION needed because we rsync without .git
 # Try precompiled first (fast), fall back to source build if ABI mismatch
 echo "Installing vllm-emulator..."
-if VLLM_USE_PRECOMPILED=1 SETUPTOOLS_SCM_PRETEND_VERSION=0.15.2 uv pip install -e . 2>&1 | tail -5; then
+if VLLM_USE_PRECOMPILED=1 SETUPTOOLS_SCM_PRETEND_VERSION=0.18.0 uv pip install -e . 2>&1 | tail -5; then
     # Verify the C extension actually loads
     if python3 -c "import vllm._C" 2>/dev/null; then
         echo "Precompiled install OK"
     else
         echo "Precompiled .so ABI mismatch — rebuilding from source (this takes ~20-30 min)..."
-        SETUPTOOLS_SCM_PRETEND_VERSION=0.15.2 MAX_JOBS=4 uv pip install -e . 2>&1 | tail -5
+        SETUPTOOLS_SCM_PRETEND_VERSION=0.18.0 MAX_JOBS=4 uv pip install -e . 2>&1 | tail -5
     fi
 else
     echo "Precompiled install failed — building from source (~20-30 min)..."
-    SETUPTOOLS_SCM_PRETEND_VERSION=0.15.2 MAX_JOBS=4 uv pip install -e . 2>&1 | tail -5
+    SETUPTOOLS_SCM_PRETEND_VERSION=0.18.0 MAX_JOBS=4 uv pip install -e . 2>&1 | tail -5
 fi
 
 # Install test/bench dependencies
