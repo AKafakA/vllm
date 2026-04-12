@@ -186,7 +186,7 @@ if [[ "$SKIP_PROFILE" -eq 0 ]]; then
     # Build profile pack (reads _header for GPU/model metadata automatically)
     PROFILE_PACK="${PROFILES_DIR}/serving-${MODEL_SHORT}-step-cycle.json"
     echo "Building profile..."
-    python3 "${SCRIPT_DIR}/../../vllm_emulator/profile/build_serving_profile.py" \
+    python3 "${SCRIPT_DIR}/../../vllm_emulator/profile/build_serving_profile_filtered.py" \
         "$TRACE_FILE" \
         "/dev/null" \
         "$PROFILE_PACK"
@@ -232,6 +232,8 @@ for RATE in $RATES; do
     VLLM_EMULATOR_MODE=realtime \
     VLLM_EMULATOR_EXECUTOR_HOOK=1 \
     VLLM_EMULATOR_PREP_SURROGATE=1 \
+    VLLM_EMULATOR_ORACLE_MODE="${ORACLE_MODE:-2d}" \
+    VLLM_EMULATOR_DISABLE_DEFER_ADD=1 \
     python3 -m vllm.entrypoints.openai.api_server \
         --model "$MODEL" --max-model-len "$MAX_MODEL_LEN" \
         --port "$PORT" --trust-remote-code \
@@ -279,6 +281,8 @@ VLLM_EMULATOR_PROFILE_PACK="$PROFILE_PACK" \
 VLLM_EMULATOR_MODE=realtime \
 VLLM_EMULATOR_EXECUTOR_HOOK=1 \
 VLLM_EMULATOR_PREP_SURROGATE=1 \
+VLLM_EMULATOR_ORACLE_MODE="${ORACLE_MODE:-2d}" \
+VLLM_EMULATOR_PROFILE_USAGE=offline \
 python3 -m vllm.entrypoints.cli.main bench throughput \
     --model "$MODEL" --max-model-len "$MAX_MODEL_LEN" --trust-remote-code \
     --dataset-name random --random-input-len "$INPUT_LEN" --random-output-len "$OUTPUT_LEN" \

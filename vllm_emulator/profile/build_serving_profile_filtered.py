@@ -128,12 +128,48 @@ def build_section(by_tt, label):
                       f"replacing with neighbor median")
                 med = neighbor_med
 
-        lats = by_tt[tt]
-        section.append({
+        lats = sorted(by_tt[tt])
+        n = len(lats)
+        mean = statistics.mean(lats) if lats else 0.0
+
+        # Distribution stats — only report if statistically reliable.
+        # With fewer samples, p90/p99 would be noisy estimates that
+        # mislead variance-aware oracles. Marking them null tells
+        # oracles to fall back to deterministic mode for sparse buckets.
+        if n >= 10:
+            p90 = lats[int(n * 0.9)]
+            std = statistics.stdev(lats)
+        else:
+            p90 = None
+            std = None
+        p99 = lats[int(n * 0.99)] if n >= 100 else None
+
+        # Raw samples for empirical distribution sampling.
+        # Even for sparse buckets, samples are kept — oracle can decide
+        # whether to pool with neighbors or fall back.
+        import random as _r_local
+        MAX_SAMPLES = 200
+        if n <= MAX_SAMPLES:
+            samples = [round(v, 1) for v in lats]
+        else:
+            rng = _r_local.Random(tt)
+            samples = [round(v, 1) for v in rng.sample(lats, MAX_SAMPLES)]
+
+        bucket_entry = {
             "total_tokens": tt,
             "latency_us": round(med, 1),
-            "num_samples": len(lats),
-        })
+            "mean_us": round(mean, 1),
+            "num_samples": n,
+            "samples": samples,
+        }
+        # Only include distribution stats if reliable
+        if p90 is not None:
+            bucket_entry["p90_us"] = round(p90, 1)
+        if p99 is not None:
+            bucket_entry["p99_us"] = round(p99, 1)
+        if std is not None:
+            bucket_entry["std_us"] = round(std, 1)
+        section.append(bucket_entry)
     print(f"  {label}: {len(section)} buckets")
     return section
 
@@ -353,12 +389,24 @@ for r in records:
         decode_2d_data[(ttb, cb)].append(r["step_cycle_us"])
 
 def build_2d_table(data, label, min_samples=10):
-    """Build filtered 2D table from (tt,conc) -> [latency] data."""
+    """Build filtered 2D table from (tt,conc) -> [latency] data.
+
+    Also stores raw samples per cell (up to 100) for distribution oracle mode.
+    """
+    import random as _r2d
     table = []
+    distribution = []
+    MAX_2D_SAMPLES = 100
     for (ttb, cb), lats in sorted(data.items()):
         if len(lats) < min_samples:
             continue
-        med = statistics.median(lats)
+        sorted_lats = sorted(lats)
+        med = statistics.median(sorted_lats)
+        mean_lat = statistics.mean(sorted_lats)
+        p90 = sorted_lats[int(len(sorted_lats)*0.9)] if len(sorted_lats) >= 10 else sorted_lats[-1]
+        p99 = sorted_lats[int(len(sorted_lats)*0.99)] if len(sorted_lats) >= 100 else sorted_lats[-1]
+        std = statistics.stdev(sorted_lats) if len(sorted_lats) >= 2 else 0.0
+
         filtered = [v for v in lats if v < med * 3 and v > med / 3]
         if len(filtered) < 5:
             filtered = lats
@@ -369,13 +417,31 @@ def build_2d_table(data, label, min_samples=10):
             "latency_us": round(final_lat, 1),
             "num_samples": len(lats),
         })
+
+        # Distribution cell with raw samples
+        if len(lats) <= MAX_2D_SAMPLES:
+            samples_2d = [round(v, 1) for v in lats]
+        else:
+            rng_2d = _r2d.Random(ttb * 1000 + cb)
+            samples_2d = [round(v, 1) for v in rng_2d.sample(lats, MAX_2D_SAMPLES)]
+        distribution.append({
+            "tt": ttb,
+            "conc": cb,
+            "latency_us": round(final_lat, 1),
+            "mean_us": round(mean_lat, 1),
+            "p90_us": round(p90, 1),
+            "p99_us": round(p99, 1),
+            "std_us": round(std, 1),
+            "num_samples": len(lats),
+            "samples": samples_2d,
+        })
     print(f"    {label}: {len(table)} cells")
-    return table
+    return table, distribution
 
 print(f"\n  2D tables (tt_bucket × conc_bucket):")
-step_cycle_2d_table = build_2d_table(step_cycle_2d_data, "combined")
-prefill_2d_table = build_2d_table(prefill_2d_data, "prefill (eager mode)")
-decode_2d_table = build_2d_table(decode_2d_data, "decode (CUDA graph)")
+step_cycle_2d_table, step_cycle_2d_distribution = build_2d_table(step_cycle_2d_data, "combined")
+prefill_2d_table, prefill_2d_distribution = build_2d_table(prefill_2d_data, "prefill (eager mode)")
+decode_2d_table, decode_2d_distribution = build_2d_table(decode_2d_data, "decode (CUDA graph)")
 
 # Print summary at key tt values
 tt_set = sorted(set(e["tt"] for e in step_cycle_2d_table))
@@ -417,6 +483,11 @@ profile = {
     "step_cycle_2d_table": sorted(step_cycle_2d_table, key=lambda e: (e["tt"], e["conc"])),
     "prefill_2d_table": sorted(prefill_2d_table, key=lambda e: (e["tt"], e["conc"])),
     "decode_2d_table": sorted(decode_2d_table, key=lambda e: (e["tt"], e["conc"])),
+    # 2D distribution: samples per cell for empirical distribution oracle.
+    # Cells with <10 samples are excluded (statistically unreliable p90/p99).
+    "step_cycle_2d_distribution": sorted(step_cycle_2d_distribution, key=lambda e: (e["tt"], e["conc"])),
+    "prefill_2d_distribution": sorted(prefill_2d_distribution, key=lambda e: (e["tt"], e["conc"])),
+    "decode_2d_distribution": sorted(decode_2d_distribution, key=lambda e: (e["tt"], e["conc"])),
     # Emulator calibration parameters (auto-computed from trace)
     "cuda_graph_warmup_us": round(avg_cuda_warmup_us, 0),
     "sched_overhead_table": sched_overhead_table,

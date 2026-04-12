@@ -192,12 +192,23 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         # 2D distribution: (tt, conc) -> list of raw samples.
         # Used by distribution oracle mode to capture per-concurrency
-        # variance — real GPU's tail is larger at higher concurrency.
+        # variance. Filtered builder provides decode/prefill separated
+        # distributions plus combined; combined is the fallback.
+        self._decode_2d_distribution = {}
+        for e in profile_pack.get("decode_2d_distribution", []):
+            self._decode_2d_distribution[(e["tt"], e["conc"])] = e
+        self._prefill_2d_distribution = {}
+        for e in profile_pack.get("prefill_2d_distribution", []):
+            self._prefill_2d_distribution[(e["tt"], e["conc"])] = e
         self._2d_distribution = {}
         for e in profile_pack.get("step_cycle_2d_distribution", []):
             self._2d_distribution[(e["tt"], e["conc"])] = e
-        self._2d_dist_tts = sorted(set(k[0] for k in self._2d_distribution.keys()))
-        self._2d_dist_concs = sorted(set(k[1] for k in self._2d_distribution.keys()))
+        # Combined dist_tts/concs across all 2D distributions
+        all_keys = (set(self._2d_distribution.keys()) |
+                    set(self._decode_2d_distribution.keys()) |
+                    set(self._prefill_2d_distribution.keys()))
+        self._2d_dist_tts = sorted(set(k[0] for k in all_keys))
+        self._2d_dist_concs = sorted(set(k[1] for k in all_keys))
 
         # Global decode/prefill distributions: union of all per-tt samples.
         # Used by "distribution_global" oracle mode — breaks the feedback
@@ -331,43 +342,50 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         return self._decode_pw_a * (active_seqs ** self._decode_pw_b)
 
     def _sample_2d_distribution(
-        self, total_tokens: int, num_requests: int
+        self, total_tokens: int, num_requests: int,
+        has_prefill: bool = False,
     ) -> float | None:
         """Sample latency from 2D (tt, concurrency) distribution bucket.
 
-        This captures per-concurrency variance — real GPU's long tail at
-        N=20 is much larger than at N=8, and 1D tt-only bucketing averages
-        these together. Sampling from (tt, N) bucket preserves the correct
-        distribution for the current step's actual concurrency.
+        Uses decode/prefill separated tables when possible (different CUDA
+        graph characteristics), falling back to combined table.
 
-        Returns None if no matching bucket found (caller falls back to 1D).
+        Returns None if no matching bucket (caller falls back to 1D).
         """
-        if not self._2d_distribution:
+        # Pick table: prefill vs decode vs combined
+        if has_prefill and self._prefill_2d_distribution:
+            table = self._prefill_2d_distribution
+        elif not has_prefill and self._decode_2d_distribution:
+            table = self._decode_2d_distribution
+        elif self._2d_distribution:
+            table = self._2d_distribution
+        else:
+            return None
+
+        tts_in_table = sorted(set(k[0] for k in table.keys()))
+        if not tts_in_table:
             return None
 
         # Find nearest tt bucket
-        if total_tokens <= self._2d_dist_tts[0]:
-            tt_near = self._2d_dist_tts[0]
-        elif total_tokens >= self._2d_dist_tts[-1]:
-            tt_near = self._2d_dist_tts[-1]
+        if total_tokens <= tts_in_table[0]:
+            tt_near = tts_in_table[0]
+        elif total_tokens >= tts_in_table[-1]:
+            tt_near = tts_in_table[-1]
         else:
-            # Linear search for nearest
-            tt_near = min(self._2d_dist_tts,
-                          key=lambda t: abs(t - total_tokens))
+            tt_near = min(tts_in_table, key=lambda t: abs(t - total_tokens))
 
         # Find nearest concurrency bucket for this tt
-        available_concs = [c for (tt, c) in self._2d_distribution.keys()
-                           if tt == tt_near]
+        available_concs = [c for (tt, c) in table.keys() if tt == tt_near]
         if not available_concs:
             return None
         conc_near = min(available_concs, key=lambda c: abs(c - num_requests))
 
-        bucket = self._2d_distribution.get((tt_near, conc_near))
+        bucket = table.get((tt_near, conc_near))
         if not bucket:
             return None
 
         raw = bucket.get("samples")
-        if raw:
+        if raw and len(raw) >= 5:  # min 5 samples to avoid degenerate bootstrap
             return float(self._variance_rng.choice(raw))
         return None
 
@@ -485,8 +503,12 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         if oracle_mode == "distribution" or oracle_mode == "distribution_global":
             # Primary: 2D (tt, concurrency) empirical sampling — most
             # accurate because variance depends on concurrency, not just tt.
-            if num_requests > 0 and self._2d_distribution:
-                result = self._sample_2d_distribution(total_tokens, num_requests)
+            has_2d_dist = (self._2d_distribution or
+                           self._decode_2d_distribution or
+                           self._prefill_2d_distribution)
+            if num_requests > 0 and has_2d_dist:
+                result = self._sample_2d_distribution(
+                    total_tokens, num_requests, has_prefill=has_prefill)
                 if result is not None:
                     return result
 
