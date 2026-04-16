@@ -22,29 +22,54 @@ class NetworkTopology(Enum):
 
 
 class BaseGpuCostOracle(ABC):
-    """Abstract interface for estimating GPU compute costs in microseconds."""
+    """Abstract interface for estimating GPU compute costs in microseconds.
+
+    The primary method is estimate_step_latency_us() which estimates the
+    cost of one forward pass given (total_tokens, num_requests, has_prefill).
+
+    The legacy estimate_prefill_latency_us() and estimate_decode_latency_us()
+    are provided as optional hooks for subclasses that support them (e.g.
+    PD-separated oracle, test mocks).  They are NOT abstract.
+    """
 
     @abstractmethod
-    def estimate_prefill_latency_us(self, prompt_tokens: int, batch_size: int) -> float:
-        """Estimate prefill latency for a prefill micro-batch."""
+    def estimate_step_latency_us(
+        self, total_tokens: int,
+        has_prefill: bool = False,
+        num_requests: int = 0,
+        **kwargs,
+    ) -> float:
+        """Estimate latency for one forward pass.
 
-    @abstractmethod
-    def estimate_decode_latency_us(self, active_seqs: int) -> float:
-        """Estimate decode latency per token step for active sequences."""
+        Args:
+            total_tokens: Total tokens in the batch.
+            has_prefill: Whether batch contains new prefill requests.
+            num_requests: Number of requests in batch.
+            **kwargs: Subclass-specific options.
 
-    def estimate_step_latency_us(self, total_tokens: int) -> float:
-        """Estimate latency for one forward pass with total_tokens tokens.
-
-        This is the unified interface: the model runner processes all tokens
-        (prefill chunks + decode tokens) in a single forward pass.  The cost
-        is a function of total_tokens regardless of how they're split between
-        prefill and decode.
-
-        Default implementation falls back to estimate_prefill_latency_us
-        for backward compatibility.  Subclasses with a unified profile
-        should override this directly.
+        Returns:
+            Estimated latency in microseconds.
         """
-        return self.estimate_prefill_latency_us(total_tokens, batch_size=1)
+
+    def estimate_prefill_latency_us(
+        self, prompt_tokens: int, batch_size: int
+    ) -> float:
+        """Estimate prefill latency for a prefill micro-batch.
+
+        Optional — not all oracles support this.  Default delegates to
+        estimate_step_latency_us.
+        """
+        return self.estimate_step_latency_us(
+            prompt_tokens, has_prefill=True, num_requests=batch_size)
+
+    def estimate_decode_latency_us(self, active_seqs: int) -> float:
+        """Estimate decode latency per token step for active sequences.
+
+        Optional — not all oracles support this.  Default delegates to
+        estimate_step_latency_us.
+        """
+        return self.estimate_step_latency_us(
+            active_seqs, has_prefill=False, num_requests=active_seqs)
 
 
 class BaseOffloadCostOracle(ABC):

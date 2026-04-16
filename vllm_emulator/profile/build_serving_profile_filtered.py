@@ -1,516 +1,203 @@
 #!/usr/bin/env python3
-"""Build serving profile with filtered 2D table (min 10 samples per cell).
+"""Build serving profile: bucket step-cycle trace records by (tt, concurrency).
 
-Same as build_serving_profile.py but with stricter filtering:
-- 2D table cells require >= 10 samples (vs 3 in original)
-- 1D sections require >= 5 samples per bucket (vs 2 in original)
-- Sparse cells dropped; oracle interpolates over neighbors
+Reads a step_cycle JSONL trace, splits into prefill vs decode by num_new_reqs,
+buckets by (total_tokens, concurrency), and stores raw samples per bucket.
+No outlier filtering, no heuristic thresholds, no correction tables.
 
-Usage: python build_serving_profile_filtered.py <step_cycle_file> <sweep_profile> <output> [model_name] [gpu_model]
+Usage:
+  python build_serving_profile_filtered.py <step_cycle_file> <output> \
+      [--model-name NAME] [--gpu-model GPU] \
+      [--tt-bucket-width W] [--conc-bucket-width W]
 
-If the trace file contains a _header record (auto-collected by
-StepCycleTracer), model_name and gpu_model are extracted automatically
-and the profile pack includes a model_config section. CLI args override
-the header if provided.
+Bucketing parameters (user-chosen resolution, not tuned constants):
+  --tt-bucket-width   Width of total_tokens buckets (default: 1, i.e. no bucketing)
+  --conc-bucket-width Width of concurrency buckets (default: 5)
+
+If the trace file contains a _header record (auto-collected by StepCycleTracer),
+model_name and gpu_model are extracted automatically and the profile pack includes
+a model_config section. CLI args override the header if provided.
 """
+import argparse
 import json
 import statistics
 import sys
 from collections import defaultdict
 
-step_cycle_file = sys.argv[1]
-sweep_profile_path = sys.argv[2]
-output_path = sys.argv[3]
-cli_model_name = sys.argv[4] if len(sys.argv) > 4 else None
-cli_gpu_model = sys.argv[5] if len(sys.argv) > 5 else None
 
-# Parse trace: extract _header and step records
-trace_header = None
-records = []
-all_raw = []
-in_profiling = False
-_marker_count = 0
-for line in open(step_cycle_file):
-    r = json.loads(line)
-    if r.get("_header"):
-        trace_header = r
-        continue
-    if r.get("__marker__") == "profiling_start":
-        # Each round writes a marker after warmup/sweep.
-        # Reset in_profiling so warmup between markers is excluded.
-        in_profiling = True
-        _marker_count += 1
-        continue
-    if r.get("__marker__"):
-        # Any other marker (rate_done, etc.) — keep in_profiling state
-        continue
-    if "total_tokens" in r:
-        all_raw.append(r)
-        if in_profiling:
-            records.append(r)
-        # Reset at likely round boundary: if we see a very early step
-        # after a large gap (new server start), turn off profiling
-        # until the next marker. Heuristic: step_cycle > 50ms at tt=1
-        # suggests CUDA graph compilation during warmup.
-        if (in_profiling and r.get("total_tokens", 0) <= 2
-                and r.get("step_cycle_us", 0) > 50000 and _marker_count > 0):
-            in_profiling = False
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Build serving profile from step-cycle trace records.")
+    parser.add_argument("step_cycle_file",
+                        help="Path to step_cycle JSONL trace")
+    parser.add_argument("output",
+                        help="Path to output JSON profile")
+    parser.add_argument("--model-name", default=None,
+                        help="Model name (overrides trace header)")
+    parser.add_argument("--gpu-model", default=None,
+                        help="GPU model (overrides trace header)")
+    parser.add_argument("--tt-bucket-width", type=int, default=1,
+                        help="Total-tokens bucket width (default: 1, no bucketing)")
+    parser.add_argument("--conc-bucket-width", type=int, default=5,
+                        help="Concurrency bucket width (default: 5)")
+    return parser.parse_args()
 
-# If no markers found (old trace format), fall back to skip-based approach
-if not records and all_raw:
-    print("  No profiling_start markers found, using skip-based fallback")
-    records = all_raw[5000:]
 
-print(f"Records: {len(records)} (from {len(all_raw)} total, markers filtered)")
+def load_trace(path):
+    """Load step-cycle trace, filtering by profiling_start markers if present.
 
-# Resolve model_name and gpu_model: CLI args > trace header > "unknown"
-model_name = cli_model_name or (trace_header or {}).get("model_name") or "unknown"
-gpu_model = cli_gpu_model or (trace_header or {}).get("gpu_name") or "unknown"
-
-# Build model_config from trace header (auto-collected from HF config + GPU)
-model_config = None
-if trace_header:
-    _MC_KEYS = ("num_hidden_layers", "hidden_size", "num_attention_heads",
-                "num_key_value_heads", "vocab_size", "intermediate_size",
-                "head_dim", "max_model_len", "block_size")
-    model_config = {k: trace_header[k] for k in _MC_KEYS if k in trace_header}
-    _GPU_KEYS = ("gpu_name", "gpu_memory_bytes", "gpu_sm_count",
-                 "gpu_compute_capability", "gpu_count")
-    gpu_config = {k: trace_header[k] for k in _GPU_KEYS if k in trace_header}
-    if gpu_config:
-        model_config["gpu"] = gpu_config
-    print(f"Trace header: gpu={gpu_model}, model={model_name}, "
-          f"layers={model_config.get('num_hidden_layers', '?')}, "
-          f"vocab={model_config.get('vocab_size', '?')}")
-else:
-    print("WARNING: No _header in trace file. GPU/model metadata not available. "
-          "Re-profile with latest StepCycleTracer to auto-collect.")
-
-# Split into prefill (has new_reqs) and decode (no new_reqs) steps
-prefill_by_tt = defaultdict(list)
-decode_by_tt = defaultdict(list)
-for r in records:
-    tt = r["total_tokens"]
-    if r.get("num_new_reqs", 0) > 0:
-        prefill_by_tt[tt].append(r["step_cycle_us"])
-    else:
-        decode_by_tt[tt].append(r["step_cycle_us"])
-
-def build_section(by_tt, label):
-    # First pass: compute raw medians (require >= 5 samples per bucket)
-    raw_medians = {}
-    for tt in sorted(by_tt):
-        lats = by_tt[tt]
-        if len(lats) < 5:
-            continue
-        med = statistics.median(lats)
-        filtered = [v for v in lats if v > 5000 and v < med * 3]
-        if len(filtered) >= 3:
-            raw_medians[tt] = statistics.median(filtered)
-
-    # Second pass: cross-reference with neighbors to detect outlier buckets.
-    # A bucket's median should be within 3x of its nearest neighbors.
-    # This catches cold-start contamination in sparse buckets (e.g., tt=256
-    # having 78ms when tt=258 has 17ms — the 256 bucket is an outlier).
-    section = []
-    sorted_tts = sorted(raw_medians.keys())
-    for i, tt in enumerate(sorted_tts):
-        med = raw_medians[tt]
-        # Find nearest neighbors within ±10 tt
-        neighbors = [raw_medians[t] for t in sorted_tts
-                     if abs(t - tt) <= 10 and t != tt]
-        if neighbors:
-            neighbor_med = statistics.median(neighbors)
-            if med > neighbor_med * 3:
-                # This bucket is >3x its neighbors — likely cold-start outlier
-                print(f"    WARNING: {label} tt={tt} median={med/1000:.1f}ms "
-                      f"is {med/neighbor_med:.1f}x neighbors ({neighbor_med/1000:.1f}ms), "
-                      f"replacing with neighbor median")
-                med = neighbor_med
-
-        lats = sorted(by_tt[tt])
-        n = len(lats)
-        mean = statistics.mean(lats) if lats else 0.0
-
-        # Distribution stats — only report if statistically reliable.
-        # With fewer samples, p90/p99 would be noisy estimates that
-        # mislead variance-aware oracles. Marking them null tells
-        # oracles to fall back to deterministic mode for sparse buckets.
-        if n >= 10:
-            p90 = lats[int(n * 0.9)]
-            std = statistics.stdev(lats)
-        else:
-            p90 = None
-            std = None
-        p99 = lats[int(n * 0.99)] if n >= 100 else None
-
-        # Raw samples for empirical distribution sampling.
-        # Even for sparse buckets, samples are kept — oracle can decide
-        # whether to pool with neighbors or fall back.
-        import random as _r_local
-        MAX_SAMPLES = 200
-        if n <= MAX_SAMPLES:
-            samples = [round(v, 1) for v in lats]
-        else:
-            rng = _r_local.Random(tt)
-            samples = [round(v, 1) for v in rng.sample(lats, MAX_SAMPLES)]
-
-        bucket_entry = {
-            "total_tokens": tt,
-            "latency_us": round(med, 1),
-            "mean_us": round(mean, 1),
-            "num_samples": n,
-            "samples": samples,
-        }
-        # Only include distribution stats if reliable
-        if p90 is not None:
-            bucket_entry["p90_us"] = round(p90, 1)
-        if p99 is not None:
-            bucket_entry["p99_us"] = round(p99, 1)
-        if std is not None:
-            bucket_entry["std_us"] = round(std, 1)
-        section.append(bucket_entry)
-    print(f"  {label}: {len(section)} buckets")
-    return section
-
-prefill_fp = build_section(prefill_by_tt, "prefill_forward_pass")
-decode_fp = build_section(decode_by_tt, "decode_forward_pass")
-
-# Combined forward_pass (for backward compat — uses all steps)
-all_by_tt = defaultdict(list)
-for r in records:
-    all_by_tt[r["total_tokens"]].append(r["step_cycle_us"])
-combined_fp = build_section(all_by_tt, "combined_forward_pass")
-
-# Merge with sweep for large tt
-max_tt = max(e["total_tokens"] for e in combined_fp) if combined_fp else 0
-sweep_fp = []
-try:
-    sweep = json.load(open(sweep_profile_path))
-    sweep_fp = sweep.get("forward_pass", [])
-    # Sweep (enforce_eager, no CUDA graphs) is NOT merged into the online
-    # forward_pass. It overestimates by 3-4x at tt>271 vs graph-enabled GPU.
-    # Kept as separate "sweep_forward_pass" for reference/offline/non-graph use.
-    print(f"  Sweep loaded ({len(sweep_fp)} buckets) — stored separately, NOT merged into online")
-except (FileNotFoundError, json.JSONDecodeError):
-    print(f"  No sweep profile found")
-
-# Compute emulator calibration parameters from trace + bench results
-# 1. CUDA graph shape warmup: first-encounter overhead per padded batch size
-CAPTURE_SIZES = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 160, 192,
-                 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024]
-
-def get_padded(tt):
-    for s in CAPTURE_SIZES:
-        if s >= tt:
-            return s
-    return tt
-
-shape_records = defaultdict(list)
-for r in records[100:]:  # Skip first 100 (cold start)
-    shape_records[get_padded(r["total_tokens"])].append(r["step_cycle_us"])
-
-shape_overheads = []
-for shape, vals in shape_records.items():
-    if len(vals) > 5:
-        first = vals[0]
-        warm = statistics.median(vals[2:])
-        overhead = first - warm
-        if overhead > 5000:  # >5ms overhead
-            shape_overheads.append(overhead)
-
-avg_cuda_warmup_us = statistics.median(shape_overheads) if shape_overheads else 0
-print(f"\n  cuda_graph_warmup_us: {avg_cuda_warmup_us:.0f} (from {len(shape_overheads)} shapes)")
-
-# 2. IPC scheduling overhead: directly measured per concurrent request count.
-# Loaded from ipc_overhead.json produced by profile_ipc_overhead.py.
-# Each entry: {num_reqs: N, overhead_us: X} measured with N-1 background
-# requests in flight + 1 measurement request.
-import os
-ipc_overhead_path = os.path.join(os.path.dirname(output_path), "ipc_overhead.json")
-sched_overhead_table = []
-if os.path.exists(ipc_overhead_path):
-    sched_overhead_table = json.load(open(ipc_overhead_path))
-    print(f"\n  Loaded IPC overhead table: {len(sched_overhead_table)} entries")
-    for e in sched_overhead_table:
-        if e["num_reqs"] in [1, 2, 3, 5, 10, 20, 30, 50]:
-            print(f"    N={e['num_reqs']:3d}: overhead={e['overhead_us']/1000:.1f}ms")
-else:
-    print(f"\n  WARNING: {ipc_overhead_path} not found. Run profile_ipc_sweep.sh first.")
-
-# Build offline_forward_pass from offline trace (if available).
-# The offline trace captures step-cycle via LLM() path (bench throughput)
-# with CUDA graphs at production batch sizes. Decode-only steps
-# (num_new_reqs=0) give the correct latency for offline inference.
-offline_trace_path = os.path.join(os.path.dirname(step_cycle_file), "offline_step_cycle.jsonl")
-offline_fp = []
-if os.path.exists(offline_trace_path):
-    offline_records = []
-    for line in open(offline_trace_path):
-        r = json.loads(line)
-        if "total_tokens" in r:
-            offline_records.append(r)
-    offline_by_tt = defaultdict(list)
-    for r in offline_records:
-        offline_by_tt[r["total_tokens"]].append(r["step_cycle_us"])
-    offline_fp = build_section(offline_by_tt, "offline_forward_pass")
-    print(f"\n  Loaded offline trace: {len(offline_records)} decode-only steps")
-else:
-    print(f"\n  No offline trace found at {offline_trace_path}")
-
-# Compute overhead_per_request_us for 2D oracle.
-# Uses linear regression: step_cycle = a + b*total_tokens + c*num_requests
-# The per-request overhead c captures host-side costs that scale with concurrency.
-overhead_per_request_us = 0.0
-try:
-    import numpy as np
-    # Use decode-only steps (no prefill noise)
-    decode_records = [r for r in records[200:] if r.get("num_new_reqs", 0) == 0
-                      and r.get("num_decode_seqs", 0) > 0]
-    if len(decode_records) >= 20:
-        X = np.array([[r["total_tokens"], r["num_decode_seqs"]] for r in decode_records])
-        y = np.array([r["step_cycle_us"] for r in decode_records])
-        # Add intercept: y = a + b*tt + c*n_reqs
-        X_aug = np.column_stack([np.ones(len(X)), X])
-        # Least squares fit
-        coeffs, _, _, _ = np.linalg.lstsq(X_aug, y, rcond=None)
-        intercept, coeff_tt, coeff_nreqs = coeffs
-        overhead_per_request_us = max(0, coeff_nreqs)  # clamp non-negative
-        print(f"\n  2D regression (decode-only, {len(decode_records)} records):")
-        print(f"    latency = {intercept/1000:.1f}ms + {coeff_tt/1000:.2f}ms*tt + {coeff_nreqs/1000:.2f}ms*n_reqs")
-        print(f"    overhead_per_request_us = {overhead_per_request_us:.0f} ({overhead_per_request_us/1000:.2f}ms)")
-    else:
-        print(f"\n  Not enough decode records for 2D regression ({len(decode_records)})")
-except Exception as e:
-    print(f"\n  2D regression failed: {e}")
-
-# Build concurrency correction table.
-# For each concurrency bucket, compute:
-#   correction = actual_step_cycle - oracle_1d_prediction(total_tokens)
-# This captures the gap between 1D profile and reality at each concurrency.
-# Positive = profile underestimates (need to add), negative = overestimates.
-correction_table = []
-try:
-    # Build 1D oracle lookup from combined forward_pass for prediction
-    fp_map = {e["total_tokens"]: e["latency_us"] for e in combined_fp}
-    fp_tts = sorted(fp_map.keys())
-
-    def oracle_1d(tt):
-        """Simple 1D interpolation matching what the oracle does."""
-        if tt <= 0:
-            return 0
-        if tt in fp_map:
-            return fp_map[tt]
-        # Find bracketing entries
-        lo = max((t for t in fp_tts if t <= tt), default=fp_tts[0])
-        hi = min((t for t in fp_tts if t >= tt), default=fp_tts[-1])
-        if lo == hi:
-            return fp_map[lo]
-        frac = (tt - lo) / (hi - lo)
-        return fp_map[lo] + frac * (fp_map[hi] - fp_map[lo])
-
-    # Use decode-only steps (no prefill noise)
-    decode_recs = [r for r in records[200:] if r.get("num_new_reqs", 0) == 0
-                   and r.get("num_decode_seqs", 0) > 0]
-
-    # Group by concurrency bucket (width=5)
-    from collections import defaultdict as dd
-    by_conc = dd(list)
-    for r in decode_recs:
-        n = r["num_decode_seqs"]
-        by_conc[n].append(r)
-
-    # Compute correction per bucket
-    buckets = sorted(set((n // 5) * 5 for n in by_conc.keys()))
-    print(f"\n  Concurrency correction table ({len(decode_recs)} decode records):")
-    for bucket in buckets:
-        recs_in_bucket = []
-        for n in range(bucket, bucket + 5):
-            recs_in_bucket.extend(by_conc.get(n, []))
-        if len(recs_in_bucket) < 5:
-            continue
-        actual_lats = [r["step_cycle_us"] for r in recs_in_bucket]
-        predicted_lats = [oracle_1d(r["total_tokens"]) for r in recs_in_bucket]
-        actual_med = statistics.median(actual_lats)
-        predicted_med = statistics.median(predicted_lats)
-        correction = actual_med - predicted_med
-        avg_n = statistics.median([r["num_decode_seqs"] for r in recs_in_bucket])
-        correction_table.append({
-            "num_requests": round(avg_n),
-            "correction_us": round(correction, 1),
-            "num_samples": len(recs_in_bucket),
-        })
-        print(f"    N={avg_n:>3}: actual={actual_med/1000:.1f}ms, predicted={predicted_med/1000:.1f}ms, "
-              f"correction={correction/1000:+.1f}ms (n={len(recs_in_bucket)})")
-except Exception as e:
-    print(f"\n  Correction table failed: {e}")
-
-# =============================================
-# Build proper 2D table: (total_tokens, concurrency) → latency_us
-# Each step-cycle record has total_tokens + num_decode_seqs.
-# Bin by (tt_bucket, conc_bucket) and take median per bin.
-# This captures the real latency at each concurrency level without
-# mixing low-rate (17ms) and high-rate (113ms) data at the same tt.
-# =============================================
-CONC_BOUNDARIES = [1, 2, 4, 6, 8, 12, 16, 20, 25, 30, 40, 50, 70, 100, 150, 200, 256]  # bucket edges
-TT_BUCKET_WIDTH = 5  # group tt into width-5 buckets
-
-def conc_bucket(n):
-    """Map concurrency to bucket midpoint."""
-    for i in range(len(CONC_BOUNDARIES) - 1):
-        if CONC_BOUNDARIES[i] <= n < CONC_BOUNDARIES[i + 1]:
-            return (CONC_BOUNDARIES[i] + CONC_BOUNDARIES[i + 1]) // 2
-    return CONC_BOUNDARIES[-1]
-
-def tt_bucket(tt):
-    """Map total_tokens to bucket center."""
-    return (tt // TT_BUCKET_WIDTH) * TT_BUCKET_WIDTH + TT_BUCKET_WIDTH // 2
-
-# Build SEPARATE 2D tables for prefill (eager mode) and decode (CUDA graph mode).
-# In vLLM V1, mixed batches (has new prefill) run in eager/piecewise mode,
-# while pure decode batches use CUDA graphs. These have fundamentally different
-# latencies at the same (tt, concurrency).
-prefill_2d_data = defaultdict(list)  # (tt_bucket, conc_bucket) -> [latency_us]
-decode_2d_data = defaultdict(list)
-step_cycle_2d_data = defaultdict(list)  # combined (backward compat)
-# Records are already filtered by profiling_start markers (or skip-based fallback).
-# No additional skip needed here.
-for r in records:
-    tt = r["total_tokens"]
-    conc = r.get("num_new_reqs", 0) + r.get("num_decode_seqs", 0)
-    if conc < 1:
-        conc = 1
-    ttb = tt_bucket(tt)
-    cb = conc_bucket(conc)
-    step_cycle_2d_data[(ttb, cb)].append(r["step_cycle_us"])
-    if r.get("num_new_reqs", 0) > 0:
-        prefill_2d_data[(ttb, cb)].append(r["step_cycle_us"])
-    else:
-        decode_2d_data[(ttb, cb)].append(r["step_cycle_us"])
-
-def build_2d_table(data, label, min_samples=10):
-    """Build filtered 2D table from (tt,conc) -> [latency] data.
-
-    Also stores raw samples per cell (up to 100) for distribution oracle mode.
+    Returns (trace_header, records).
+    If markers are present, only records after profiling_start markers are kept.
+    If no markers are found, ALL records are used.
     """
-    import random as _r2d
-    table = []
-    distribution = []
-    MAX_2D_SAMPLES = 100
-    for (ttb, cb), lats in sorted(data.items()):
-        if len(lats) < min_samples:
+    trace_header = None
+    records = []
+    all_raw = []
+    in_profiling = False
+
+    for line in open(path):
+        r = json.loads(line)
+        if r.get("_header"):
+            trace_header = r
             continue
-        sorted_lats = sorted(lats)
-        med = statistics.median(sorted_lats)
-        mean_lat = statistics.mean(sorted_lats)
-        p90 = sorted_lats[int(len(sorted_lats)*0.9)] if len(sorted_lats) >= 10 else sorted_lats[-1]
-        p99 = sorted_lats[int(len(sorted_lats)*0.99)] if len(sorted_lats) >= 100 else sorted_lats[-1]
-        std = statistics.stdev(sorted_lats) if len(sorted_lats) >= 2 else 0.0
+        if r.get("__marker__") == "profiling_start":
+            in_profiling = True
+            continue
+        if r.get("__marker__"):
+            continue
+        if "total_tokens" in r:
+            all_raw.append(r)
+            if in_profiling:
+                records.append(r)
 
-        filtered = [v for v in lats if v < med * 3 and v > med / 3]
-        if len(filtered) < 5:
-            filtered = lats
-        final_lat = statistics.median(filtered)
-        table.append({
-            "tt": ttb,
-            "conc": cb,
-            "latency_us": round(final_lat, 1),
-            "num_samples": len(lats),
-        })
+    if not records and all_raw:
+        print("  No profiling_start markers found; using all records")
+        records = all_raw
 
-        # Distribution cell with raw samples
-        if len(lats) <= MAX_2D_SAMPLES:
-            samples_2d = [round(v, 1) for v in lats]
-        else:
-            rng_2d = _r2d.Random(ttb * 1000 + cb)
-            samples_2d = [round(v, 1) for v in rng_2d.sample(lats, MAX_2D_SAMPLES)]
+    print(f"Records: {len(records)} (from {len(all_raw)} total)")
+    return trace_header, records
+
+
+def extract_metadata(trace_header, cli_model_name, cli_gpu_model):
+    """Resolve model_name, gpu_model, and model_config from trace header + CLI."""
+    model_name = cli_model_name or (trace_header or {}).get("model_name") or "unknown"
+    gpu_model = cli_gpu_model or (trace_header or {}).get("gpu_name") or "unknown"
+
+    model_config = None
+    if trace_header:
+        _MC_KEYS = ("num_hidden_layers", "hidden_size", "num_attention_heads",
+                     "num_key_value_heads", "vocab_size", "intermediate_size",
+                     "head_dim", "max_model_len", "block_size")
+        model_config = {k: trace_header[k] for k in _MC_KEYS if k in trace_header}
+        _GPU_KEYS = ("gpu_name", "gpu_memory_bytes", "gpu_sm_count",
+                      "gpu_compute_capability", "gpu_count")
+        gpu_config = {k: trace_header[k] for k in _GPU_KEYS if k in trace_header}
+        if gpu_config:
+            model_config["gpu"] = gpu_config
+        print(f"Trace header: gpu={gpu_model}, model={model_name}, "
+              f"layers={model_config.get('num_hidden_layers', '?')}, "
+              f"vocab={model_config.get('vocab_size', '?')}")
+    else:
+        print("WARNING: No _header in trace file. GPU/model metadata not available. "
+              "Re-profile with latest StepCycleTracer to auto-collect.")
+
+    return model_name, gpu_model, model_config
+
+
+def build_2d_distribution(data, label):
+    """Build 2D distribution from (tt_bucket, conc_bucket) -> [latency_us].
+
+    Returns list of {tt, conc, samples: [...]} dicts with all raw samples.
+    No outlier filtering, no min-sample thresholds.
+    """
+    distribution = []
+    for (ttb, cb), lats in sorted(data.items()):
+        samples = [round(v, 1) for v in lats]
         distribution.append({
             "tt": ttb,
             "conc": cb,
-            "latency_us": round(final_lat, 1),
-            "mean_us": round(mean_lat, 1),
-            "p90_us": round(p90, 1),
-            "p99_us": round(p99, 1),
-            "std_us": round(std, 1),
             "num_samples": len(lats),
-            "samples": samples_2d,
+            "samples": samples,
         })
-    print(f"    {label}: {len(table)} cells")
-    return table, distribution
+    print(f"  {label}: {len(distribution)} cells")
+    return distribution
 
-print(f"\n  2D tables (tt_bucket × conc_bucket):")
-step_cycle_2d_table, step_cycle_2d_distribution = build_2d_table(step_cycle_2d_data, "combined")
-prefill_2d_table, prefill_2d_distribution = build_2d_table(prefill_2d_data, "prefill (eager mode)")
-decode_2d_table, decode_2d_distribution = build_2d_table(decode_2d_data, "decode (CUDA graph)")
 
-# Print summary at key tt values
-tt_set = sorted(set(e["tt"] for e in step_cycle_2d_table))
-conc_set = sorted(set(e["conc"] for e in step_cycle_2d_table))
-table_map = {(e["tt"], e["conc"]): e["latency_us"] for e in step_cycle_2d_table}
-print(f"    {len(step_cycle_2d_table)} cells, tt range={tt_set[0]}-{tt_set[-1]}, "
-      f"conc buckets={conc_set}")
-print(f"    Sample at key tt values (latency in ms):")
-print(f"    {'tt':>6}", end="")
-for cb in conc_set:
-    print(f"  c={cb:>3}", end="")
-print()
-for ttb in [2, 7, 12, 52, 127, 257, 262, 267, 502]:
-    if ttb in [e["tt"] for e in step_cycle_2d_table]:
-        print(f"    {ttb:>6}", end="")
-        for cb in conc_set:
-            val = table_map.get((ttb, cb))
-            if val:
-                print(f"  {val/1000:>6.1f}", end="")
-            else:
-                print(f"  {'--':>6}", end="")
-        print()
+def main():
+    args = parse_args()
 
-profile = {
-    "version": "1.0",
-    "gpu_model": gpu_model,
-    "model_name": model_name,
-    "profile_type": "serving_step_cycle_2d",
-    "overhead_per_request_us": round(overhead_per_request_us, 1),
-    "correction_table": correction_table,
-    "prefill": [],
-    "decode": [],
-    "forward_pass": sorted(combined_fp, key=lambda e: e["total_tokens"]),
-    "prefill_forward_pass": sorted(prefill_fp, key=lambda e: e["total_tokens"]),
-    "decode_forward_pass": sorted(decode_fp, key=lambda e: e["total_tokens"]),
-    "offline_forward_pass": sorted(offline_fp, key=lambda e: e["total_tokens"]),
-    "sweep_forward_pass": sorted(sweep_fp, key=lambda e: e["total_tokens"]),
-    # 2D tables: (tt, concurrency) → latency_us
-    "step_cycle_2d_table": sorted(step_cycle_2d_table, key=lambda e: (e["tt"], e["conc"])),
-    "prefill_2d_table": sorted(prefill_2d_table, key=lambda e: (e["tt"], e["conc"])),
-    "decode_2d_table": sorted(decode_2d_table, key=lambda e: (e["tt"], e["conc"])),
-    # 2D distribution: samples per cell for empirical distribution oracle.
-    # Cells with <10 samples are excluded (statistically unreliable p90/p99).
-    "step_cycle_2d_distribution": sorted(step_cycle_2d_distribution, key=lambda e: (e["tt"], e["conc"])),
-    "prefill_2d_distribution": sorted(prefill_2d_distribution, key=lambda e: (e["tt"], e["conc"])),
-    "decode_2d_distribution": sorted(decode_2d_distribution, key=lambda e: (e["tt"], e["conc"])),
-    # Emulator calibration parameters (auto-computed from trace)
-    "cuda_graph_warmup_us": round(avg_cuda_warmup_us, 0),
-    "sched_overhead_table": sched_overhead_table,
-}
-# Embed auto-collected model/GPU config (from trace header)
-if model_config:
-    profile["model_config"] = model_config
-json.dump(profile, open(output_path, "w"), indent=2)
+    trace_header, records = load_trace(args.step_cycle_file)
+    model_name, gpu_model, model_config = extract_metadata(
+        trace_header, args.model_name, args.gpu_model)
 
-# Show key differences
-print(f"\nPrefill vs Decode at key tt values:")
-pfill_map = {e["total_tokens"]: e["latency_us"] for e in prefill_fp}
-dec_map = {e["total_tokens"]: e["latency_us"] for e in decode_fp}
-for tt in [1, 5, 10, 256, 260, 265, 270]:
-    p = pfill_map.get(tt, 0)
-    d = dec_map.get(tt, 0)
-    if p > 0 or d > 0:
-        print(f"  tt={tt:>4}: prefill={p/1000:.1f}ms, decode={d/1000:.1f}ms, ratio={p/d:.1f}x" if d > 0 else f"  tt={tt:>4}: prefill={p/1000:.1f}ms, decode=N/A")
+    if not records:
+        print("ERROR: No records found in trace file", file=sys.stderr)
+        sys.exit(1)
 
-if offline_fp:
-    off_map = {e["total_tokens"]: e["latency_us"] for e in offline_fp}
-    print(f"\nOffline forward_pass at key tt values:")
-    for tt in sorted(off_map.keys()):
-        print(f"  tt={tt:>4}: {off_map[tt]/1000:.1f}ms")
+    tt_w = args.tt_bucket_width
+    conc_w = args.conc_bucket_width
 
-print(f"\nSaved to {output_path}")
+    def tt_bucket(tt):
+        """Map total_tokens to bucket center using uniform width."""
+        return (tt // tt_w) * tt_w + tt_w // 2
+
+    def conc_bucket(n):
+        """Map concurrency to bucket center using uniform width."""
+        return (n // conc_w) * conc_w + conc_w // 2
+
+    # Bucket records into prefill, decode, and combined 2D maps.
+    # Prefill = steps with new_reqs > 0 (eager mode in vLLM V1).
+    # Decode  = steps with no new_reqs (CUDA graph mode).
+    prefill_2d_data = defaultdict(list)
+    decode_2d_data = defaultdict(list)
+    step_cycle_2d_data = defaultdict(list)
+
+    for r in records:
+        tt = r["total_tokens"]
+        conc = r.get("num_new_reqs", 0) + r.get("num_decode_seqs", 0)
+        if conc < 1:
+            conc = 1
+        ttb = tt_bucket(tt)
+        cb = conc_bucket(conc)
+        step_cycle_2d_data[(ttb, cb)].append(r["step_cycle_us"])
+        if r.get("num_new_reqs", 0) > 0:
+            prefill_2d_data[(ttb, cb)].append(r["step_cycle_us"])
+        else:
+            decode_2d_data[(ttb, cb)].append(r["step_cycle_us"])
+
+    print(f"\n2D distributions (tt_bucket_width={tt_w}, conc_bucket_width={conc_w}):")
+    step_cycle_dist = build_2d_distribution(step_cycle_2d_data, "step_cycle")
+    prefill_dist = build_2d_distribution(prefill_2d_data, "prefill")
+    decode_dist = build_2d_distribution(decode_2d_data, "decode")
+
+    # Summary
+    if step_cycle_dist:
+        tt_set = sorted(set(e["tt"] for e in step_cycle_dist))
+        conc_set = sorted(set(e["conc"] for e in step_cycle_dist))
+        total_samples = sum(e["num_samples"] for e in step_cycle_dist)
+        print(f"  {len(step_cycle_dist)} cells, tt range={tt_set[0]}-{tt_set[-1]}, "
+              f"conc buckets={conc_set}, total samples={total_samples}")
+
+    profile = {
+        "version": "2.0",
+        "gpu_model": gpu_model,
+        "model_name": model_name,
+        "profile_type": "serving_step_cycle_2d",
+        "bucketing": {
+            "tt_bucket_width": tt_w,
+            "conc_bucket_width": conc_w,
+        },
+        "prefill_2d_distribution": sorted(prefill_dist, key=lambda e: (e["tt"], e["conc"])),
+        "decode_2d_distribution": sorted(decode_dist, key=lambda e: (e["tt"], e["conc"])),
+        "step_cycle_2d_distribution": sorted(step_cycle_dist, key=lambda e: (e["tt"], e["conc"])),
+    }
+    if model_config:
+        profile["model_config"] = model_config
+
+    with open(args.output, "w") as f:
+        json.dump(profile, f, indent=2)
+    print(f"\nSaved to {args.output}")
+
+
+if __name__ == "__main__":
+    main()
