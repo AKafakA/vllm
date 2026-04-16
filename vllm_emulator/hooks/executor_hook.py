@@ -204,7 +204,7 @@ class ExecutorEmulatorHook:
             return 0.0
 
         avg_step = sum(low_tt) / len(low_tt)
-        return avg_step / 2  # Half-step: average wait for mid-step arrival
+        return avg_step  # Full step: framework overhead compensation
 
     def _calibrate_overhead_per_req(self, profile_pack: dict) -> float:
         """Auto-calibrate per-request overhead from profile data.
@@ -307,13 +307,13 @@ class ExecutorEmulatorHook:
         )
         latency_us = oracle_us
 
-        # Scheduling compensation: when prior GPU work is in flight
+        # Framework overhead compensation: applied to every prefill step
+        # unconditionally. Models async-thread scheduling + output processing
+        # overhead that the hook's direct path skips (~28ms on RTX 8000).
         sched_comp_applied_us = 0.0
         if has_prefill and self._sched_compensation_us > 0:
-            now_check = time.perf_counter()
-            if self._gpu_free_time > now_check:
-                sched_comp_applied_us = self._sched_compensation_us
-                latency_us += sched_comp_applied_us
+            sched_comp_applied_us = self._sched_compensation_us
+            latency_us += sched_comp_applied_us
 
         latency_s = latency_us / 1e6
 
