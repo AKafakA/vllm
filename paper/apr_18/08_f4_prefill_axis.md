@@ -107,7 +107,13 @@ If both conditions hold → **KEEP**.
 
 ## Review agent verdict
 
-_(populated after Step 2)_
+**APPROVED WITH CONDITIONS** (agent id `ae2d425501d39b712`).
+
+All 6 binding requirements COMPLY. Three conditions:
+
+1. Implementation must use a **concrete deterministic 3D neighbor rule**: exact `new_reqs_bucket` match required; if absent, fall back to the existing 2D path. No cross-bucket distance weighting on the new axis (the reviewer explicitly prohibited implicit tunable weighting between axes).
+2. Once-only warning when `VLLM_EMULATOR_PROFILE_AXES=3d` is set but the loaded profile lacks axis fields — fail-loud, not silent 2D degradation.
+3. A/B harness must include a byte-identical check: the generated profile from the baseline trace with `--profile-axes 2d` must `diff`-equal the pre-F4 builder output for the same trace, confirmed BEFORE the rate sweep runs.
 
 ## Results
 
