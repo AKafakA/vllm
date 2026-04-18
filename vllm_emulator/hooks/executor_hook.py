@@ -31,6 +31,9 @@ ORACLE_ENABLED_ENV = "VLLM_EMULATOR_ENABLE_ORACLE"
 ORACLE_PROFILE_PATH_ENV = "VLLM_EMULATOR_PROFILE_PACK"
 ORACLE_MODE_ENV = "VLLM_EMULATOR_MODE"
 PREP_SURROGATE_ENV = "VLLM_EMULATOR_PREP_SURROGATE"
+SAMPLE_TOKENS_DELAY_ENV = "VLLM_EMULATOR_SAMPLE_TOKENS_DELAY"
+
+_WARNED_NO_AVG_SAMPLE_MS = False  # module-level once-guard for F3
 
 EMULATOR_MODE_REALTIME = "realtime"
 EMULATOR_MODE_ACCELERATED = "accelerated"
@@ -62,6 +65,7 @@ class ExecutorEmulatorHook:
         self._sample_future: Future | None = None
         self._gpu_free_time = 0.0  # Virtual GPU timeline for chain timer
         self._last_surrogate_time_s = 0.0  # Surrogate wall-clock from latest step
+        self._sample_tokens_delay_s = 0.0  # F3: profiled sample-tokens time (default off)
 
         # Fake output generation
         self._rng = __import__("random").Random(42)
@@ -128,9 +132,27 @@ class ExecutorEmulatorHook:
                         f"{PREP_SURROGATE_ENV}=1 requires model_config in profile pack")
                 self._prep_surrogate = WorkerPrepSurrogate(model_cfg)
 
+            # F3: Optional sample-tokens delay from profiled avg_sample_ms.
+            # Profile data (mean of real-hardware per-step sample times); not
+            # an emu-vs-real gap correction.
+            if os.environ.get(SAMPLE_TOKENS_DELAY_ENV, "").lower() in ("1", "true", "yes"):
+                avg_sample_ms = profile_pack.get("avg_sample_ms")
+                if avg_sample_ms is not None:
+                    self._sample_tokens_delay_s = float(avg_sample_ms) / 1000.0
+                else:
+                    global _WARNED_NO_AVG_SAMPLE_MS
+                    if not _WARNED_NO_AVG_SAMPLE_MS:
+                        print(f"[ExecutorEmulatorHook] {SAMPLE_TOKENS_DELAY_ENV}=1 "
+                              f"but profile has no avg_sample_ms; feature is a no-op. "
+                              f"Rebuild profile with --step-timing-csv to enable.")
+                        _WARNED_NO_AVG_SAMPLE_MS = True
+
             surr = "on" if self._prep_surrogate is not None else "off"
+            sdelay = ("%.3fms" % (self._sample_tokens_delay_s * 1000)
+                      if self._sample_tokens_delay_s > 0 else "off")
             print(f"[ExecutorEmulatorHook] Enabled: mode={self._emulator_mode}, "
-                  f"usage={self._profile_usage}, surrogate={surr}")
+                  f"usage={self._profile_usage}, surrogate={surr}, "
+                  f"sample_tokens_delay={sdelay}")
         except Exception as e:
             print(f"[ExecutorEmulatorHook] Failed to initialize: {e}")
 
@@ -246,11 +268,15 @@ class ExecutorEmulatorHook:
         if self._emulator_mode == EMULATOR_MODE_REALTIME:
             now = time.perf_counter()
             start_time = max(now, self._gpu_free_time)
-            # Chain accumulation: add step_cycle + surrogate prep time.
+            # Chain accumulation: add step_cycle + surrogate prep time
+            # + profiled sample-tokens delay (F3).
             # Prevents the chain from absorbing the surrogate's blocking time,
-            # so each step takes step_cycle + worker_prep, matching real
-            # engine's CPU+GPU pipeline (matches commit 182a75877).
-            end_time = start_time + latency_s + self._last_surrogate_time_s
+            # so each step takes step_cycle + worker_prep + sample_tokens,
+            # matching real engine's CPU+GPU pipeline (matches commit
+            # 182a75877). sample_tokens_delay is 0.0 unless F3 is enabled.
+            end_time = (start_time + latency_s
+                        + self._last_surrogate_time_s
+                        + self._sample_tokens_delay_s)
             self._gpu_free_time = end_time
             delay = end_time - now
 
