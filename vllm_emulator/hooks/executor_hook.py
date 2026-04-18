@@ -16,12 +16,25 @@ from __future__ import annotations
 import os
 import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from vllm_emulator.oracle import BaseGpuCostOracle, create_oracle_from_profile_pack
 from vllm_emulator.profile.loader import load_profile_pack
 from vllm_emulator.worker_prep_surrogate import WorkerPrepSurrogate
+
+# F2: module-level single-worker pool, lazy-initialised when the first
+# hook with VLLM_EMULATOR_PARALLEL_SURROGATE=1 loads. Shared across
+# hook instances in the same process.
+_PARALLEL_SURROGATE_POOL: ThreadPoolExecutor | None = None
+
+
+def _get_parallel_pool() -> ThreadPoolExecutor:
+    """Lazily create the F2 pool on first request."""
+    global _PARALLEL_SURROGATE_POOL
+    if _PARALLEL_SURROGATE_POOL is None:
+        _PARALLEL_SURROGATE_POOL = ThreadPoolExecutor(max_workers=1)
+    return _PARALLEL_SURROGATE_POOL
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -31,6 +44,7 @@ ORACLE_ENABLED_ENV = "VLLM_EMULATOR_ENABLE_ORACLE"
 ORACLE_PROFILE_PATH_ENV = "VLLM_EMULATOR_PROFILE_PACK"
 ORACLE_MODE_ENV = "VLLM_EMULATOR_MODE"
 PREP_SURROGATE_ENV = "VLLM_EMULATOR_PREP_SURROGATE"
+PARALLEL_SURROGATE_ENV = "VLLM_EMULATOR_PARALLEL_SURROGATE"
 
 EMULATOR_MODE_REALTIME = "realtime"
 EMULATOR_MODE_ACCELERATED = "accelerated"
@@ -62,6 +76,7 @@ class ExecutorEmulatorHook:
         self._sample_future: Future | None = None
         self._gpu_free_time = 0.0  # Virtual GPU timeline for chain timer
         self._last_surrogate_time_s = 0.0  # Surrogate wall-clock from latest step
+        self._parallel_surrogate_enabled = False  # F2: default off, bit-identical off-path
 
         # Fake output generation
         self._rng = __import__("random").Random(42)
@@ -128,9 +143,18 @@ class ExecutorEmulatorHook:
                         f"{PREP_SURROGATE_ENV}=1 requires model_config in profile pack")
                 self._prep_surrogate = WorkerPrepSurrogate(model_cfg)
 
+            # F2: only create parallel-surrogate state when the gate is set.
+            # Off-path leaves self._parallel_surrogate_enabled as its
+            # initial False, and all downstream code guards on that flag.
+            if os.environ.get(PARALLEL_SURROGATE_ENV, "").lower() in ("1", "true", "yes"):
+                self._parallel_surrogate_enabled = True
+                _get_parallel_pool()  # lazy init so log message fires early
+
             surr = "on" if self._prep_surrogate is not None else "off"
+            parallel = "on" if self._parallel_surrogate_enabled else "off"
             print(f"[ExecutorEmulatorHook] Enabled: mode={self._emulator_mode}, "
-                  f"usage={self._profile_usage}, surrogate={surr}")
+                  f"usage={self._profile_usage}, surrogate={surr}, "
+                  f"parallel_surrogate={parallel}")
         except Exception as e:
             print(f"[ExecutorEmulatorHook] Failed to initialize: {e}")
 
@@ -189,16 +213,36 @@ class ExecutorEmulatorHook:
         )
         latency_s = latency_us / 1e6
 
-        # 1b. Optional: run CPU-side prep surrogate. It blocks the engine
-        # thread for ~2-3ms. Do NOT subtract from latency_s — surrogate adds
-        # real CPU work in parallel with GPU time the timer models. Its
-        # wall-clock is added to gpu_free_time in _handle_async for correct
-        # chain accumulation (matches commit 182a75877).
-        self._last_surrogate_time_s = 0.0
-        if (self._prep_surrogate is not None
-                and self._emulator_mode == EMULATOR_MODE_REALTIME):
-            self._last_surrogate_time_s = self._prep_surrogate.run_prep_surrogate(
-                scheduler_output)
+        # 1b. Optional: run CPU-side prep surrogate.
+        #
+        # F2 parallel mode (VLLM_EMULATOR_PARALLEL_SURROGATE=1) only affects
+        # the async engine path (non_block=True). When parallel, the
+        # surrogate is dispatched to a single-worker ThreadPoolExecutor and
+        # self._last_surrogate_time_s is NOT reset — its prior value serves
+        # as a persistence-forecast (Hyndman & Athanasopoulos ch.5) used by
+        # this step's chain accumulation. The timer callback joins the
+        # surrogate Future and overwrites self._last_surrogate_time_s with
+        # the actual wall-clock so the NEXT step predicts from THIS one.
+        #
+        # Default path (parallel off, or sync engine): synchronous surrogate,
+        # bit-identical to commit 409fd8dc3.
+        surr_fut: Future | None = None
+        use_parallel = (self._parallel_surrogate_enabled
+                        and non_block
+                        and self._prep_surrogate is not None
+                        and self._emulator_mode == EMULATOR_MODE_REALTIME)
+        if use_parallel:
+            pool = _get_parallel_pool()
+            surr_fut = pool.submit(
+                self._prep_surrogate.run_prep_surrogate, scheduler_output)
+            # self._last_surrogate_time_s retains previous step's measurement
+            # (additive identity 0.0 on the very first call).
+        else:
+            self._last_surrogate_time_s = 0.0
+            if (self._prep_surrogate is not None
+                    and self._emulator_mode == EMULATOR_MODE_REALTIME):
+                self._last_surrogate_time_s = self._prep_surrogate.run_prep_surrogate(
+                    scheduler_output)
 
         # 2. Create fake output
         fake_output = self._create_fake_output(scheduler_output)
@@ -225,7 +269,8 @@ class ExecutorEmulatorHook:
             return self._handle_sync(latency_s, fake_output)
         else:
             return self._handle_async(latency_s, fake_output,
-                                      total_tokens, scheduler_output)
+                                      total_tokens, scheduler_output,
+                                      surr_fut=surr_fut)
 
     def _handle_sync(self, latency_s: float, fake_output) -> None:
         """Sync engine: blocking sleep + direct output."""
@@ -237,8 +282,15 @@ class ExecutorEmulatorHook:
 
     def _handle_async(self, latency_s: float, fake_output,
                       total_tokens: int,
-                      scheduler_output: "SchedulerOutput") -> "Future":
-        """Async engine: pending Future via chain timer + gpu_free_time."""
+                      scheduler_output: "SchedulerOutput",
+                      surr_fut: Future | None = None) -> "Future":
+        """Async engine: pending Future via chain timer + gpu_free_time.
+
+        When surr_fut is not None (F2 parallel mode), the timer callback
+        first joins the surrogate Future and updates
+        self._last_surrogate_time_s with the measured wall-clock — this
+        feeds the next step's persistence forecast.
+        """
         exec_fut: Future = Future()
         exec_fut.set_result(None)
 
@@ -247,21 +299,55 @@ class ExecutorEmulatorHook:
             now = time.perf_counter()
             start_time = max(now, self._gpu_free_time)
             # Chain accumulation: add step_cycle + surrogate prep time.
-            # Prevents the chain from absorbing the surrogate's blocking time,
-            # so each step takes step_cycle + worker_prep, matching real
-            # engine's CPU+GPU pipeline (matches commit 182a75877).
+            # In parallel mode, self._last_surrogate_time_s is the
+            # persistence-forecast prediction (previous step's measured
+            # time, 0.0 on first call). In synchronous mode, it is the
+            # surrogate run just completed. Formula is identical.
             end_time = start_time + latency_s + self._last_surrogate_time_s
             self._gpu_free_time = end_time
             delay = end_time - now
 
             if delay >= 0.001:
-                timer = threading.Timer(delay,
-                    lambda: sample_fut.set_result(fake_output))
+                if surr_fut is not None:
+                    def _resolve_parallel():
+                        # Join surrogate Future, update persistence state,
+                        # then resolve sample Future. Ordering invariant:
+                        # sample Future never resolves before surrogate.
+                        try:
+                            measured = surr_fut.result()
+                            if measured is not None:
+                                self._last_surrogate_time_s = float(measured)
+                        except Exception:
+                            # If surrogate raised, keep prior prediction
+                            # (persistence forecast degrades gracefully).
+                            pass
+                        sample_fut.set_result(fake_output)
+                    timer = threading.Timer(delay, _resolve_parallel)
+                else:
+                    timer = threading.Timer(delay,
+                        lambda: sample_fut.set_result(fake_output))
                 timer.daemon = True
                 timer.start()
             else:
+                # Below timer granularity: resolve immediately but still
+                # honour the ordering invariant when parallel.
+                if surr_fut is not None:
+                    try:
+                        measured = surr_fut.result()
+                        if measured is not None:
+                            self._last_surrogate_time_s = float(measured)
+                    except Exception:
+                        pass
                 sample_fut.set_result(fake_output)
         else:
+            # accelerated mode: resolve instantly (still honour ordering)
+            if surr_fut is not None:
+                try:
+                    measured = surr_fut.result()
+                    if measured is not None:
+                        self._last_surrogate_time_s = float(measured)
+                except Exception:
+                    pass
             sample_fut.set_result(fake_output)
 
         self._sample_future = sample_fut
