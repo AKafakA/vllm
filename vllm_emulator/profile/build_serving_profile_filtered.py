@@ -25,6 +25,9 @@ import sys
 from collections import defaultdict
 
 
+_OUTLIER_FILTER_CHOICES = ("none", "iqr", "mad", "winsor")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Build serving profile from step-cycle trace records.")
@@ -43,7 +46,64 @@ def parse_args():
     parser.add_argument("--step-timing-csv", default=None,
                         help="Path to step_timing.csv (from VLLM_DIAG_STEP_TIMING_LOG). "
                              "Extracts avg_sample_ms and avg_exec_ms for profile pack.")
+    parser.add_argument("--outlier-filter", choices=_OUTLIER_FILTER_CHOICES,
+                        default="none",
+                        help="Per-bucket outlier filter applied to raw samples. "
+                             "none (default): no change, byte-identical output. "
+                             "iqr: Tukey 1.5x fence (1977). "
+                             "mad: modified Z-score via MAD at 3.5 (Iglewicz-Hoaglin 1993). "
+                             "winsor: clip to [p1, p99] (classical).")
     return parser.parse_args()
+
+
+def _filter_outliers(samples, method):
+    """Apply a named outlier filter to a list of bucket samples.
+
+    Constants are all named textbook defaults, not tuned values:
+    - 1.5 * IQR fence: Tukey, Exploratory Data Analysis (1977).
+    - MAD consistency constant 0.6745 = inverse normal CDF at 0.75.
+    - MAD outlier threshold 3.5: Iglewicz & Hoaglin (1993), "Volume 16:
+      How to Detect and Handle Outliers".
+    - Winsorize at 1/99 percentiles: classical default when no domain
+      preference is specified.
+    - Minimum-sample guards (4 for IQR/MAD, 100 for winsor) are
+      definitional: the statistic is meaningless below them.
+
+    Returns the filtered sample list. Never introduces fake samples;
+    monotonically reduces (or, for winsor, equal-length with clipped
+    values) the per-bucket distribution.
+    """
+    n = len(samples)
+    if method == "none" or n < 4:
+        return samples
+    sorted_s = sorted(samples)
+
+    if method == "iqr":
+        q1 = sorted_s[n // 4]
+        q3 = sorted_s[(3 * n) // 4]
+        iqr = q3 - q1
+        lo = q1 - 1.5 * iqr  # Tukey 1977
+        hi = q3 + 1.5 * iqr
+        return [x for x in samples if lo <= x <= hi]
+
+    if method == "mad":
+        median = sorted_s[n // 2]
+        abs_dev = sorted(abs(x - median) for x in samples)
+        mad = abs_dev[n // 2]
+        if mad == 0:
+            return samples
+        # 0.6745 = Φ⁻¹(0.75); 3.5 per Iglewicz-Hoaglin 1993.
+        return [x for x in samples
+                if abs(0.6745 * (x - median) / mad) <= 3.5]
+
+    if method == "winsor":
+        if n < 100:
+            return samples
+        lo = sorted_s[n // 100]          # classical 1st percentile
+        hi = sorted_s[(99 * n) // 100]   # classical 99th percentile
+        return [min(max(x, lo), hi) for x in samples]
+
+    return samples
 
 
 def load_trace(path):
@@ -110,22 +170,40 @@ def extract_metadata(trace_header, cli_model_name, cli_gpu_model):
     return model_name, gpu_model, model_config
 
 
-def build_2d_distribution(data, label):
+def build_2d_distribution(data, label, outlier_filter="none"):
     """Build 2D distribution from (tt_bucket, conc_bucket) -> [latency_us].
 
-    Returns list of {tt, conc, samples: [...]} dicts with all raw samples.
-    No outlier filtering, no min-sample thresholds.
+    Returns list of {tt, conc, samples: [...]} dicts. When outlier_filter
+    is "none" the output is byte-identical to the pre-F1 code. For the
+    non-none methods every numeric constant is a named textbook default
+    (see `_filter_outliers` docstring).
     """
     distribution = []
+    total_in = 0
+    total_out = 0
+    buckets_filtered = 0
     for (ttb, cb), lats in sorted(data.items()):
         samples = [round(v, 1) for v in lats]
+        total_in += len(samples)
+        if outlier_filter != "none":
+            before = len(samples)
+            samples = _filter_outliers(samples, outlier_filter)
+            if len(samples) != before:
+                buckets_filtered += 1
+        total_out += len(samples)
         distribution.append({
             "tt": ttb,
             "conc": cb,
-            "num_samples": len(lats),
+            "num_samples": len(samples),
             "samples": samples,
         })
     print(f"  {label}: {len(distribution)} cells")
+    if outlier_filter != "none" and total_in > 0:
+        dropped = total_in - total_out
+        pct = 100.0 * dropped / total_in
+        print(f"    outlier_filter={outlier_filter}: "
+              f"dropped {dropped} of {total_in} samples "
+              f"({pct:.2f}%) across {buckets_filtered} buckets")
     return distribution
 
 
@@ -171,10 +249,14 @@ def main():
         else:
             decode_2d_data[(ttb, cb)].append(r["step_cycle_us"])
 
-    print(f"\n2D distributions (tt_bucket_width={tt_w}, conc_bucket_width={conc_w}):")
-    step_cycle_dist = build_2d_distribution(step_cycle_2d_data, "step_cycle")
-    prefill_dist = build_2d_distribution(prefill_2d_data, "prefill")
-    decode_dist = build_2d_distribution(decode_2d_data, "decode")
+    print(f"\n2D distributions (tt_bucket_width={tt_w}, conc_bucket_width={conc_w}, "
+          f"outlier_filter={args.outlier_filter}):")
+    step_cycle_dist = build_2d_distribution(
+        step_cycle_2d_data, "step_cycle", outlier_filter=args.outlier_filter)
+    prefill_dist = build_2d_distribution(
+        prefill_2d_data, "prefill", outlier_filter=args.outlier_filter)
+    decode_dist = build_2d_distribution(
+        decode_2d_data, "decode", outlier_filter=args.outlier_filter)
 
     # Summary
     if step_cycle_dist:
