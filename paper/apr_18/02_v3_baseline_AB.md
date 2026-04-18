@@ -1,5 +1,26 @@
 # v3 Baseline A/B (slot S0) — Results, Fallback Decision, and Root-Cause Diagnostic
 
+## Final root-cause (established 18:25 UTC)
+
+The v3 bias is a **per-bucket DISTRIBUTION SHAPE issue, not an average-metric issue.**
+
+Warm-vs-cold real baselines recaptured at 17:40 UTC (`tools/recapture_real_warm.sh` → `results/RTX-8000-v31-2000p-warm/`): all metrics within 2% of the original cold baselines. Confirms CUDA graph capture cost is amortized across thousand-second runs → <1% effect on average TPOT/TTFT.
+
+Per-bucket percentile analysis (`tools/diag_v3_deep.py`):
+
+```
+(tt=20, c=22):
+  v3      p50=37275  p90=38738  p95=82630  p99=88072    (n=2961)
+  archive p50=37358  p90=83070  p95=85445  p99=126279   (n=1382)
+                     ^^^^ 2.1× gap at p90
+```
+
+**Medians match. Heavy tails are missing from v3.** Archive's tails are the CUDA graph capture events (~50–100 ms spikes) on first encounter of each batch-size graph during rate sweep. V3's explicit warmup sweep pre-captures all graphs outside the profile window → rate-sweep samples miss capture events entirely → profile is artificially tight.
+
+When the oracle's `random.choice` draws from v3, it never pulls the 80+ ms "cold-capture" samples that archive's oracle occasionally draws. Emu's per-step latency variance is lower than real's → concurrency-feedback loop amplifies → TPOT regresses by 10%+ even though per-step mean error is only 10%.
+
+So the earlier "remove CUDA warmup sweep from adaptive_profile_full.sh" fix is the right move, but the reason is subtler than initially framed: not "match real's average behaviour" but "preserve the per-bucket distribution SHAPE that includes capture-cost outliers."
+
 ## Invariant violated (enforceable going forward)
 
 **More profile data must produce better (or at least equal) emulator accuracy — never worse.**
