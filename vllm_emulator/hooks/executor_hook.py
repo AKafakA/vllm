@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from vllm_emulator.oracle import BaseGpuCostOracle, create_oracle_from_profile_pack
 from vllm_emulator.profile.loader import load_profile_pack
+from vllm_emulator.worker_prep_surrogate import WorkerPrepSurrogate
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 ORACLE_ENABLED_ENV = "VLLM_EMULATOR_ENABLE_ORACLE"
 ORACLE_PROFILE_PATH_ENV = "VLLM_EMULATOR_PROFILE_PACK"
 ORACLE_MODE_ENV = "VLLM_EMULATOR_MODE"
+PREP_SURROGATE_ENV = "VLLM_EMULATOR_PREP_SURROGATE"
 
 EMULATOR_MODE_REALTIME = "realtime"
 EMULATOR_MODE_ACCELERATED = "accelerated"
@@ -53,11 +55,13 @@ class ExecutorEmulatorHook:
 
     def __init__(self):
         self._oracle: BaseGpuCostOracle | None = None
+        self._prep_surrogate: WorkerPrepSurrogate | None = None
         self._enabled = False
         self._emulator_mode = EMULATOR_MODE_REALTIME
         self._profile_usage = "online"  # "online" or "offline"
         self._sample_future: Future | None = None
         self._gpu_free_time = 0.0  # Virtual GPU timeline for chain timer
+        self._last_surrogate_time_s = 0.0  # Surrogate wall-clock from latest step
 
         # Fake output generation
         self._rng = __import__("random").Random(42)
@@ -118,8 +122,15 @@ class ExecutorEmulatorHook:
             if model_cfg.get("vocab_size"):
                 self._vocab_size = model_cfg["vocab_size"]
 
+            if os.environ.get(PREP_SURROGATE_ENV, "").lower() in ("1", "true", "yes"):
+                if not model_cfg:
+                    raise RuntimeError(
+                        f"{PREP_SURROGATE_ENV}=1 requires model_config in profile pack")
+                self._prep_surrogate = WorkerPrepSurrogate(model_cfg)
+
+            surr = "on" if self._prep_surrogate is not None else "off"
             print(f"[ExecutorEmulatorHook] Enabled: mode={self._emulator_mode}, "
-                  f"usage={self._profile_usage}")
+                  f"usage={self._profile_usage}, surrogate={surr}")
         except Exception as e:
             print(f"[ExecutorEmulatorHook] Failed to initialize: {e}")
 
@@ -178,6 +189,17 @@ class ExecutorEmulatorHook:
         )
         latency_s = latency_us / 1e6
 
+        # 1b. Optional: run CPU-side prep surrogate. It blocks the engine
+        # thread for ~2-3ms. Do NOT subtract from latency_s — surrogate adds
+        # real CPU work in parallel with GPU time the timer models. Its
+        # wall-clock is added to gpu_free_time in _handle_async for correct
+        # chain accumulation (matches commit 182a75877).
+        self._last_surrogate_time_s = 0.0
+        if (self._prep_surrogate is not None
+                and self._emulator_mode == EMULATOR_MODE_REALTIME):
+            self._last_surrogate_time_s = self._prep_surrogate.run_prep_surrogate(
+                scheduler_output)
+
         # 2. Create fake output
         fake_output = self._create_fake_output(scheduler_output)
         if fake_output is None:
@@ -224,7 +246,11 @@ class ExecutorEmulatorHook:
         if self._emulator_mode == EMULATOR_MODE_REALTIME:
             now = time.perf_counter()
             start_time = max(now, self._gpu_free_time)
-            end_time = start_time + latency_s
+            # Chain accumulation: add step_cycle + surrogate prep time.
+            # Prevents the chain from absorbing the surrogate's blocking time,
+            # so each step takes step_cycle + worker_prep, matching real
+            # engine's CPU+GPU pipeline (matches commit 182a75877).
+            end_time = start_time + latency_s + self._last_surrogate_time_s
             self._gpu_free_time = end_time
             delay = end_time - now
 

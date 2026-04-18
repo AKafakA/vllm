@@ -40,6 +40,9 @@ def parse_args():
                         help="Total-tokens bucket width (default: 1, no bucketing)")
     parser.add_argument("--conc-bucket-width", type=int, default=5,
                         help="Concurrency bucket width (default: 5)")
+    parser.add_argument("--step-timing-csv", default=None,
+                        help="Path to step_timing.csv (from VLLM_DIAG_STEP_TIMING_LOG). "
+                             "Extracts avg_sample_ms and avg_exec_ms for profile pack.")
     return parser.parse_args()
 
 
@@ -193,6 +196,29 @@ def main():
     }
     if model_config:
         profile["model_config"] = model_config
+
+    # Extract per-step engine overhead from step timing CSV (if provided).
+    # These values are used by the executor hook for sample_tokens delay
+    # and surrogate calibration. All values from real GPU profiling.
+    if args.step_timing_csv:
+        import csv
+        with open(args.step_timing_csv) as stf:
+            reader = csv.DictReader(stf)
+            sample_vals = []
+            exec_vals = []
+            for row in reader:
+                if "sample_ms" in row:
+                    sample_vals.append(float(row["sample_ms"]))
+                if "exec_ms" in row:
+                    exec_vals.append(float(row["exec_ms"]))
+        if sample_vals:
+            profile["avg_sample_ms"] = round(sum(sample_vals) / len(sample_vals), 4)
+            print(f"\nStep timing: avg_sample_ms={profile['avg_sample_ms']} "
+                  f"(from {len(sample_vals)} steps)")
+        if exec_vals:
+            profile["avg_exec_ms"] = round(sum(exec_vals) / len(exec_vals), 4)
+            print(f"Step timing: avg_exec_ms={profile['avg_exec_ms']} "
+                  f"(from {len(exec_vals)} steps)")
 
     with open(args.output, "w") as f:
         json.dump(profile, f, indent=2)

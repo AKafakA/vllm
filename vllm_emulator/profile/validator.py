@@ -86,7 +86,7 @@ def validate_profile_pack(profile_pack: Mapping[str, Any]) -> None:
 
     obj = _require_mapping(profile_pack, "profile_pack")
 
-    required_top_level = ("version", "gpu_model", "prefill", "decode")
+    required_top_level = ("version", "gpu_model")
     for key in required_top_level:
         if key not in obj:
             raise ProfileValidationError(f"{key} is required")
@@ -102,19 +102,24 @@ def validate_profile_pack(profile_pack: Mapping[str, Any]) -> None:
         if not isinstance(obj["model_name"], str) or not obj["model_name"].strip():
             raise ProfileValidationError("model_name must be a non-empty string if provided")
 
-    prefill = obj["prefill"]
-    decode = obj["decode"]
+    prefill = obj.get("prefill", [])
+    decode = obj.get("decode", [])
     if not isinstance(prefill, Sequence) or isinstance(prefill, (str, bytes)):
         raise ProfileValidationError("prefill must be an array")
     if not isinstance(decode, Sequence) or isinstance(decode, (str, bytes)):
         raise ProfileValidationError("decode must be an array")
 
-    # Serving profiles use forward_pass instead of prefill/decode
+    # Serving profiles use forward_pass or 2D distributions instead of prefill/decode
     has_forward_pass = "forward_pass" in obj and len(obj["forward_pass"]) > 0
+    has_2d_distribution = any(
+        key in obj and len(obj[key]) > 0
+        for key in ("step_cycle_2d_distribution", "prefill_2d_distribution",
+                     "decode_2d_distribution")
+    )
 
-    if len(prefill) == 0 and not has_forward_pass:
+    if len(prefill) == 0 and not has_forward_pass and not has_2d_distribution:
         raise ProfileValidationError("prefill must include at least one sample")
-    if len(decode) == 0 and not has_forward_pass:
+    if len(decode) == 0 and not has_forward_pass and not has_2d_distribution:
         raise ProfileValidationError("decode must include at least one sample")
 
     if prefill:
