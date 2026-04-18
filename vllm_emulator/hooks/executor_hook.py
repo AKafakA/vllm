@@ -181,11 +181,13 @@ class ExecutorEmulatorHook:
         num_new = len(scheduler_output.scheduled_new_reqs)
         num_total_reqs = len(scheduler_output.num_scheduled_tokens)
 
-        # 1. Estimate latency from profile
+        # 1. Estimate latency from profile. num_new_reqs is F4's third axis;
+        # oracle ignores it in 2D mode.
         latency_us = self._oracle.estimate_step_latency_us(
             total_tokens,
             has_prefill=has_prefill,
             num_requests=num_total_reqs,
+            num_new_reqs=num_new,
         )
         latency_s = latency_us / 1e6
 
