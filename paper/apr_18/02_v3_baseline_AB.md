@@ -77,15 +77,33 @@ Archive's script (`adaptive_profiling.sh`) has no CUDA warmup sweep. Graphs are 
 
 **Result:** v3 samples come from warm-graph steady-state; archive and real baseline include capture latency. V3's oracle predicts ~10% faster than real behaviour → observed regression at every low-mid rate.
 
-## Fix direction for tomorrow (Apr 19)
+## Broader asymmetry (confirmed via script inspection)
 
-**Remove the CUDA graph warmup sweep** from `adaptive_profile_full.sh` (lines 138–145). Keep the standard warmup (200 prompts @ rate=4, 256/128) to warm the graphs that specific workload hits, but let OTHER rates/shapes encounter cold-capture inside the profile window — matching real validation methodology.
+The v3 regression is one instance of a general **three-run methodology mismatch** between profile, real baseline, and emulator validation. Inventory:
 
-Optional companion:
-- Remove the high-concurrency burst (lines 146–152) — pre-warms some graphs.
-- Variable-shape workloads (64/32 / 512/256 / 128/64) can stay; they're orthogonal to graph warming.
+| Run | Pre-warmup? | Measurement includes cold-graph capture? |
+|---|---|---|
+| **Profile: archive** (`adaptive_profiling.sh` L49–50) | 500 prompts @ rate=4, 256/128 — partial | YES (rate sweep encounters new batch sizes in-situ) |
+| **Profile: v3** (`adaptive_profile_full.sh` L138–158) | 3 warmups: CUDA sweep (all 19 batch sizes at input_len=1) + high-conc burst + rate=4 warmup | NO (every graph pre-captured) |
+| **Real baseline** (`RTX-8000-v31-2000p/rN_real.json`, duration 1003.9s for 1000s target — 4s of startup cost visible) | NO explicit pre-warmup | YES (first prompts capture graphs in-situ) |
+| **Emu validation** (`validate_feature_ab.sh` L100–103) | 200 prompts @ rate=4, 256/128 (explicit `.warmup_done` marker) | N/A — oracle samples IID from profile; no time-dependence |
 
-Expected outcome: v3 per-bucket means climb ~10% to match archive. This fix matches the clean-solution philosophy — profile exactly the workload you validate. No magic numbers added, no gap-fitting.
+**Consequences:**
+
+- Archive matches real baseline's capture-cost structure → emu using archive is valid to compare vs real (modulo the oracle-IID issue below).
+- V3 has no capture-cost samples at all → emu predicts artificially fast → ~10% TPOT/TTFT regression even when the profile data is "more" and "cleaner".
+- Emu validation's explicit 200-prompt pre-warmup is OK because the oracle has no time-dependence anyway — the warmup just primes the engine/scheduler.
+- But: **oracle-IID vs real-sequential is a permanent structural asymmetry.** Real pays cold-graph once at the start; oracle samples are stateless so every call is drawn without regard to "first" vs "later" step. This is the same asymmetry that caused the earlier TTFT −14% residual flagged in `project_ttft_trace_analysis` (CUDA graph compilation 50 ms + IPC 39 ms).
+
+## Fix directions for tomorrow (Apr 19)
+
+1. **Cheapest: profile-methodology parity.** Remove lines 138–145 (CUDA sweep) and 146–152 (high-conc burst) from `adaptive_profile_full.sh`. Keep only the 200-prompt rate=4 warmup. Matches archive's methodology and real baseline's capture-cost structure. Expected: v3 per-bucket means climb ~10% to match archive. No magic numbers, no gap-fitting.
+
+2. **Medium: emu-validation symmetry.** Optionally remove the 200-prompt warmup from `validate_feature_ab.sh` / `validate_wiring_fix.sh` so the measurement window matches real baseline's "no pre-warmup" behaviour. Won't affect per-step oracle predictions but makes the workload envelope comparable. Tiny script edit.
+
+3. **Expensive (structural): time-dependent oracle.** Add a first-occurrence-of-batch-size counter to the oracle and inject a profile-derived capture-cost sample the first time each batch size is queried. Address the oracle-IID asymmetry directly. Large feature — tracked as future work, not for tomorrow.
+
+Tomorrow's session should do #1 + #2 together (both are a few lines of script edit) and re-run the v3 A/B. If v3 withsurr then matches or beats archive, adopt v3 as the permanent baseline and proceed to #3 as a longer-horizon improvement.
 
 ## Selection decision
 
