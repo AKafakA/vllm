@@ -1,5 +1,14 @@
 # v3 Baseline A/B (slot S0) — Results, Fallback Decision, and Root-Cause Diagnostic
 
+## Invariant violated (enforceable going forward)
+
+**More profile data must produce better (or at least equal) emulator accuracy — never worse.**
+
+v3 has 3× archive's data but regressed emulator accuracy by 5–15 pp TPOT and 2–8 pp TTFT at low-mid rates. That is an invariant violation. When this invariant is violated, the methodology is wrong, not the algorithm. Feature ablations built on top of a methodology that violates this invariant produce relative-between-broken-conditions comparisons, not absolute-accuracy measurements — so they cannot be published or shipped without the methodology first being validated.
+
+**Today's feature ablations are paused at F1 (DROP verdict, archive baseline) pending invariant restoration.**
+
+
 ## A/B results (v3 profile = `results/RTX-8000-adaptive-v3/serving-full.json`, 318k records, 1989 combined buckets)
 
 Pass A — **nosurr** (`results/RTX-8000-v3-nosurr/`):
