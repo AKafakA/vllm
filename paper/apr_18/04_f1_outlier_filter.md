@@ -100,7 +100,15 @@ Otherwise → **DROP** (revert CLI flag on main, feature dead for today).
 
 ## Review agent verdict
 
-_(populated after Step 2)_
+**APPROVED WITH CONDITIONS** (agent id `ab6d9d3057d8bd6da`).
+
+Conditions to apply in implementation:
+
+1. Inline-cite each constant in the implementation comments (`# Tukey 1977`, `# Iglewicz-Hoaglin 1993`, `# MAD consistency constant Φ⁻¹(0.75)`) so future reviewers can audit without re-reading the design doc.
+2. Add a runtime print per filter run showing per-bucket sample-count reduction (e.g. `iqr: dropped N of M samples across K buckets`) so the A/B operator can verify the filter actually fired.
+3. The off-is-noop byte-identical `diff` smoke test mentioned in §3 and §5 must be executed and recorded in `progress.md` before the A/B run begins.
+
+All six binding requirements checked COMPLIES. No design changes needed.
 
 ## Results
 
