@@ -1,6 +1,29 @@
 # v3 Baseline A/B (slot S0) — Results, Fallback Decision, and Root-Cause Diagnostic
 
-## Final root-cause (established 18:25 UTC)
+## UPDATED root-cause (established 22:55 UTC, supersedes 18:25 finding below)
+
+The v3/v4 bias has **two stacked causes**, not one. The 18:25 finding (CUDA warmup sweep) is correct but only explains ~60% of the gap. The remaining cause is **server restarts between rounds.**
+
+Evidence — per-bucket p90 Δ% vs archive, 3-profile comparison on `256/128` random workload, no variable shapes included:
+
+| Profile | Structure | CUDA sweep | Server restarts | p50 Δ% | **p90 Δ%** |
+|---|---|---|---|---|---|
+| v3 (5-round, warmup sweep on) | multi-session | yes | yes (4) | matches | −45% |
+| v4 (5-round, warmup sweep removed) | multi-session | no | yes (4) | −0.55% | **−24%** |
+| v5 partial (6 rates, warmup sweep removed, single session) | single-session | no | **none** | −0.23% | **−3.14%** |
+
+Eliminated as causes by this comparison:
+- Variable-shape contamination (none of these profiles has variable shapes)
+- CUDA warmup sweep (v4 and v5 both remove it)
+- Profiling-window marker bugs (fixed in `a102eed27`, present in all)
+
+**Remaining variable: server restarts between rounds.** Archive is single-session; v5 partial is single-session. V4 restarts between rounds. Each restart re-initialises CUDA context, IPC state, memory fragmentation — subsequent rounds may start with a freshly-warm but differently-fragmented state that truncates the heavy tail the oracle's `random.choice` needs.
+
+Conclusion: the **"more data → better results" invariant holds IFF profiling is single-session.** Multi-round-with-restarts introduces structured bias that widens the profile-vs-real gap even when the individual samples are correct.
+
+---
+
+## Original root-cause (established 18:25 UTC — still relevant for v3)
 
 The v3 bias is a **per-bucket DISTRIBUTION SHAPE issue, not an average-metric issue.**
 
