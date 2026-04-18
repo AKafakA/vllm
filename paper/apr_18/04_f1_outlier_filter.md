@@ -110,14 +110,23 @@ Conditions to apply in implementation:
 
 All six binding requirements checked COMPLIES. No design changes needed.
 
-## Results
+## Results (archive baseline, 1000 prompts, r=2/8/16)
 
-_(populated after A/B run)_
+Pass A: `results/RTX-8000-f1-off-apr18/` — archive profile unchanged (`--outlier-filter none`).
+Pass B: `results/RTX-8000-f1-on-apr18/` — archive post-hoc filtered with iqr via `tools/apply_outlier_filter.py` (dropped 20,456 of 210,400 samples = 9.72% across 566 buckets).
 
-| Rate | Baseline TPOT | Variant TPOT | Baseline TTFT | Variant TTFT | Verdict |
-|---|---|---|---|---|---|
-| 2 | tbd | tbd | tbd | tbd | — |
-| 8 | tbd | tbd | tbd | tbd | — |
-| 16 | tbd | tbd | tbd | tbd | — |
+| Rate | Baseline TPOT | Variant TPOT | ΔTPOT | Baseline TTFT | Variant TTFT | ΔTTFT | Verdict |
+|---|---|---|---|---|---|---|---|
+|  2 | −0.7 | −9.4 | **−8.7** | −30.3 | −36.1 | −5.8 | fail |
+|  8 | −11.4 | −16.5 | **−5.1** | −31.9 | −35.1 | −3.2 | fail |
+| 16 | −10.7 | −10.7 | 0.0 | −71.7* | −74.9* | −3.2 | wash |
 
-**Overall verdict:** _(KEEP / DROP — written after A/B completes)_
+*r=16 TTFT in both passes is anomalously worse than the 2000-prompt archive reference (−25%) because 1000-prompt runs at r=16 are ~60 s long — inherent short-run variance, not F1-induced.
+
+**Overall verdict: DROP.**
+
+Fails the success criterion "no metric regresses by > 1pp at any rate" (r=2 TPOT regresses by 8.7pp, r=8 by 5.1pp). The 9.72% samples removed by IQR were not outliers — they represented the legitimate heavy tail of real step-cycle latencies. Dropping them biased the predicted mean downward, making the emulator faster than real and widening the TPOT gap.
+
+The `mad` and `winsor` variants were not run because IQR's failure so decisively contradicts the "heavy tails are pollution" hypothesis. If time permits tomorrow, `winsor` (which *clips* rather than *drops*) may have a different signature worth measuring.
+
+Filter mechanism kept in the codebase (gate off by default, verified byte-identical by `tools/f1_byte_identity_test.py`); feature is NOT merged into the combined branch.
