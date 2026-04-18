@@ -89,7 +89,9 @@ If both conditions hold → **KEEP**.
 
 ## Review agent verdict
 
-_(populated after Step 2 — resubmission pending after rewrite.)_
+**APPROVED** (agent id `a1dd898d9e4042072`) after rewrite.
+
+All 6 binding requirements PASS. Prior reject conditions (1 window size, 2 off-path state, 3 seed vs identity) all addressed. One non-blocking note: implementation must create `tools/validate_f2_ab.sh` (the harness script is referenced but not yet in tree).
 
 ## Results
 
