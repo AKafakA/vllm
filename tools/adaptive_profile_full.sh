@@ -9,7 +9,7 @@ cd ~/Code/llm/vllm-emulator
 
 MODEL="Qwen/Qwen3-8B"
 PORT=8100
-OUT_DIR="./results/RTX-8000-adaptive-v2"
+OUT_DIR="./results/RTX-8000-adaptive-v4"
 TRACE="$OUT_DIR/step_cycle_trace.jsonl"
 PROFILE="$OUT_DIR/serving-full.json"
 MIN_SAMPLES=10
@@ -135,30 +135,22 @@ for ROUND in $(seq 1 $MAX_ROUNDS); do
         exit 1
     fi
 
-    # CUDA graph warmup sweep for all padded batch sizes
-    echo "  [$(date +%T)] CUDA graph warmup sweep..." >> "$LOG"
-    for NP in 1 2 4 8 16 24 32 48 64 96 128 160 192 224 256; do
-        python3 -m vllm.entrypoints.cli.main bench serve \
-            --model "$MODEL" --base-url "http://localhost:${PORT}" \
-            --dataset-name random --random-input-len 1 --random-output-len 1 \
-            --num-prompts $NP --request-rate inf > /dev/null 2>&1 || true
-    done
-    # High-concurrency burst
-    echo "  [$(date +%T)] high-concurrency burst..." >> "$LOG"
-    python3 -m vllm.entrypoints.cli.main bench serve \
-        --model "$MODEL" --base-url "http://localhost:${PORT}" \
-        --dataset-name random --random-input-len 256 --random-output-len 128 \
-        --num-prompts 500 --request-rate inf > /dev/null 2>&1 || true
-
-    # Standard warmup
+    # Standard warmup only. CUDA graph warmup sweep and high-concurrency
+    # burst have been REMOVED because they pre-capture every padded batch
+    # size before the rate sweep — that shifts the per-bucket distribution
+    # SHAPE (tails) even though the average-metric effect is <1%. The
+    # oracle's random.choice needs the heavy-tail capture-cost samples
+    # for its per-step variance to match real's. By skipping the
+    # comprehensive pre-warm, rate-sweep encounters new graphs in-situ
+    # and the capture-cost spikes end up recorded in the profile.
+    # (Apr 18 v3→v4 fix; diagnostic in paper/apr_18/02_v3_baseline_AB.md.)
     echo "  [$(date +%T)] standard warmup..." >> "$LOG"
     python3 -m vllm.entrypoints.cli.main bench serve \
         --model "$MODEL" --base-url "http://localhost:${PORT}" \
         --dataset-name random --random-input-len 256 --random-output-len 128 \
         --num-prompts 200 --request-rate 4 > /dev/null 2>&1 || true
 
-    # Begin profiling window — all preceding phases (CUDA sweep, burst,
-    # standard warmup) are EXCLUDED from the profile.
+    # Begin profiling window — standard warmup is EXCLUDED.
     echo '{"__marker__": "profiling_start"}' >> "$TRACE"
 
     # Profile each rate
