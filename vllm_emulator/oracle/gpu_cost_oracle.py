@@ -32,6 +32,19 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         # RNG for sampling from distribution buckets.
         self._rng = random.Random(42)
 
+        # F5: kNN conditioning. K=1 (default) keeps the current nearest-
+        # neighbor code path byte-identical. K>1 uses Shepard (1968) p=2
+        # inverse-distance weighting over range-normalised (tt, conc) axes.
+        k_env = os.environ.get("VLLM_EMULATOR_ORACLE_K", "1")
+        try:
+            self._oracle_k = int(k_env)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"VLLM_EMULATOR_ORACLE_K must be an integer, got {k_env!r}")
+        if self._oracle_k < 1:
+            raise ValueError(
+                f"VLLM_EMULATOR_ORACLE_K must be >= 1, got {self._oracle_k}")
+
         # User-configurable percentile trim on raw samples.
         # Format: "lo,hi" e.g. "2,98" trims bottom 2% and top 2%.
         # Applied at sample time from the already-stored raw samples.
@@ -92,9 +105,13 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
     ) -> float | None:
         """Sample latency from 2D (tt, concurrency) distribution bucket.
 
-        Nearest-neighbor lookup: finds the closest (tt, conc) bucket
-        in the appropriate table (decode/prefill/combined) and returns
-        a uniformly random sample from that bucket's raw latency list.
+        Default (K=1, VLLM_EMULATOR_ORACLE_K=1 or unset): tt-slice then
+        conc-slice nearest-neighbor, same as parent commit. Byte-identical
+        RNG sequence.
+
+        K>1 (F5): Shepard p=2 inverse-distance-weighted sampling over the
+        K nearest range-normalised (tt, conc) buckets; delegates to
+        _sample_knn_2d. Uses self._rng throughout (no secondary Random).
 
         Returns None only if no distribution data exists at all.
         """
@@ -108,6 +125,10 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         else:
             return None
 
+        if self._oracle_k > 1:
+            return self._sample_knn_2d(table, total_tokens, num_requests)
+
+        # K=1 path: unchanged from parent commit — byte-identical.
         tts_in_table = sorted(set(k[0] for k in table.keys()))
         if not tts_in_table:
             return None
@@ -133,6 +154,54 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         raw = bucket.get("samples")
         if raw:
             return float(self._rng.choice(raw))
+        return None
+
+    def _sample_knn_2d(self, table, total_tokens, num_requests):
+        """K>1 Shepard p=2 kNN sampler over range-normalised (tt, conc)."""
+        keys = list(table.keys())
+        if not keys:
+            return None
+
+        # Range normalisation (standard kNN input scaling).
+        tts = [k[0] for k in keys]
+        concs = [k[1] for k in keys]
+        tt_range = (max(tts) - min(tts)) or 1
+        conc_range = (max(concs) - min(concs)) or 1
+
+        def _dist(k):
+            dt = (k[0] - total_tokens) / tt_range
+            dc = (k[1] - num_requests) / conc_range
+            return (dt * dt + dc * dc) ** 0.5
+
+        # K nearest buckets.
+        ranked = sorted(((_dist(k), k) for k in keys), key=lambda x: x[0])
+        top_k = ranked[: self._oracle_k]
+
+        # Shepard 1968 exact-match short-circuit.
+        for d, k in top_k:
+            if d == 0.0:
+                samples = table[k].get("samples") or []
+                if samples:
+                    return float(self._rng.choice(samples))
+                return None
+
+        # Shepard 1968 inverse-distance weighting with p=2.
+        weights = [1.0 / (d * d) for d, _ in top_k]
+        total_w = sum(weights)
+        if total_w == 0:
+            return None
+        r = self._rng.random() * total_w
+        cum = 0.0
+        chosen_k = top_k[-1][1]
+        for (d, k), w in zip(top_k, weights):
+            cum += w
+            if r <= cum:
+                chosen_k = k
+                break
+
+        samples = table[chosen_k].get("samples") or []
+        if samples:
+            return float(self._rng.choice(samples))
         return None
 
     def estimate_step_latency_us(
