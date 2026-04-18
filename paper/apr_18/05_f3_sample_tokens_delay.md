@@ -98,7 +98,14 @@ The success criterion is narrower than F1 because F3 explicitly trades TPOT for 
 
 ## Review agent verdict
 
-_(populated after Step 2)_
+**APPROVED WITH CONDITIONS** (agent id `aca7c84a213c09970`).
+
+All 6 binding requirements COMPLY. Two conditions:
+
+1. Implementer must add a once-only guard on the "profile lacks `avg_sample_ms`" warning to avoid log spam (design said "once" but did not specify the mechanism).
+2. Before running the A/B, verify the profile builder's `--step-timing-csv` path actually writes `avg_sample_ms` into the profile pack JSON.
+
+Pre-run check for condition 2: `vllm_emulator/profile/build_serving_profile_filtered.py` lines ~200-221 contain the CSV read + `profile["avg_sample_ms"] = round(...)` write. Verified — contract holds. No builder fix needed.
 
 ## Results
 
