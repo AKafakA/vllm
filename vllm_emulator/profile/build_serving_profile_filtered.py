@@ -66,6 +66,9 @@ def load_trace(path):
         if r.get("__marker__") == "profiling_start":
             in_profiling = True
             continue
+        if r.get("__marker__") == "profiling_stop":
+            in_profiling = False
+            continue
         if r.get("__marker__"):
             continue
         if "total_tokens" in r:
