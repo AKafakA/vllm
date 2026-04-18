@@ -19,3 +19,31 @@ Currently running on `personal_gpu_vm`: adaptive profiling v3 (Round 4, ~13:30 U
 Next: wait for S0 to finish, apply fallback rule, then start F1 (simple → hard order).
 
 Tracker updated: (none)
+
+### 13:55 UTC — F1 design + review
+
+- Created `exp/f1-outlier-filter` from `a102eed27`.
+- Wrote `04_f1_outlier_filter.md` with all 8 required sections. Committed as `7b993a104 docs(F1): design for outlier filter in profile builder`.
+- Invoked general-purpose review agent (id `ab6d9d3057d8bd6da`). Verdict: **APPROVED WITH CONDITIONS**. All 6 binding requirements COMPLY. Three conditions to apply at implementation:
+  1. Inline citations for each constant.
+  2. Runtime print showing per-bucket reduction.
+  3. Off-is-noop byte-identical smoke test recorded here before A/B.
+- Updated design doc with verdict and committed as `135b79588 docs(F1): design review — APPROVED WITH CONDITIONS`.
+
+Tracker updated: (none)
+
+### 14:05 UTC — F1 implementation + smoke test
+
+- Implemented `_filter_outliers(samples, method)` in `build_serving_profile_filtered.py` with inline textbook citations per review condition 1 (Tukey 1977, Iglewicz-Hoaglin 1993, MAD consistency Φ⁻¹(0.75)).
+- Added `--outlier-filter {none,iqr,mad,winsor}` CLI arg, default `none`.
+- Added per-filter runtime print `"outlier_filter=iqr: dropped N of M samples (X.XX%) across K buckets"` per review condition 2.
+- Unit tests for each filter method pass (passthrough, IQR drops 1000, MAD drops 1000, winsor clips to [1, 99]).
+- Byte-identity smoke test (`tools/f1_byte_identity_test.py`) per review condition 3:
+  - parent-commit builder vs F1-default-none: **IDENTICAL** ✓
+  - parent-commit builder vs F1-explicit-none: **IDENTICAL** ✓
+  - parent-commit builder vs F1-iqr: **DIFFER** (iqr path ran as expected) ✓
+- Committed as `f7b1b8983 feat(F1): implement --outlier-filter {none,iqr,mad,winsor}`.
+
+Off-is-noop contract verified. Ready for A/B after v3 profile is available.
+
+Tracker updated: (none)
