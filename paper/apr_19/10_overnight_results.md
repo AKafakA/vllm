@@ -100,13 +100,24 @@ Added experiment-gate `VLLM_EMULATOR_ORACLE_AGG={sample|median|mean}`. Tested 6 
 
 **Dilution confirmed but non-uniform**: high-population buckets (tt=2..10, c=2..7) have tail ratios near 1.0. Lower-population buckets lose the tail disproportionately. Overall v6 has ~30% LESS tail than archive at the same threshold.
 
-## Reservoir experiment (10:28 BST, running)
+## Reservoir experiment (10:28–10:37 BST, DONE)
 
-Added `--reservoir-size N` to builder (Vitter 1985 Algorithm R). Rebuilt v6 with cap=7009 (archive's max per-bucket count) on the full v6 trace.
+Added `--reservoir-size N` to builder (Vitter 1985 Algorithm R). Rebuilt v6 with cap=7009 (archive's max per-bucket count): 10 buckets capped, decode samples reduced from 279k → 154k (55% retained).
 
-**Expected null result**: reservoir sampling is unbiased — it preserves distribution shape in expectation. Tail ratio on reservoir-capped v6 stays at 0.69 (unchanged, confirming). Emu accuracy should therefore match full v6 within noise.
+**Result matches predicted null:**
 
-The real dilution cause is distributional, not volumetric: steady-state samples are measurably FASTER than early-round samples (warmer server = faster compute). v6's p75 is lower than archive's p75 because later rounds' bulk is faster. Reservoir can't undo that shift.
+| Profile | r=2 TPOT | r=8 TPOT | gap to archive |
+|---|---|---|---|
+| v6_sample (full) | −6.2% | −35.3% | −4.6pp / −22.1pp |
+| v6 reservoir=7009 | −6.4% | −36.4% | −4.8pp / −23.2pp |
+| archive_sample | −1.6% | −13.2% | reference |
+
+**Δ(reservoir − full) = (−0.2pp, −1.1pp)** — within noise on both rates. Reservoir gives **zero accuracy benefit**, confirming that the dilution is distributional (later-round bulk shifts DOWN from earlier-round bulk due to warmer server state), not volumetric. Reservoir sampling preserves distribution shape → preserves the bias.
+
+**Implication**: a non-knob data-level fix isn't possible from existing v6 trace alone. Options:
+- Round-weighted storage (adds a per-sample round-index field; "knob-adjacent" but defensible as structural change).
+- Profile at archive-matching round count (the previously-rejected "cut rounds").
+- Trace preprocessing: preferentially keep early-round samples when pooling per-bucket.
 
 ## Implication for "more data → better" invariant
 
