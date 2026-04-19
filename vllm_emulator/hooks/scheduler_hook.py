@@ -19,6 +19,7 @@ from __future__ import annotations
 import bisect
 import json
 import os
+import random
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -29,19 +30,23 @@ if TYPE_CHECKING:
 
 SCHEDULER_HOOK_ENV = "VLLM_EMULATOR_SCHEDULER_HOOK"
 PROFILE_PACK_ENV = "VLLM_EMULATOR_PROFILE_PACK"
-IPC_OVERHEAD_AGG_ENV = "VLLM_IPC_OVERHEAD_AGG"  # "median" (default) or "mean"
+IPC_OVERHEAD_AGG_ENV = "VLLM_IPC_OVERHEAD_AGG"  # "median" | "mean" | "sample"
 
 
 def _load_overhead_table() -> list[dict[str, Any]]:
     """Load sched_overhead_table from the profile pack.
 
-    Which aggregation is used depends on VLLM_IPC_OVERHEAD_AGG:
-    - "median" (default): legacy field `overhead_us`.
+    Aggregation via VLLM_IPC_OVERHEAD_AGG:
+    - "median" (default): field `overhead_us`.
     - "mean": field `overhead_mean_us` when present; falls back to
-      `overhead_us` for tables built by older sweeps that didn't
-      retain mean.
-    Raw samples (if present in `raw_ttft_samples_us`) are left untouched;
-    downstream tooling can re-aggregate without re-running the sweep.
+      `overhead_us` for older tables.
+    - "sample": at each lookup, draw a random value from
+      `raw_ttft_samples_us` (minus per-N prefill_step_us). Requires
+      the profile sweep to have retained raw samples (profiler v2).
+      This models the right-skewed IPC distribution per-request.
+
+    Raw samples are retained in the table regardless, so the same
+    profile pack supports all three aggregations via env var.
     """
     path = os.environ.get(PROFILE_PACK_ENV, "")
     if not path or not os.path.exists(path):
@@ -51,43 +56,80 @@ def _load_overhead_table() -> list[dict[str, Any]]:
             pack = json.load(f)
         raw = pack.get("sched_overhead_table") or []
         agg = os.environ.get(IPC_OVERHEAD_AGG_ENV, "median").lower()
-        if agg not in ("median", "mean"):
+        if agg not in ("median", "mean", "sample"):
             raise ValueError(
-                f"{IPC_OVERHEAD_AGG_ENV} must be 'median' or 'mean', got {agg!r}")
-        # Normalise so `_lookup_overhead_us` can read a single field.
+                f"{IPC_OVERHEAD_AGG_ENV} must be 'median', 'mean', or 'sample', "
+                f"got {agg!r}")
+        # Normalise per-N entry. Keep raw sample list in 'samples_overhead_us'
+        # for 'sample' mode (TTFT samples minus that N's prefill baseline).
         table = []
         for e in raw:
             if agg == "mean" and "overhead_mean_us" in e:
                 overhead_us = e["overhead_mean_us"]
             else:
                 overhead_us = e.get("overhead_us", 0)
-            table.append({
+            entry = {
                 "num_reqs": e.get("num_reqs", 0),
                 "overhead_us": overhead_us,
-            })
+            }
+            # Precompute per-N raw overhead samples for 'sample' mode.
+            if agg == "sample":
+                ttft_samples = e.get("raw_ttft_samples_us") or []
+                prefill_us = e.get("prefill_step_us", 0)
+                if ttft_samples:
+                    entry["samples_overhead_us"] = [
+                        max(0.0, s - prefill_us) for s in ttft_samples
+                    ]
+            table.append(entry)
         return sorted(table, key=lambda e: e.get("num_reqs", 0))
     except Exception as exc:
         print(f"[SchedulerHook] failed to load overhead table: {exc}")
         return []
 
 
-def _lookup_overhead_us(table: list[dict[str, Any]], num_reqs: int) -> float:
-    """Linear interpolation over per-concurrency overhead measurements."""
+def _lookup_overhead_us(
+    table: list[dict[str, Any]],
+    num_reqs: int,
+    rng: random.Random | None = None,
+) -> float:
+    """Per-concurrency overhead lookup with optional per-call sampling.
+
+    If the neighbouring table entry has `samples_overhead_us` (built by
+    `_load_overhead_table` in 'sample' agg mode) AND an rng is supplied,
+    draw a random overhead from that per-N sample pool. Otherwise return
+    the interpolated scalar `overhead_us` value.
+    """
     if not table:
         return 0.0
     nums = [e.get("num_reqs", 0) for e in table]
     overheads = [float(e.get("overhead_us", 0)) for e in table]
+
+    # Find neighbour entry to pull samples from (clamp at edges, pick
+    # nearest on interior — no cross-entry sample mixing).
     if num_reqs <= nums[0]:
-        return overheads[0]
-    if num_reqs >= nums[-1]:
-        return overheads[-1]
-    i = bisect.bisect_left(nums, num_reqs)
-    if i < len(nums) and nums[i] == num_reqs:
-        return overheads[i]
-    n_lo, n_hi = nums[i - 1], nums[i]
-    o_lo, o_hi = overheads[i - 1], overheads[i]
-    ratio = (num_reqs - n_lo) / (n_hi - n_lo)
-    return o_lo + ratio * (o_hi - o_lo)
+        neighbour = table[0]
+        scalar = overheads[0]
+    elif num_reqs >= nums[-1]:
+        neighbour = table[-1]
+        scalar = overheads[-1]
+    else:
+        i = bisect.bisect_left(nums, num_reqs)
+        if i < len(nums) and nums[i] == num_reqs:
+            neighbour = table[i]
+            scalar = overheads[i]
+        else:
+            n_lo, n_hi = nums[i - 1], nums[i]
+            o_lo, o_hi = overheads[i - 1], overheads[i]
+            ratio = (num_reqs - n_lo) / (n_hi - n_lo)
+            scalar = o_lo + ratio * (o_hi - o_lo)
+            # Pool samples from the CLOSER neighbour for 'sample' mode.
+            neighbour = table[i - 1] if (num_reqs - n_lo) <= (n_hi - num_reqs) else table[i]
+
+    if rng is not None:
+        samples = neighbour.get("samples_overhead_us")
+        if samples:
+            return float(rng.choice(samples))
+    return scalar
 
 
 def install_arrival_delay(scheduler: "Scheduler") -> bool:
@@ -108,6 +150,11 @@ def install_arrival_delay(scheduler: "Scheduler") -> bool:
     # Pending arrivals: list of (admission_time_s, Request).
     scheduler._emu_pending_arrivals: list[tuple[float, Any]] = []  # type: ignore[attr-defined]
     scheduler._emu_overhead_table = table  # type: ignore[attr-defined]
+    agg = os.environ.get(IPC_OVERHEAD_AGG_ENV, "median").lower()
+    # Deterministic RNG seeded by env so runs are reproducible.
+    scheduler._emu_overhead_rng = (  # type: ignore[attr-defined]
+        random.Random(42) if agg == "sample" else None
+    )
 
     orig_add_request = scheduler.add_request.__func__
     orig_schedule = scheduler.schedule.__func__
@@ -127,7 +174,10 @@ def install_arrival_delay(scheduler: "Scheduler") -> bool:
                 + len(self.waiting)
                 + len(self.skipped_waiting)
                 + len(self._emu_pending_arrivals))
-        overhead_us = _lookup_overhead_us(self._emu_overhead_table, max(conc, 1))
+        overhead_us = _lookup_overhead_us(
+            self._emu_overhead_table, max(conc, 1),
+            rng=self._emu_overhead_rng,
+        )
         admission_time = time.perf_counter() + overhead_us / 1e6
         self._emu_pending_arrivals.append((admission_time, request))
 

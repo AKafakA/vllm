@@ -113,3 +113,22 @@ def apply(scheduler):  # vllm_emulator.hooks.scheduler_hook.apply
 Activates via `VLLM_SCHEDULER_PLUGINS=vllm_emulator.hooks.scheduler_hook`.
 No emulator-specific symbol in vLLM. Compose with multiple plugins. Deferred
 to follow-up; current implementation is fine for paper experimentation.
+
+## v4 mean-aggregation result (IPC-mean chain, 00:08 BST)
+
+**Setup**: same v3 arrival-delay hook, but the IPC overhead lookup uses `mean` instead of `median` of per-N TTFT samples (VLLM_IPC_OVERHEAD_AGG=mean).
+
+| rate | v3 TPOT% | v3 TTFT% | **v4 TPOT%** | **v4 TTFT%** |
+|---|---|---|---|---|
+| 2 | -0.24% | -9.50% | **+0.04%** | **+5.91%** |
+| 4 | -0.76% | -4.29% | **-1.15%** | **-3.55%** |
+| 8 | -5.68% | -2.14% | **-5.26%** | **-2.12%** |
+| 16 | -2.96% | -16.15% | **-2.75%** | **-17.42%** |
+| 32 | +1.77% | -0.17% | **+1.08%** | **-0.41%** |
+
+**Observation**: r=2 TTFT flipped sign (−9.50% → +5.9%). Mean added ~15pp vs median — a much larger shift than expected from the IPC sweep's reported 28–29ms flat value. Variance analysis (`paper/apr_20/00_ipc_variance.md`) reveals why: σ ≈ 11 ms across N>1 with right-skewed distribution (mean − median ≈ +3.7 ms per N). The "flat 28ms" characterisation was lossy. Real IPC draws are from a wide distribution, not a constant.
+
+**Implication**: neither flat median (undershoots) nor flat mean (overshoots) matches real. The correct model is **per-arrival sampling from the raw distribution** — each admitted request draws its own IPC overhead from `raw_ttft_samples_us[N]`. This will be implemented as v5-arrival-sample in Phase 2.
+
+**r=16**: v4-mean −17.4% is slightly worse than v3 −16.15%. Confirms the r=16 gap is NOT overhead-magnitude driven; it's a batch-composition / structural effect independent of whether we use median, mean, or raw-sample draw.
+
