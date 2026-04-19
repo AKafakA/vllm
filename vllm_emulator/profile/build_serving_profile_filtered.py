@@ -53,6 +53,13 @@ def parse_args():
                              "iqr: Tukey 1.5x fence (1977). "
                              "mad: modified Z-score via MAD at 3.5 (Iglewicz-Hoaglin 1993). "
                              "winsor: clip to [p1, p99] (classical).")
+    parser.add_argument("--profile-axes", choices=("2d", "3d"), default="2d",
+                        help="Bucket-key axes. 2d (default): (tt, conc) as today, "
+                             "byte-identical output. 3d (F4): also emit axis fields "
+                             "keyed by (tt, conc, num_new_reqs_bucket); schema v2.1.")
+    parser.add_argument("--new-reqs-bucket-width", type=int, default=1,
+                        help="Bucket width for num_new_reqs axis (F4). Default 1 "
+                             "(no bucketing). Only used when --profile-axes 3d.")
     return parser.parse_args()
 
 
@@ -207,6 +214,28 @@ def build_2d_distribution(data, label, outlier_filter="none"):
     return distribution
 
 
+def build_3d_distribution(data, label):
+    """F4: Build 3D distribution from (tt_b, conc_b, new_reqs_b) -> [us].
+
+    Same shape as build_2d_distribution but with a third axis for
+    num_new_reqs. Written to profile v2.1 axis fields IN ADDITION to
+    the existing 2D fields (which keep their usual shape from the same
+    records).
+    """
+    distribution = []
+    for (ttb, cb, nb), lats in sorted(data.items()):
+        samples = [round(v, 1) for v in lats]
+        distribution.append({
+            "tt": ttb,
+            "conc": cb,
+            "new_reqs": nb,
+            "num_samples": len(lats),
+            "samples": samples,
+        })
+    print(f"  {label}: {len(distribution)} cells (3D)")
+    return distribution
+
+
 def main():
     args = parse_args()
 
@@ -220,6 +249,8 @@ def main():
 
     tt_w = args.tt_bucket_width
     conc_w = args.conc_bucket_width
+    new_reqs_w = args.new_reqs_bucket_width
+    emit_3d = args.profile_axes == "3d"
 
     def tt_bucket(tt):
         """Map total_tokens to bucket center using uniform width."""
@@ -229,25 +260,41 @@ def main():
         """Map concurrency to bucket center using uniform width."""
         return (n // conc_w) * conc_w + conc_w // 2
 
+    def new_reqs_bucket(n):
+        """Map num_new_reqs to bucket center using uniform width (F4)."""
+        return (n // new_reqs_w) * new_reqs_w + new_reqs_w // 2
+
     # Bucket records into prefill, decode, and combined 2D maps.
     # Prefill = steps with new_reqs > 0 (eager mode in vLLM V1).
     # Decode  = steps with no new_reqs (CUDA graph mode).
     prefill_2d_data = defaultdict(list)
     decode_2d_data = defaultdict(list)
     step_cycle_2d_data = defaultdict(list)
+    # F4 3D tables (only populated when emit_3d).
+    prefill_3d_data = defaultdict(list)
+    decode_3d_data = defaultdict(list)
+    step_cycle_3d_data = defaultdict(list)
 
     for r in records:
         tt = r["total_tokens"]
-        conc = r.get("num_new_reqs", 0) + r.get("num_decode_seqs", 0)
+        nnr = r.get("num_new_reqs", 0)
+        conc = nnr + r.get("num_decode_seqs", 0)
         if conc < 1:
             conc = 1
         ttb = tt_bucket(tt)
         cb = conc_bucket(conc)
         step_cycle_2d_data[(ttb, cb)].append(r["step_cycle_us"])
-        if r.get("num_new_reqs", 0) > 0:
+        if nnr > 0:
             prefill_2d_data[(ttb, cb)].append(r["step_cycle_us"])
         else:
             decode_2d_data[(ttb, cb)].append(r["step_cycle_us"])
+        if emit_3d:
+            nb = new_reqs_bucket(nnr)
+            step_cycle_3d_data[(ttb, cb, nb)].append(r["step_cycle_us"])
+            if nnr > 0:
+                prefill_3d_data[(ttb, cb, nb)].append(r["step_cycle_us"])
+            else:
+                decode_3d_data[(ttb, cb, nb)].append(r["step_cycle_us"])
 
     print(f"\n2D distributions (tt_bucket_width={tt_w}, conc_bucket_width={conc_w}, "
           f"outlier_filter={args.outlier_filter}):")
@@ -258,6 +305,14 @@ def main():
     decode_dist = build_2d_distribution(
         decode_2d_data, "decode", outlier_filter=args.outlier_filter)
 
+    if emit_3d:
+        print(f"\n3D distributions (new_reqs_bucket_width={new_reqs_w}):")
+        step_cycle_3d_dist = build_3d_distribution(step_cycle_3d_data, "step_cycle_3d")
+        prefill_3d_dist = build_3d_distribution(prefill_3d_data, "prefill_3d")
+        decode_3d_dist = build_3d_distribution(decode_3d_data, "decode_3d")
+    else:
+        step_cycle_3d_dist = prefill_3d_dist = decode_3d_dist = None
+
     # Summary
     if step_cycle_dist:
         tt_set = sorted(set(e["tt"] for e in step_cycle_dist))
@@ -267,7 +322,7 @@ def main():
               f"conc buckets={conc_set}, total samples={total_samples}")
 
     profile = {
-        "version": "2.0",
+        "version": "2.1" if emit_3d else "2.0",
         "gpu_model": gpu_model,
         "model_name": model_name,
         "profile_type": "serving_step_cycle_2d",
@@ -279,6 +334,14 @@ def main():
         "decode_2d_distribution": sorted(decode_dist, key=lambda e: (e["tt"], e["conc"])),
         "step_cycle_2d_distribution": sorted(step_cycle_dist, key=lambda e: (e["tt"], e["conc"])),
     }
+    if emit_3d:
+        profile["bucketing"]["new_reqs_bucket_width"] = new_reqs_w
+        profile["prefill_axis_distribution"] = sorted(
+            prefill_3d_dist, key=lambda e: (e["tt"], e["conc"], e["new_reqs"]))
+        profile["decode_axis_distribution"] = sorted(
+            decode_3d_dist, key=lambda e: (e["tt"], e["conc"], e["new_reqs"]))
+        profile["step_cycle_axis_distribution"] = sorted(
+            step_cycle_3d_dist, key=lambda e: (e["tt"], e["conc"], e["new_reqs"]))
     if model_config:
         profile["model_config"] = model_config
 
