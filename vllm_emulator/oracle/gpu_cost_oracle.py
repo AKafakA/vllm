@@ -32,6 +32,12 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         # RNG for sampling from distribution buckets.
         self._rng = random.Random(42)
 
+        # KV-adjustment α: read from profile pack if present (profile was
+        # built with --alpha-kv model). At query time, compute tt_eff = tt
+        # + alpha_kv * sum_kv using current scheduler state, then bucket
+        # lookup. When alpha_kv is absent or 0, behaviour is unchanged.
+        self._alpha_kv = float(profile_pack.get("alpha_kv", 0.0))
+
         # Experimental: oracle aggregation mode. Default is "sample"
         # (IID random.choice). Alternatives are "median" and "mean" —
         # deterministic per-bucket estimator. Used to test whether
@@ -306,6 +312,7 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         has_prefill: bool = False,
         num_requests: int = 0,
         num_new_reqs: int = 0,
+        sum_kv: int = 0,
         **kwargs,
     ) -> float:
         """Estimate latency for one forward pass via 2D or 3D sampling.
@@ -316,6 +323,9 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             num_requests: Number of requests in batch.
             num_new_reqs: F4 third-axis input. Ignored when
                 VLLM_EMULATOR_PROFILE_AXES != 3d.
+            sum_kv: Sum of num_computed_tokens across scheduled requests.
+                Used with alpha_kv (from profile pack) to compute tt_eff
+                for bucket lookup. Ignored when profile has no alpha_kv.
             **kwargs: Ignored (backward compat for callers passing
                       oracle_mode, profile_section, avg_context_len).
 
@@ -325,10 +335,15 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         if total_tokens <= 0:
             return 0.0
 
+        # Apply α-adjustment if profile was built with it.
+        tt_query = total_tokens
+        if self._alpha_kv > 0 and sum_kv > 0:
+            tt_query = total_tokens + self._alpha_kv * sum_kv
+
         # F4: try 3D exact-match first when gate is on.
         if self._profile_axes == "3d":
             result = self._sample_3d_distribution(
-                total_tokens, max(num_requests, 1), num_new_reqs,
+                tt_query, max(num_requests, 1), num_new_reqs,
                 has_prefill=has_prefill,
             )
             if result is not None:
@@ -336,7 +351,7 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             # Miss: fall back to 2D (per design doc §2 fallback rule).
 
         result = self._sample_2d_distribution(
-            total_tokens, max(num_requests, 1),
+            tt_query, max(num_requests, 1),
             has_prefill=has_prefill,
         )
         if result is not None:

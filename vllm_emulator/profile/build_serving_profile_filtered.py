@@ -60,6 +60,12 @@ def parse_args():
     parser.add_argument("--new-reqs-bucket-width", type=int, default=1,
                         help="Bucket width for num_new_reqs axis (F4). Default 1 "
                              "(no bucketing). Only used when --profile-axes 3d.")
+    parser.add_argument("--alpha-kv", choices=("none", "model"), default="none",
+                        help="KV-adjustment mode. none (default): key by (tt, conc), "
+                             "byte-identical to pre-alpha output. model: compute "
+                             "alpha from model_config (KV-bytes/FFN-bytes ratio at "
+                             "decode) and bucket by (tt_eff=tt+alpha*sum_kv, conc). "
+                             "Requires sum_kv in trace records.")
     parser.add_argument("--reservoir-size", type=int, default=0,
                         help="Experimental: per-bucket reservoir cap "
                              "(Vitter 1985 Algorithm R). 0 (default): no cap, "
@@ -287,9 +293,45 @@ def main():
     new_reqs_w = args.new_reqs_bucket_width
     emit_3d = args.profile_axes == "3d"
 
+    # Compute alpha_kv from model_config for decode-attention-work adjustment.
+    # alpha = KV-cache bytes per token per layer / (FFN + projection bytes per
+    # token per layer). Memory-bound decode assumption. All values from
+    # model_config; no tunable constants.
+    alpha_kv = 0.0
+    if args.alpha_kv == "model":
+        if not model_config:
+            print("ERROR: --alpha-kv model requires model_config in trace header.",
+                  file=sys.stderr)
+            sys.exit(1)
+        hidden = model_config.get("hidden_size")
+        num_kv = model_config.get("num_key_value_heads") or model_config.get("num_kv_heads")
+        head_dim = model_config.get("head_dim") or (
+            hidden // model_config.get("num_attention_heads", 1) if hidden else None)
+        intermediate = model_config.get("intermediate_size")
+        dtype_bytes = 2  # bf16/fp16; standard for LLM inference
+        if not all([hidden, num_kv, head_dim, intermediate]):
+            print(f"ERROR: model_config missing required fields. "
+                  f"hidden={hidden} num_kv={num_kv} head_dim={head_dim} "
+                  f"intermediate={intermediate}", file=sys.stderr)
+            sys.exit(1)
+        # Per-token per-layer byte cost (memory-bound decode):
+        #   kv_bytes_per_token_per_layer = 2 (K+V) * num_kv_heads * head_dim * dtype_bytes
+        #   ffn_bytes_per_layer = 3 (gate+up+down) * hidden * intermediate * dtype_bytes
+        #   proj_bytes_per_layer = 4 (Q,K,V,O) * hidden * (num_q_heads*head_dim) * dtype_bytes
+        #     ≈ 4 * hidden^2 * dtype_bytes (assuming GQA projections collapse to hidden)
+        kv_b = 2 * num_kv * head_dim * dtype_bytes
+        ffn_b = 3 * hidden * intermediate * dtype_bytes
+        proj_b = 4 * hidden * hidden * dtype_bytes
+        alpha_kv = kv_b / (ffn_b + proj_b)
+        print(f"\nalpha_kv from model_config: {alpha_kv:.6g}")
+        print(f"  hidden={hidden} num_kv_heads={num_kv} head_dim={head_dim} "
+              f"intermediate={intermediate}")
+        print(f"  kv_bytes/token/layer={kv_b} "
+              f"(ffn+proj)_bytes/token/layer={ffn_b + proj_b}")
+
     def tt_bucket(tt):
-        """Map total_tokens to bucket center using uniform width."""
-        return (tt // tt_w) * tt_w + tt_w // 2
+        """Map total_tokens (or tt_eff, which may be float) to integer bucket center."""
+        return int(tt // tt_w) * tt_w + tt_w // 2
 
     def conc_bucket(n):
         """Map concurrency to bucket center using uniform width."""
@@ -316,7 +358,13 @@ def main():
         conc = nnr + r.get("num_decode_seqs", 0)
         if conc < 1:
             conc = 1
-        ttb = tt_bucket(tt)
+        # Apply KV-adjustment when enabled and sum_kv present in record.
+        if alpha_kv > 0:
+            sum_kv = r.get("sum_kv", 0)
+            tt_eff = tt + alpha_kv * sum_kv
+        else:
+            tt_eff = tt
+        ttb = tt_bucket(tt_eff)
         cb = conc_bucket(conc)
         step_cycle_2d_data[(ttb, cb)].append(r["step_cycle_us"])
         if nnr > 0:
@@ -382,6 +430,10 @@ def main():
             step_cycle_3d_dist, key=lambda e: (e["tt"], e["conc"], e["new_reqs"]))
     if model_config:
         profile["model_config"] = model_config
+
+    # Store alpha_kv in the profile pack for oracle use at query time.
+    if alpha_kv > 0:
+        profile["alpha_kv"] = alpha_kv
 
     # Extract per-step engine overhead from step timing CSV (if provided).
     # These values are used by the executor hook for sample_tokens delay

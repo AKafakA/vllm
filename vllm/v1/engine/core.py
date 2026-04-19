@@ -1414,10 +1414,16 @@ class EngineCoreProc(EngineCore):
                     1 for rid in so.num_scheduled_tokens
                     if rid not in new_req_ids
                 )
+                # sum_kv: total KV-cache depth across scheduled cached
+                # (decode + chunked-continuation) requests. Used by α-
+                # adjusted profile bucketing.
+                cached = so.scheduled_cached_reqs
+                sum_kv = sum(cached.num_computed_tokens) if cached.num_reqs > 0 else 0
                 _step_tracer.set_batch_info(
                     total_tokens=so.total_num_scheduled_tokens,
                     num_new_reqs=len(so.scheduled_new_reqs),
                     num_decode_seqs=num_decode,
+                    sum_kv=sum_kv,
                 )
                 # Add detailed timing if available
                 detail = getattr(_step_tracer, '_pending_detail', None)

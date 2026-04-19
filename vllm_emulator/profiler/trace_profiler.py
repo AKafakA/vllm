@@ -238,12 +238,20 @@ class StepCycleTracer:
         total_tokens: int,
         num_new_reqs: int,
         num_decode_seqs: int,
+        sum_kv: int = 0,
     ) -> None:
-        """Called before step_fn() with the current batch info."""
+        """Called before step_fn() with the current batch info.
+
+        sum_kv: sum of num_computed_tokens across scheduled requests (the
+        effective KV-cache depth for attention-work cost accounting).
+        Used by the KV-adjustment (α) in the profile builder to bucket
+        records by attention-equivalent token count.
+        """
         self._pending_batch_info = {
             "total_tokens": total_tokens,
             "num_new_reqs": num_new_reqs,
             "num_decode_seqs": num_decode_seqs,
+            "sum_kv": sum_kv,
         }
 
     def set_extra_fields(self, fields: dict[str, Any]) -> None:
