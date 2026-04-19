@@ -126,6 +126,31 @@ The invariant doesn't hold with this oracle architecture unless the later-round 
 2. **Per-round oracle instances** — sample uniformly from rounds, not from pooled samples. Same data collection but changes sampling structure.
 3. **Accept the methodology** — profile at archive's round count (~2 rounds). This IS the "cut rounds" fix the user previously rejected.
 
+## Round-count A/B (11:00 BST) — ROUND COUNT IS NOT THE VARIABLE
+
+Sliced v6 trace at round boundaries, built 4 profiles, emu-validated each at r=2, r=8 × 500 prompts:
+
+| Round count | Samples | r=2 TPOT | r=8 TPOT |
+|---|---|---|---|
+| r=1 | 65k | −7.2% | **−40.9%** |
+| r=2 | 130k | −7.9% | **−42.2%** |
+| r=3 | 195k | −8.2% | **−42.3%** |
+| r=5 (v6 full) | 309k | −6.2% | −35.3% |
+| archive | 108k | **−1.6%** | **−13.2%** |
+
+**Conclusion**: round count is NOT the variable. v6 at 1 round (65k samples) already shows TPOT −40.9% at r=8 — comparable to full v6 and **29pp worse than archive** at similar sample count. Adding rounds moves accuracy by only ±1-2pp.
+
+This **REJECTS** the earlier dilution/round-count hypothesis. The bug is in v6's profiling RECIPE, not in round count or sample density.
+
+**What differs between v6 and archive recipes:**
+- v6 has **variable-shape workloads** (64/32, 512/256, 128/64) per round; archive has none.
+- v6 has **14 rates** (`1 2 3 4 5 6 8 10 12 16 24 32 0.5 inf`); archive has 13 (`1 2 3 4 6 8 10 12 16 20 24 32 inf`) — v6 adds `0.5` and `5`, swaps `20` for nothing.
+- v6 has **smaller per-rate prompt counts** (300–800); archive has 1000–2000.
+
+One or more of these contaminates the per-bucket sample distribution in a way that shifts every (tt, conc) bucket's central tendency.
+
+**Next experiment (queued for ~15:20 BST)**: archive's EXACT recipe scaled to 5 rounds single-session. If it stays clean (≈ archive-1r accuracy), v6's recipe is the definitive cause.
+
 ## Directions for next session
 
 1. **Validate sample-count hypothesis**: build v6-cap profiles that sub-sample each bucket to 50 / 100 / 500 / 1000 / unlimited samples. If accuracy improves then degrades as cap grows, that confirms the hypothesis and gives us a principled sub-sampling rule.
