@@ -38,6 +38,16 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         # lookup. When alpha_kv is absent or 0, behaviour is unchanged.
         self._alpha_kv = float(profile_pack.get("alpha_kv", 0.0))
 
+        # IPC scheduling overhead table (from profile_ipc_overhead.py).
+        # Measured TTFT minus profile prefill_step, per concurrency N.
+        # Applied to prefill steps ONLY (decode steps don't pay per-request
+        # overhead). Lookup by current num_requests; linear interpolation
+        # between measured points. Based on commit 4d9983a0c (Apr 6).
+        self._sched_overhead_table = profile_pack.get("sched_overhead_table", [])
+        # Sort by num_reqs for correct interpolation.
+        self._sched_overhead_table = sorted(
+            self._sched_overhead_table, key=lambda e: e.get("num_reqs", 0))
+
         # Experimental: oracle aggregation mode. Default is "sample"
         # (IID random.choice). Alternatives are "median" and "mean" —
         # deterministic per-bucket estimator. Used to test whether
@@ -148,6 +158,36 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
     @property
     def gpu_model(self) -> str:
         return self._gpu_model
+
+    def _lookup_sched_overhead_us(self, num_reqs: int) -> float:
+        """IPC scheduling overhead at concurrency N, interpolated from table.
+
+        The table is per-concurrency measurements of TTFT - prefill_step on
+        real hardware (profile_ipc_overhead.py). Applied only to prefill
+        steps — matches the structure in commit 4d9983a0c.
+        """
+        table = self._sched_overhead_table
+        if not table:
+            return 0.0
+        # Exact match first.
+        for e in table:
+            if e.get("num_reqs") == num_reqs:
+                return float(e.get("overhead_us", 0))
+        # Clamp below/above table range.
+        if num_reqs <= table[0].get("num_reqs", 1):
+            return float(table[0].get("overhead_us", 0))
+        if num_reqs >= table[-1].get("num_reqs", 256):
+            return float(table[-1].get("overhead_us", 0))
+        # Linear interpolation between neighbouring table entries.
+        for i in range(len(table) - 1):
+            n_lo = table[i].get("num_reqs", 0)
+            n_hi = table[i + 1].get("num_reqs", 0)
+            if n_lo <= num_reqs <= n_hi and n_hi > n_lo:
+                ratio = (num_reqs - n_lo) / (n_hi - n_lo)
+                o_lo = float(table[i].get("overhead_us", 0))
+                o_hi = float(table[i + 1].get("overhead_us", 0))
+                return o_lo + ratio * (o_hi - o_lo)
+        return float(table[-1].get("overhead_us", 0))
 
     def _aggregate(self, samples):
         """Return scalar latency for a sample array per the oracle agg mode.
@@ -354,6 +394,10 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             tt_query, max(num_requests, 1),
             has_prefill=has_prefill,
         )
+        # IPC overhead: add measured per-concurrency overhead ONLY to prefill
+        # steps (per commit 4d9983a0c design). Decode steps don't pay it.
+        if result is not None and has_prefill:
+            result = result + self._lookup_sched_overhead_us(max(num_requests, 1))
         if result is not None:
             return result
 
