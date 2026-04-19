@@ -64,6 +64,15 @@ Append-only timeline. Every cron check adds a timestamped entry.
 - Issues: **r=0.5 benchmark running ~2× expected** (predicted ~9 min for n=266 @ rate=0.5, actual 20+ min). Possibly GPU thermal slowdown after 3h 45min sustained load, or scheduler accumulating state after round 5's high-rate sweep.
 - Revised timing: round 5 end ~05:30–05:35 → Phase A build ~05:36 → Phase B ~06:21 → Phase C ~09:21 → Phase D ~09:51. **Past 09:30 target by ~20 min but before 10:00 user sync.** Acceptable. No intervention yet; watch next check.
 
+### 11:16 BST — archive-recipe-5-round reprofile queued
+
+- Chain script `tools/chain_archive_5r.sh` launched (PID 2682469). Waits for `/tmp/vllm_round_count.done` (round-count A/B finishes ~11:05 BST), then runs archive's EXACT profiling recipe wrapped in 5 rounds single-session (`tools/adaptive_profile_archive_5r.sh`), then emu-validates at r=2, r=8 × 500 prompts.
+- Purpose: isolate whether v6's failure is round-count vs archive-recipe differences. Archive recipe: no variable shapes, different rate list (1/2/3/4/6/8/10/12/16/20/24/32/inf), higher per-rate prompt counts (1000–2000).
+- Predicted outcomes:
+  - If archive-5r ALSO degrades (emu accuracy worse than archive-1r) → round count itself is the bug, any methodology breaks at scale.
+  - If archive-5r matches or improves on archive (emu accuracy stable) → v6's methodology differences (variable shapes + smaller prompts/rate + extra rates) cause v6's failure.
+- ETA: 20 min wait + 3.5h reprofile + 6 min emu = ~11:40 → ~15:20 BST.
+
 ### 09:37 BST — Agg-mode A/B launched (oracle median/mean vs sample)
 
 - Purpose: isolate whether ORACLE VARIANCE (from `random.choice(samples)`) or SAMPLE DENSITY drives accuracy. If median-only oracle approaches archive-sample accuracy on v6, the variance was hurting more than helping — deterministic oracle suffices.
