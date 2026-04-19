@@ -28,8 +28,17 @@ wait_server() {
     return 1
 }
 
+preflight() {
+    if pgrep -f "VLLM::EngineCore|bench serve|vllm.entrypoints" > /dev/null; then
+        echo "FATAL: vllm/bench processes survived cleanup. Another script active?" >> "$MASTER_LOG"
+        ps aux | grep -E "vllm|bench serve" | grep -v grep >> "$MASTER_LOG"
+        exit 1
+    fi
+}
+
 start_real() {
     cleanup
+    preflight
     python3 -m vllm.entrypoints.openai.api_server \
         --model "$MODEL" --max-model-len 4096 --port $PORT --trust-remote-code \
         > "$1/server.log" 2>&1 &
@@ -37,6 +46,7 @@ start_real() {
 }
 start_emu() {
     cleanup
+    preflight
     env \
         VLLM_EMULATOR_ENABLE_ORACLE=1 \
         VLLM_EMULATOR_PROFILE_PACK="$PROFILE" \
