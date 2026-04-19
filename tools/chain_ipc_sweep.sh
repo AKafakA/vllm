@@ -31,9 +31,10 @@ DIR="./results/RTX-8000-archive-r2-ipc-validate"
 PROFILE="./results/RTX-8000-adaptive-archive-5r/serving-r2.json"
 MODEL="Qwen/Qwen3-8B"
 PORT=8100
+RATES="2 4 8 16 32"
 
 mkdir -p "$DIR"
-for R in 2 8; do
+for R in $RATES; do
     cp "./results/RTX-8000-v31-2000p/r${R}_real.json" "$DIR/r${R}_real.json" 2>/dev/null || true
 done
 
@@ -71,7 +72,8 @@ python3 -m vllm.entrypoints.cli.main bench serve \
     --num-prompts 200 --request-rate 4 > /dev/null 2>&1 || true
 sleep 3
 
-for RATE in 2 8; do
+for RATE in $RATES; do
+    echo "  [$(date +%T)] r=${RATE}" >> "$MASTER_LOG"
     timeout 1500 python3 -m vllm.entrypoints.cli.main bench serve \
         --model "$MODEL" --base-url "http://localhost:${PORT}" \
         --dataset-name random --random-input-len 256 --random-output-len 128 \
@@ -79,7 +81,11 @@ for RATE in 2 8; do
         --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,90,99 \
         --save-result --result-dir "$DIR" \
         --result-filename "r${RATE}_emu.json" > /dev/null 2>&1 \
-        || echo "r=${RATE} FAILED" >> "$MASTER_LOG"
+        && echo "    r=${RATE} done" >> "$MASTER_LOG" \
+        || echo "    r=${RATE} FAILED" >> "$MASTER_LOG"
+    # Kill zombie bench at this rate; server stays for next rate.
+    pkill -9 -f "bench serve.*request-rate $RATE " 2>/dev/null || true
+    sleep 3
 done
 cleanup
 
