@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -284,6 +285,15 @@ class Scheduler(SchedulerInterface):
             )
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+
+        # Emulator arrival-delay hook (opt-in). Patches add_request/schedule
+        # to delay new-request admission by profiled IPC setup overhead.
+        if os.environ.get("VLLM_EMULATOR_SCHEDULER_HOOK", "").lower() in ("1", "true", "yes"):
+            try:
+                from vllm_emulator.hooks.scheduler_hook import install_arrival_delay
+                install_arrival_delay(self)
+            except ImportError:
+                pass
 
     def _mamba_block_aligned_split(
         self,

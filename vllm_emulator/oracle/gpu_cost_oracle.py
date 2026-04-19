@@ -394,10 +394,6 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             tt_query, max(num_requests, 1),
             has_prefill=has_prefill,
         )
-        # IPC overhead: add measured per-concurrency overhead ONLY to prefill
-        # steps (per commit 4d9983a0c design). Decode steps don't pay it.
-        if result is not None and has_prefill:
-            result = result + self._lookup_sched_overhead_us(max(num_requests, 1))
         if result is not None:
             return result
 

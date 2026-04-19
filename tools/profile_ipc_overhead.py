@@ -120,15 +120,28 @@ for n in sweep:
     if ttft_samples:
         ttft_samples.sort()
         median_ttft_us = ttft_samples[len(ttft_samples) // 2]
+        mean_ttft_us = sum(ttft_samples) / len(ttft_samples)
+        # `overhead_us` is the authoritative field used by oracle/hook.
+        # Aggregation selectable via VLLM_IPC_OVERHEAD_AGG env var at table
+        # build time; default = median (current behaviour). Raw samples
+        # retained so downstream can rebuild with a different aggregation
+        # without re-running the sweep.
         overhead_us = max(0.0, median_ttft_us - prefill_step_us)
+        overhead_mean_us = max(0.0, mean_ttft_us - prefill_step_us)
         results.append({
             "num_reqs": n,
             "median_ttft_us": round(median_ttft_us, 0),
+            "mean_ttft_us": round(mean_ttft_us, 0),
             "overhead_us": round(overhead_us, 0),
+            "overhead_mean_us": round(overhead_mean_us, 0),
             "num_samples": len(ttft_samples),
+            "raw_ttft_samples_us": [round(s, 0) for s in ttft_samples],
+            "prefill_step_us": round(prefill_step_us, 0),
         })
-        print(f"  N={n:3d}: ttft={median_ttft_us/1000:.1f}ms  "
-              f"overhead={overhead_us/1000:.1f}ms  "
+        print(f"  N={n:3d}: ttft median={median_ttft_us/1000:.1f}ms "
+              f"mean={mean_ttft_us/1000:.1f}ms  "
+              f"overhead median={overhead_us/1000:.1f}ms "
+              f"mean={overhead_mean_us/1000:.1f}ms  "
               f"(n={len(ttft_samples)}, "
               f"p25={ttft_samples[len(ttft_samples)//4]/1000:.1f}ms, "
               f"p75={ttft_samples[3*len(ttft_samples)//4]/1000:.1f}ms)")
