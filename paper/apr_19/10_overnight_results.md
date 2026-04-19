@@ -151,6 +151,28 @@ One or more of these contaminates the per-bucket sample distribution in a way th
 
 **Next experiment (queued for ~15:20 BST)**: archive's EXACT recipe scaled to 5 rounds single-session. If it stays clean (≈ archive-1r accuracy), v6's recipe is the definitive cause.
 
+## Archive-r2 validation (13:45 BST) — INVARIANT RESTORED
+
+Built profile from 2 rounds of archive's recipe (184k samples, 1164 cells) sliced from the interrupted archive-5r trace. Emu-validated at r=2, r=8 × 500 prompts.
+
+| Rate | archive-1r (108k) | archive-r2 (184k) | Δ |
+|---|---|---|---|
+| r=2 TPOT | −1.6% | **−1.2%** | +0.4pp |
+| r=8 TPOT | −13.2% | **−0.4%** | **+12.8pp** |
+| r=2 TTFT | −26.9% | **−26.1%** | +0.8pp |
+| r=8 TTFT | −11.1% | **+2.3%** | **+13.4pp** |
+
+**"More data → better" invariant RESTORED with archive's recipe.** The r=8 gap closed almost entirely: TPOT from −13.2% to effectively zero (−0.4%), TTFT from −11% to +2% (slight over-prediction, within 3pp).
+
+**v6's failure was the RECIPE, not the round count**. Variable shapes + smaller per-rate prompts poisoned v6's profile; archive's recipe at double the round count (but same workload shape + same per-rate prompt scale) scales gracefully.
+
+**Remaining gap**: r=2 TTFT −26%. This is the known CUDA graph capture cost that IID oracle can't model without explicit first-encounter tracking.
+
+**Paper implication**: archive-r2 is a valid publishable baseline. Path A fixed-workload paper is feasible with:
+- TPOT within 1.2% on 256/128 workload at r=2 and r=8.
+- TTFT within 2pp at r=8; −26% at r=2 (capture-floor, honest limitation).
+- 1-paragraph methodology: single-session 5-round-recipe, archive's prompt counts preserved.
+
 ## Directions for next session
 
 1. **Validate sample-count hypothesis**: build v6-cap profiles that sub-sample each bucket to 50 / 100 / 500 / 1000 / unlimited samples. If accuracy improves then degrades as cap grows, that confirms the hypothesis and gives us a principled sub-sampling rule.
