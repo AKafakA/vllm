@@ -73,6 +73,48 @@ The remaining un-tested variable is **round count** itself:
 
 Hypothesis: sample-count-dependent bucket-sample distribution. With more rounds, steady-state samples dominate each bucket's `samples` array, and the oracle's `random.choice` pulls proportionally fewer outlier values. The archive's 108k-sample sweet spot has enough samples to populate buckets but not so many that steady-state swamps the tail.
 
+## Agg-mode A/B (Apr 19 09:37 BST) — isolate oracle aggregation vs profile data
+
+Added experiment-gate `VLLM_EMULATOR_ORACLE_AGG={sample|median|mean}`. Tested 6 combinations at r=2, r=8 × 500 prompts.
+
+| Profile | Agg | r=2 TPOT | r=2 TTFT | r=8 TPOT | r=8 TTFT |
+|---|---|---|---|---|---|
+| v6 | sample | −6.2% | −29.8% | **−35.3%** | −36.2% |
+| v6 | median | −9.8% | −32.3% | **−43.3%** | −43.1% |
+| v6 | mean | −6.4% | −29.6% | **−36.5%** | −38.8% |
+| archive | sample | **−1.6%** | −26.9% | **−13.2%** | −11.1% |
+| archive | median | −9.9% | −32.1% | −29.6% | −19.3% |
+| archive | mean | −1.6% | −28.2% | −11.5% | −11.0% |
+
+**Findings:**
+- **Sample ≥ Mean ≫ Median on both profiles**: variance from tail matters. Sample drops 8-16pp by switching to median. Mean nearly matches sample (mean still reflects tail contribution; median is robust to outliers → ignores them).
+- **Archive beats v6 at every aggregation mode**: archive_sample r=8 TPOT −13.2% vs v6_sample −35.3% (22pp gap). Even archive_median (−29.6%) beats v6_sample (−35.3%). **The profile data is the bottleneck, not the oracle aggregation algorithm.**
+
+## Dilution diagnostic (10:20 BST)
+
+`tools/diag_bucket_counts.py` computed per-bucket tail-sample ratio: given archive's per-bucket p75 as threshold, what fraction of v6's samples exceed it?
+
+- Archive: 247 buckets, 93k samples, mean 378/bucket, max 7009/bucket.
+- v6: 258 buckets, 280k samples, mean 1085/bucket (3× denser), max 39042/bucket.
+- **Aggregate tail ratio (57 common well-populated buckets)**: p10 = 0.33, p50 = 0.67, p90 = 1.00, mean 0.69.
+
+**Dilution confirmed but non-uniform**: high-population buckets (tt=2..10, c=2..7) have tail ratios near 1.0. Lower-population buckets lose the tail disproportionately. Overall v6 has ~30% LESS tail than archive at the same threshold.
+
+## Reservoir experiment (10:28 BST, running)
+
+Added `--reservoir-size N` to builder (Vitter 1985 Algorithm R). Rebuilt v6 with cap=7009 (archive's max per-bucket count) on the full v6 trace.
+
+**Expected null result**: reservoir sampling is unbiased — it preserves distribution shape in expectation. Tail ratio on reservoir-capped v6 stays at 0.69 (unchanged, confirming). Emu accuracy should therefore match full v6 within noise.
+
+The real dilution cause is distributional, not volumetric: steady-state samples are measurably FASTER than early-round samples (warmer server = faster compute). v6's p75 is lower than archive's p75 because later rounds' bulk is faster. Reservoir can't undo that shift.
+
+## Implication for "more data → better" invariant
+
+The invariant doesn't hold with this oracle architecture unless the later-round bulk's speedup is somehow excluded. Options (none are truly knob-free):
+1. **Round-weighted storage** — tag each sample with a round index, weight inversely to round population. Requires adding round-index field to trace and to bucket storage.
+2. **Per-round oracle instances** — sample uniformly from rounds, not from pooled samples. Same data collection but changes sampling structure.
+3. **Accept the methodology** — profile at archive's round count (~2 rounds). This IS the "cut rounds" fix the user previously rejected.
+
 ## Directions for next session
 
 1. **Validate sample-count hypothesis**: build v6-cap profiles that sub-sample each bucket to 50 / 100 / 500 / 1000 / unlimited samples. If accuracy improves then degrades as cap grows, that confirms the hypothesis and gives us a principled sub-sampling rule.

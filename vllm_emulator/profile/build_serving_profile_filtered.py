@@ -60,7 +60,32 @@ def parse_args():
     parser.add_argument("--new-reqs-bucket-width", type=int, default=1,
                         help="Bucket width for num_new_reqs axis (F4). Default 1 "
                              "(no bucketing). Only used when --profile-axes 3d.")
+    parser.add_argument("--reservoir-size", type=int, default=0,
+                        help="Experimental: per-bucket reservoir cap "
+                             "(Vitter 1985 Algorithm R). 0 (default): no cap, "
+                             "byte-identical output. N>0: randomly keep exactly "
+                             "N samples per bucket when n>N, preserving the "
+                             "distribution in expectation. Used to test whether "
+                             "per-bucket sample-count dominance biases the "
+                             "oracle's uniform random.choice.")
     return parser.parse_args()
+
+
+def _reservoir_sample(samples, k, rng):
+    """Vitter 1985 Algorithm R reservoir sample (preserves uniform probability).
+
+    Given n samples and cap k, return a length-k random sub-sample.
+    If n <= k, returns samples unchanged. Deterministic for a given rng state.
+    """
+    n = len(samples)
+    if n <= k:
+        return samples
+    reservoir = list(samples[:k])
+    for i in range(k, n):
+        j = rng.randint(0, i)
+        if j < k:
+            reservoir[j] = samples[i]
+    return reservoir
 
 
 def _filter_outliers(samples, method):
@@ -177,18 +202,20 @@ def extract_metadata(trace_header, cli_model_name, cli_gpu_model):
     return model_name, gpu_model, model_config
 
 
-def build_2d_distribution(data, label, outlier_filter="none"):
+def build_2d_distribution(data, label, outlier_filter="none", reservoir_size=0):
     """Build 2D distribution from (tt_bucket, conc_bucket) -> [latency_us].
 
     Returns list of {tt, conc, samples: [...]} dicts. When outlier_filter
-    is "none" the output is byte-identical to the pre-F1 code. For the
-    non-none methods every numeric constant is a named textbook default
-    (see `_filter_outliers` docstring).
+    is "none" and reservoir_size is 0 the output is byte-identical to
+    the pre-F1 code.
     """
+    import random as _random
+    rng = _random.Random(42)
     distribution = []
     total_in = 0
     total_out = 0
     buckets_filtered = 0
+    buckets_reservoired = 0
     for (ttb, cb), lats in sorted(data.items()):
         samples = [round(v, 1) for v in lats]
         total_in += len(samples)
@@ -197,6 +224,9 @@ def build_2d_distribution(data, label, outlier_filter="none"):
             samples = _filter_outliers(samples, outlier_filter)
             if len(samples) != before:
                 buckets_filtered += 1
+        if reservoir_size > 0 and len(samples) > reservoir_size:
+            samples = _reservoir_sample(samples, reservoir_size, rng)
+            buckets_reservoired += 1
         total_out += len(samples)
         distribution.append({
             "tt": ttb,
@@ -211,6 +241,11 @@ def build_2d_distribution(data, label, outlier_filter="none"):
         print(f"    outlier_filter={outlier_filter}: "
               f"dropped {dropped} of {total_in} samples "
               f"({pct:.2f}%) across {buckets_filtered} buckets")
+    if reservoir_size > 0:
+        print(f"    reservoir_size={reservoir_size}: "
+              f"capped {buckets_reservoired} buckets; "
+              f"final total samples {total_out} "
+              f"(from {total_in}, kept {100.0*total_out/total_in:.1f}%)")
     return distribution
 
 
@@ -299,11 +334,14 @@ def main():
     print(f"\n2D distributions (tt_bucket_width={tt_w}, conc_bucket_width={conc_w}, "
           f"outlier_filter={args.outlier_filter}):")
     step_cycle_dist = build_2d_distribution(
-        step_cycle_2d_data, "step_cycle", outlier_filter=args.outlier_filter)
+        step_cycle_2d_data, "step_cycle",
+        outlier_filter=args.outlier_filter, reservoir_size=args.reservoir_size)
     prefill_dist = build_2d_distribution(
-        prefill_2d_data, "prefill", outlier_filter=args.outlier_filter)
+        prefill_2d_data, "prefill",
+        outlier_filter=args.outlier_filter, reservoir_size=args.reservoir_size)
     decode_dist = build_2d_distribution(
-        decode_2d_data, "decode", outlier_filter=args.outlier_filter)
+        decode_2d_data, "decode",
+        outlier_filter=args.outlier_filter, reservoir_size=args.reservoir_size)
 
     if emit_3d:
         print(f"\n3D distributions (new_reqs_bucket_width={new_reqs_w}):")

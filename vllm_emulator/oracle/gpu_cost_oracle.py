@@ -32,6 +32,17 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         # RNG for sampling from distribution buckets.
         self._rng = random.Random(42)
 
+        # Experimental: oracle aggregation mode. Default is "sample"
+        # (IID random.choice). Alternatives are "median" and "mean" —
+        # deterministic per-bucket estimator. Used to test whether
+        # variance from sampling is load-bearing vs central-tendency
+        # sufficient. No new knobs beyond this env-var gate.
+        self._oracle_agg = os.environ.get("VLLM_EMULATOR_ORACLE_AGG", "sample").lower()
+        if self._oracle_agg not in ("sample", "median", "mean"):
+            raise ValueError(
+                f"VLLM_EMULATOR_ORACLE_AGG must be 'sample', 'median', or 'mean'; "
+                f"got {self._oracle_agg!r}")
+
         # F5: kNN conditioning. K=1 (default) keeps the current nearest-
         # neighbor code path byte-identical. K>1 uses Shepard (1968) p=2
         # inverse-distance weighting over range-normalised (tt, conc) axes.
@@ -132,6 +143,24 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
     def gpu_model(self) -> str:
         return self._gpu_model
 
+    def _aggregate(self, samples):
+        """Return scalar latency for a sample array per the oracle agg mode.
+
+        - sample: random.choice (default, current behaviour).
+        - median: statistics.median (central order statistic).
+        - mean:   arithmetic mean.
+        """
+        if not samples:
+            return None
+        if self._oracle_agg == "sample":
+            return float(self._rng.choice(samples))
+        if self._oracle_agg == "median":
+            s = sorted(samples)
+            n = len(s)
+            return float(s[n // 2]) if n % 2 == 1 else 0.5 * (s[n // 2 - 1] + s[n // 2])
+        # mean
+        return float(sum(samples)) / len(samples)
+
     def _sample_2d_distribution(
         self, total_tokens: int, num_requests: int,
         has_prefill: bool = False,
@@ -186,7 +215,7 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         raw = bucket.get("samples")
         if raw:
-            return float(self._rng.choice(raw))
+            return self._aggregate(raw)
         return None
 
     def _sample_3d_distribution(
@@ -225,7 +254,7 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             return None
         raw = bucket.get("samples")
         if raw:
-            return float(self._rng.choice(raw))
+            return self._aggregate(raw)
         return None
 
     def _sample_knn_2d(self, table, total_tokens, num_requests):
@@ -251,7 +280,7 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             if d == 0.0:
                 samples = table[k].get("samples") or []
                 if samples:
-                    return float(self._rng.choice(samples))
+                    return self._aggregate(samples)
                 return None
 
         weights = [1.0 / (d * d) for d, _ in top_k]
@@ -269,7 +298,7 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         samples = table[chosen_k].get("samples") or []
         if samples:
-            return float(self._rng.choice(samples))
+            return self._aggregate(samples)
         return None
 
     def estimate_step_latency_us(

@@ -64,6 +64,13 @@ Append-only timeline. Every cron check adds a timestamped entry.
 - Issues: **r=0.5 benchmark running ~2× expected** (predicted ~9 min for n=266 @ rate=0.5, actual 20+ min). Possibly GPU thermal slowdown after 3h 45min sustained load, or scheduler accumulating state after round 5's high-rate sweep.
 - Revised timing: round 5 end ~05:30–05:35 → Phase A build ~05:36 → Phase B ~06:21 → Phase C ~09:21 → Phase D ~09:51. **Past 09:30 target by ~20 min but before 10:00 user sync.** Acceptable. No intervention yet; watch next check.
 
+### 09:37 BST — Agg-mode A/B launched (oracle median/mean vs sample)
+
+- Purpose: isolate whether ORACLE VARIANCE (from `random.choice(samples)`) or SAMPLE DENSITY drives accuracy. If median-only oracle approaches archive-sample accuracy on v6, the variance was hurting more than helping — deterministic oracle suffices.
+- New env var (experiment gate only, not a production feature): `VLLM_EMULATOR_ORACLE_AGG={sample|median|mean}`. Default `sample` = byte-identical to current `random.choice`. Oracle code changes: 1 helper `_aggregate(samples)`, 4 `self._rng.choice(...)` call sites replaced.
+- 6 passes: v6 profile × {sample, median, mean} + archive profile × {sample, median, mean}. Each pass: r=2, r=8 × 500 prompts. ~6 min/pass × 6 = ~36 min total. ETA done ~10:13 BST.
+- Ordering (v6 first): v6_sample → v6_median → v6_mean → archive_sample → archive_median → archive_mean. Monitoring cron `61aaf900` polls at :01/:16/:31/:46.
+
 ### 08:19 BST — Phase C v6: F2 DONE, F4 on-pass running (LAST FEATURE)
 
 - Current: F4 on-variant (started 07:58, r=2). Off-variant done at ~07:58 (shown earlier, TPOT −5.9% r=2, −35.3% r=8 — matches v6 baseline profile).
