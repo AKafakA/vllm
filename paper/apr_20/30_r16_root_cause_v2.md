@@ -85,3 +85,15 @@ For tonight's overnight:
 ## Today's TTFT deliverable
 
 No code committed. Investigation-only. Three hypotheses refuted, one strong hypothesis (profile coverage) confirmed with direct evidence (bucket density inspection). Tomorrow's overnight can act on this.
+
+## UPDATE (Apr 20 afternoon): profile-coverage hypothesis REFUTED
+
+Saturation-supplementary reprofile (`tools/adaptive_profile_saturation_supp.sh`) ran with archive-r2 + 3 saturation rounds (r=16/r=32/inf × 10,000 prompts). Validation results in `40_sat_supp_results.md`:
+
+- r=16 TTFT went from −14.00% to **−28.53%** (worse).
+- r=8 TPOT went from −2.87% to **−8.10%** (regressed past 6% target).
+
+**The profile-coverage hypothesis is refuted.** Target region (tt ≥ 300, conc ≥ 200) barely filled (3 → 5 samples) because saturation is dominated by pure decode at conc=256/tt=256, not mixed prefill+decode. Instead, supplementary rounds' ramp-up phases contaminated sparse mid-conc buckets at r=8's operating range, and extra samples at conc=257 pure-decode bucket shifted oracle toward faster predictions at saturation.
+
+**r=16 conclusion**: not caused by hook, not by profile density, not by burst IPC, not by v1/v2 sweep disagreement. Likely structural scheduler-behavior divergence at the rate where service ≈ arrival. Deferred. **r=16 TTFT −14% marked as known emulator limitation**; archive-r2 remains reference profile.
+
