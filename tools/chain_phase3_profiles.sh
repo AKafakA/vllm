@@ -72,12 +72,13 @@ python3 -m vllm.entrypoints.cli.main bench serve \
     --num-prompts 200 --request-rate 4 > /dev/null 2>&1 || true
 sleep 3
 
-for RATE in 2 4 8 16 32; do
+# Real sharegpt baseline — only rates used by matrix (2, 8, 32), 1000p.
+for RATE in 2 8 32; do
     echo "  [$(date +%T)] real sharegpt r=$RATE" >> "$MASTER_LOG"
-    timeout 1500 python3 -m vllm.entrypoints.cli.main bench serve \
+    timeout 900 python3 -m vllm.entrypoints.cli.main bench serve \
         --model "$MODEL" --base-url "http://localhost:${PORT}" \
         --dataset-name sharegpt --dataset-path "$SHAREGPT" \
-        --num-prompts 2000 --request-rate $RATE \
+        --num-prompts 1000 --request-rate $RATE \
         --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,90,99 \
         --save-result --result-dir "$REAL_SHAREGPT_DIR" \
         --result-filename "r${RATE}_real.json" > /dev/null 2>&1 \
@@ -162,10 +163,11 @@ for PROF_KEY in archive-r2 fixedmix shareptsampled archiver2ext; do
             else
                 DS_ARGS="--dataset-name sharegpt --dataset-path $SHAREGPT"
             fi
-            timeout 1500 python3 -m vllm.entrypoints.cli.main bench serve \
+            # Slim: 1000p per cell to fit overnight budget (was 2000p).
+            timeout 900 python3 -m vllm.entrypoints.cli.main bench serve \
                 --model "$MODEL" --base-url "http://localhost:${PORT}" \
                 $DS_ARGS \
-                --num-prompts 2000 --request-rate $RATE \
+                --num-prompts 1000 --request-rate $RATE \
                 --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,90,99 \
                 --save-result --result-dir "$CELL_DIR" \
                 --result-filename "r${RATE}_emu.json" > /dev/null 2>&1 \
