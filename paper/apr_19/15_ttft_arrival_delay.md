@@ -132,3 +132,21 @@ to follow-up; current implementation is fine for paper experimentation.
 
 **r=16**: v4-mean −17.4% is slightly worse than v3 −16.15%. Confirms the r=16 gap is NOT overhead-magnitude driven; it's a batch-composition / structural effect independent of whether we use median, mean, or raw-sample draw.
 
+
+## v5 family results (Apr 20 overnight)
+
+Full validation and analysis in `paper/apr_20/03_v5_validation.md`. Short version:
+
+| rate | v3 (stable) | v5-sample | v5-2d-burst | v5-2d-burst-tight |
+|---|---|---|---|---|
+| 2  TTFT% | −9.50  | **−6.65** | +10.23 | +10.55 |
+| 4  TTFT% | −4.29  | — | −1.44  | −3.57 |
+| 8  TTFT% | −2.14  | — | +2.61  | −0.59 |
+| 16 TTFT% | **−16.15** | — | −22.29 | **−18.50** |
+| 32 TTFT% | −0.17  | — | −2.40  | +0.04 |
+
+Findings:
+- Per-arrival sampling (v5-sample) improves r=2 by 3pp (r=2 only measured; rest damaged by operator kill).
+- Burst-aware 2D lookup (v5-2d-burst-tight) moves r=16 by 4pp vs pipelined and is the direction for r=16 fix, but still 2pp above target.
+- v2 k=1 mean disagrees with v1 k=1 median by ~5ms more than variance predicts — suspicious; investigate tomorrow.
+- **v3 remains the shipped reference on stable.** No v5 variant promoted.

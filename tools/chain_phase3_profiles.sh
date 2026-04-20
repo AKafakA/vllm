@@ -14,13 +14,15 @@ MASTER_LOG="/tmp/vllm_apr20_phase3.log"
 echo "=== phase3 profile-shape start $(date) ===" > "$MASTER_LOG"
 touch /tmp/vllm_apr20_phase3.started
 
-# Gate on Phase 2 done.
-for i in $(seq 1 180); do
-    [ -f /tmp/vllm_apr20_phase2.done ] && break
+# Gate on the latest Phase 2* done marker: 2c > 2b > 2.
+for i in $(seq 1 300); do
+    [ -f /tmp/vllm_apr20_phase2c.done ] && break
+    [ -f /tmp/vllm_apr20_phase2b.done ] && [ ! -f /tmp/vllm_apr20_phase2c.started ] && break
+    [ -f /tmp/vllm_apr20_phase2.done ] && [ ! -f /tmp/vllm_apr20_phase2b.started ] && [ ! -f /tmp/vllm_apr20_phase2c.started ] && break
     sleep 30
 done
-if [ ! -f /tmp/vllm_apr20_phase2.done ]; then
-    echo "Phase 2 not done in time; aborting" >> "$MASTER_LOG"
+if [ ! -f /tmp/vllm_apr20_phase2c.done ] && [ ! -f /tmp/vllm_apr20_phase2b.done ] && [ ! -f /tmp/vllm_apr20_phase2.done ]; then
+    echo "No Phase 2 done markers; aborting" >> "$MASTER_LOG"
     exit 1
 fi
 
