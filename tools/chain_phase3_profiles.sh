@@ -137,7 +137,7 @@ for PROF_KEY in archive-r2 fixedmix shareptsampled archiver2ext; do
             VLLM_EMULATOR_SCHEDULER_HOOK=1 \
             VLLM_IPC_OVERHEAD_AGG="$HOOK_AGG" \
             VLLM_EMULATOR_PREP_SURROGATE=1 \
-            VLLM_EMULATOR_SAMPLE_TRIM="2,98" \
+            VLLM_EMULATOR_SAMPLE_TRIM="0,100" \
         python3 -m vllm.entrypoints.openai.api_server \
             --model "$MODEL" --max-model-len 4096 --port $PORT --trust-remote-code \
             > "$CELL_DIR/server.log" 2>&1 &

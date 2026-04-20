@@ -56,7 +56,7 @@ for HOOK_STATE in on off; do
         $HOOK_ENV \
         VLLM_IPC_OVERHEAD_AGG=median \
         VLLM_EMULATOR_PREP_SURROGATE=1 \
-        VLLM_EMULATOR_SAMPLE_TRIM="2,98" \
+        VLLM_EMULATOR_SAMPLE_TRIM="0,100" \
         VLLM_EMULATOR_HOOK_TRACE="$TRACE_PATH" \
     python3 -m vllm.entrypoints.openai.api_server \
         --model "$MODEL" --max-model-len 4096 --port $PORT --trust-remote-code \

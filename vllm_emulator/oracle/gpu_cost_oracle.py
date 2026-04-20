@@ -74,7 +74,13 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
 
         # User-configurable percentile trim on raw samples.
         # Format: "lo,hi" e.g. "2,98" trims bottom 2% and top 2%.
-        # Applied at sample time from the already-stored raw samples.
+        # Applied once at load time; oracle samples from the trimmed pool.
+        #
+        # KNOWN LOAD-BEARING BEHAVIOUR (Apr 20 validation): trim removes the
+        # tail samples in populated buckets. For dense profiles this cuts
+        # real sustained-saturation signal and makes emu systematically too
+        # fast (validated at r=16, delta of up to 18pp on sat-supp profile).
+        # DEFAULT IS NO TRIM (0,100). Only opt in for explicit diagnostics.
         trim_env = os.environ.get("VLLM_EMULATOR_SAMPLE_TRIM", "")
         if trim_env:
             parts = trim_env.split(",")
@@ -83,6 +89,10 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         else:
             self._trim_lo = 0
             self._trim_hi = 100
+        if self._trim_lo != 0 or self._trim_hi != 100:
+            print(f"[ProfileGpuCostOracle] *** NON-DEFAULT TRIM in use: "
+                  f"{self._trim_lo},{self._trim_hi} — this removes tail samples "
+                  f"and can shift accuracy by 10-18pp. Verify this is intentional. ***")
 
         # 2D distribution: (tt, conc) -> bucket with raw samples list.
         # Separated by step type: decode (CUDA graph) vs prefill (eager).

@@ -1,16 +1,15 @@
 #!/bin/bash
-# Phase 3b — run only archiver2ext × {random, sharegpt} cells.
-# Used to fit remaining Phase 3 work into morning budget after
-# fixedmix/shareptsampled cells are skipped.
-# Slim: 3 rates × 1500 prompts per cell.
+# Corrective rerun: archiver2ext × {random, sharegpt} at 2000p × 3 rates.
+# Original Phase 3b used 1500p to save time, violating the always-2000p
+# debug rule. This rerun gives apples-to-apples vs archive-r2 baseline.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 source ~/Code/llm/vllm-emulator/.venv/bin/activate
 cd ~/Code/llm/vllm-emulator
 
-MASTER_LOG="/tmp/vllm_apr20_phase3b.log"
-echo "=== phase3b archiver2ext-only cells start $(date) ===" > "$MASTER_LOG"
-touch /tmp/vllm_apr20_phase3b.started
+MASTER_LOG="/tmp/vllm_apr20_phase3c.log"
+echo "=== phase3c archiver2ext @ 2000p start $(date) ===" > "$MASTER_LOG"
+touch /tmp/vllm_apr20_phase3c.started
 
 MODEL="Qwen/Qwen3-8B"
 PORT=8100
@@ -33,11 +32,11 @@ wait_server() {
 }
 
 for WORKLOAD in random sharegpt; do
-    CELL_DIR="./results/workload-emu-archiver2ext-${WORKLOAD}"
+    CELL_DIR="./results/workload-emu-archiver2ext-${WORKLOAD}-2000p"
     mkdir -p "$CELL_DIR"
     if [ "$WORKLOAD" = "random" ]; then
         for R in 2 8 32; do
-            cp "./results/ttft-variant-v3-arrival-delay/r${R}_real.json" \
+            cp "./results/workload-emu-archive-r2-random/r${R}_real.json" \
                 "$CELL_DIR/r${R}_real.json" 2>/dev/null || true
         done
     else
@@ -47,7 +46,7 @@ for WORKLOAD in random sharegpt; do
         done
     fi
 
-    echo "  [$(date +%T)] cell: profile=archiver2ext workload=$WORKLOAD" >> "$MASTER_LOG"
+    echo "  [$(date +%T)] 2000p cell: archiver2ext × $WORKLOAD" >> "$MASTER_LOG"
     cleanup
     env \
         VLLM_EMULATOR_ENABLE_ORACLE=1 \
@@ -82,10 +81,10 @@ for WORKLOAD in random sharegpt; do
         else
             DS_ARGS="--dataset-name sharegpt --dataset-path $SHAREGPT"
         fi
-        timeout 900 python3 -m vllm.entrypoints.cli.main bench serve \
+        timeout 1500 python3 -m vllm.entrypoints.cli.main bench serve \
             --model "$MODEL" --base-url "http://localhost:${PORT}" \
             $DS_ARGS \
-            --num-prompts 1500 --request-rate $RATE \
+            --num-prompts 2000 --request-rate $RATE \
             --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,90,99 \
             --save-result --result-dir "$CELL_DIR" \
             --result-filename "r${RATE}_emu.json" > /dev/null 2>&1 \
@@ -96,8 +95,5 @@ for WORKLOAD in random sharegpt; do
     cleanup
 done
 
-echo "=== phase3b DONE $(date) ===" >> "$MASTER_LOG"
-touch /tmp/vllm_apr20_phase3b.done
-# Mark overall phase 3 done for cron self-delete logic.
-touch /tmp/vllm_apr20_phase3.done
-touch /tmp/vllm_apr20.done
+echo "=== phase3c DONE $(date) ===" >> "$MASTER_LOG"
+touch /tmp/vllm_apr20_phase3c.done
