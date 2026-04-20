@@ -30,23 +30,26 @@ if TYPE_CHECKING:
 
 SCHEDULER_HOOK_ENV = "VLLM_EMULATOR_SCHEDULER_HOOK"
 PROFILE_PACK_ENV = "VLLM_EMULATOR_PROFILE_PACK"
-IPC_OVERHEAD_AGG_ENV = "VLLM_IPC_OVERHEAD_AGG"  # "median" | "mean" | "sample"
+IPC_OVERHEAD_AGG_ENV = "VLLM_IPC_OVERHEAD_AGG"  # "median"|"mean"|"sample"|"2d-burst"
 
 
 def _load_overhead_table() -> list[dict[str, Any]]:
     """Load sched_overhead_table from the profile pack.
 
     Aggregation via VLLM_IPC_OVERHEAD_AGG:
-    - "median" (default): field `overhead_us`.
-    - "mean": field `overhead_mean_us` when present; falls back to
-      `overhead_us` for older tables.
-    - "sample": at each lookup, draw a random value from
-      `raw_ttft_samples_us` (minus per-N prefill_step_us). Requires
-      the profile sweep to have retained raw samples (profiler v2).
-      This models the right-skewed IPC distribution per-request.
+    - "median" (default): field `overhead_us` from the v1 (1D) table.
+    - "mean": field `overhead_mean_us` from v1; falls back to `overhead_us`.
+    - "sample": at each lookup, draw a random value from `raw_ttft_samples_us`
+      (minus per-N prefill_step_us). Uses v1 table (k=1 samples only).
+    - "2d-burst": load the v2 (2D) table `sched_overhead_table_v2` which has
+      per-(N, k_burst) cells. Hook queries with (N_conc, k_burst) where k is
+      the count of arrivals currently pending admission. Captures the ~3×
+      overhead increase when real vLLM receives bursts.
 
-    Raw samples are retained in the table regardless, so the same
-    profile pack supports all three aggregations via env var.
+    Returns a table list; for 1D modes each entry is
+        {num_reqs, overhead_us, [samples_overhead_us]}
+    For 2d-burst mode each entry is
+        {num_reqs, burst_k, overhead_us, overhead_mean_us}
     """
     path = os.environ.get(PROFILE_PACK_ENV, "")
     if not path or not os.path.exists(path):
@@ -54,14 +57,31 @@ def _load_overhead_table() -> list[dict[str, Any]]:
     try:
         with open(path) as f:
             pack = json.load(f)
-        raw = pack.get("sched_overhead_table") or []
         agg = os.environ.get(IPC_OVERHEAD_AGG_ENV, "median").lower()
-        if agg not in ("median", "mean", "sample"):
+        if agg not in ("median", "mean", "sample", "2d-burst"):
             raise ValueError(
-                f"{IPC_OVERHEAD_AGG_ENV} must be 'median', 'mean', or 'sample', "
-                f"got {agg!r}")
-        # Normalise per-N entry. Keep raw sample list in 'samples_overhead_us'
-        # for 'sample' mode (TTFT samples minus that N's prefill baseline).
+                f"{IPC_OVERHEAD_AGG_ENV} must be one of "
+                f"median|mean|sample|2d-burst, got {agg!r}")
+
+        if agg == "2d-burst":
+            raw_v2 = pack.get("sched_overhead_table_v2") or []
+            if not raw_v2:
+                raise ValueError(
+                    "2d-burst mode requires sched_overhead_table_v2 in profile")
+            table = []
+            for e in raw_v2:
+                # Use mean overhead as default scalar for 2D cells (measured
+                # across k requests within one burst sample).
+                overhead_us = e.get("overhead_mean_us", e.get("overhead_median_us", 0))
+                table.append({
+                    "num_reqs": e.get("num_reqs", 0),
+                    "burst_k": e.get("burst_k", 1),
+                    "overhead_us": overhead_us,
+                })
+            return sorted(table, key=lambda e: (e["num_reqs"], e["burst_k"]))
+
+        # 1D modes (median / mean / sample) use the v1 table.
+        raw = pack.get("sched_overhead_table") or []
         table = []
         for e in raw:
             if agg == "mean" and "overhead_mean_us" in e:
@@ -72,7 +92,6 @@ def _load_overhead_table() -> list[dict[str, Any]]:
                 "num_reqs": e.get("num_reqs", 0),
                 "overhead_us": overhead_us,
             }
-            # Precompute per-N raw overhead samples for 'sample' mode.
             if agg == "sample":
                 ttft_samples = e.get("raw_ttft_samples_us") or []
                 prefill_us = e.get("prefill_step_us", 0)
@@ -85,6 +104,47 @@ def _load_overhead_table() -> list[dict[str, Any]]:
     except Exception as exc:
         print(f"[SchedulerHook] failed to load overhead table: {exc}")
         return []
+
+
+def _lookup_overhead_us_2d(
+    table_2d: list[dict[str, Any]],
+    num_reqs: int,
+    burst_k: int,
+) -> float:
+    """Bilinear interpolation over the 2D (N, k) overhead grid.
+
+    `table_2d` is a list of {num_reqs, burst_k, overhead_us} cells sorted
+    by (num_reqs, burst_k). Clamps at grid edges; otherwise bilinearly
+    interpolates the four neighbouring cells.
+    """
+    if not table_2d:
+        return 0.0
+    ns = sorted({e["num_reqs"] for e in table_2d})
+    ks = sorted({e["burst_k"] for e in table_2d})
+    if not ns or not ks:
+        return 0.0
+
+    # Clamp.
+    n = max(ns[0], min(num_reqs, ns[-1]))
+    k = max(ks[0], min(burst_k, ks[-1]))
+
+    # Pick bounding (n_lo, n_hi) and (k_lo, k_hi).
+    n_lo = max(x for x in ns if x <= n)
+    n_hi = min(x for x in ns if x >= n)
+    k_lo = max(x for x in ks if x <= k)
+    k_hi = min(x for x in ks if x >= k)
+
+    cell = {(e["num_reqs"], e["burst_k"]): float(e["overhead_us"]) for e in table_2d}
+    v_ll = cell.get((n_lo, k_lo), 0.0)
+    v_lh = cell.get((n_lo, k_hi), v_ll)
+    v_hl = cell.get((n_hi, k_lo), v_ll)
+    v_hh = cell.get((n_hi, k_hi), v_ll)
+
+    n_ratio = 0.0 if n_hi == n_lo else (n - n_lo) / (n_hi - n_lo)
+    k_ratio = 0.0 if k_hi == k_lo else (k - k_lo) / (k_hi - k_lo)
+    v_lo = v_ll + k_ratio * (v_lh - v_ll)
+    v_hi = v_hl + k_ratio * (v_hh - v_hl)
+    return v_lo + n_ratio * (v_hi - v_lo)
 
 
 def _lookup_overhead_us(
@@ -151,6 +211,7 @@ def install_arrival_delay(scheduler: "Scheduler") -> bool:
     scheduler._emu_pending_arrivals: list[tuple[float, Any]] = []  # type: ignore[attr-defined]
     scheduler._emu_overhead_table = table  # type: ignore[attr-defined]
     agg = os.environ.get(IPC_OVERHEAD_AGG_ENV, "median").lower()
+    scheduler._emu_overhead_agg = agg  # type: ignore[attr-defined]
     # Deterministic RNG seeded by env so runs are reproducible.
     scheduler._emu_overhead_rng = (  # type: ignore[attr-defined]
         random.Random(42) if agg == "sample" else None
@@ -174,10 +235,19 @@ def install_arrival_delay(scheduler: "Scheduler") -> bool:
                 + len(self.waiting)
                 + len(self.skipped_waiting)
                 + len(self._emu_pending_arrivals))
-        overhead_us = _lookup_overhead_us(
-            self._emu_overhead_table, max(conc, 1),
-            rng=self._emu_overhead_rng,
-        )
+        if self._emu_overhead_agg == "2d-burst":
+            # burst_k = pending arrivals already waiting PLUS this new one.
+            # Models the clustered-burst IPC contention effect that v1 sweep
+            # could not measure (it only injected 1 new request at a time).
+            k_burst = len(self._emu_pending_arrivals) + 1
+            overhead_us = _lookup_overhead_us_2d(
+                self._emu_overhead_table, max(conc, 1), max(k_burst, 1),
+            )
+        else:
+            overhead_us = _lookup_overhead_us(
+                self._emu_overhead_table, max(conc, 1),
+                rng=self._emu_overhead_rng,
+            )
         admission_time = time.perf_counter() + overhead_us / 1e6
         self._emu_pending_arrivals.append((admission_time, request))
 
