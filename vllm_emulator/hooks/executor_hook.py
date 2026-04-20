@@ -102,10 +102,14 @@ class ExecutorEmulatorHook:
                 print("[ExecutorEmulatorHook] pyinstrument not installed")
 
         # Per-step trace (enabled by VLLM_EMULATOR_HOOK_TRACE=<path>)
+        # Line-buffered so content survives SIGKILL (pkill -9) from cleanup
+        # scripts — the prior default-buffered path lost the file content
+        # on April 20 Phase 1 Q3 diagnostic. `buffering=1` is line-buffered
+        # for text-mode writes.
         self._trace_file = None
         trace_path = os.environ.get("VLLM_EMULATOR_HOOK_TRACE", "")
         if trace_path:
-            self._trace_file = open(trace_path, "w")
+            self._trace_file = open(trace_path, "w", buffering=1)
             self._trace_file.write(
                 "step,wall_s,tt,n_reqs,n_decode,n_new,has_prefill,"
                 "oracle_us,timer_delay_us\n")
