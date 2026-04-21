@@ -54,12 +54,21 @@ def main():
         sys.exit(f"IPC table at {ipc_path} has no cells; refusing to merge "
                  "an empty sched_overhead_table.")
 
-    # Validate every cell has the keys oracle/hook rely on.
+    # Validate + normalize: accept v1 schema ('overhead_us') and v3
+    # schema ('overhead_median_us'/'overhead_mean_us'). Canonicalize by
+    # filling 'overhead_us' from 'overhead_median_us' if missing. Mutates
+    # cells in place so the downstream oracle (which reads 'overhead_us')
+    # works for both sweep versions.
     for i, c in enumerate(cells):
         if "num_reqs" not in c:
             sys.exit(f"cell {i} missing 'num_reqs': {c}")
         if "overhead_us" not in c:
-            sys.exit(f"cell {i} missing 'overhead_us': {c}")
+            if "overhead_median_us" in c:
+                c["overhead_us"] = c["overhead_median_us"]
+            else:
+                sys.exit(
+                    f"cell {i} missing both 'overhead_us' and "
+                    f"'overhead_median_us': {c}")
 
     # Backup before overwriting.
     backup = profile_path.with_suffix(profile_path.suffix + ".bak")

@@ -91,6 +91,56 @@ def get_running_count(base_url: str) -> float:
     return -1
 
 
+def get_waiting_count(base_url: str) -> float:
+    """vllm:num_requests_waiting — backpressure signal.
+
+    Non-zero means the server cannot admit more requests right now
+    (typically KV-cache saturation). The bg-maintainer treats this
+    as "stop spawning" to avoid thread-leak when target concurrency
+    is unachievable on the hardware/profile."""
+    m = get_metric_gauges(base_url)
+    return m.get("vllm:num_requests_waiting", -1)
+
+
+def get_generation_tokens_total(base_url: str) -> float:
+    """vllm:generation_tokens_total — monotonic counter of decode
+    tokens produced. Used to detect 'bg reached decode phase' by
+    observing increments across polls; replaces v1's magic 3s dwell
+    with a semantic signal ('bg are past prefill, producing tokens')."""
+    m = get_metric_gauges(base_url)
+    return m.get("vllm:generation_tokens_total", -1)
+
+
+def wait_for_decode_phase(base_url: str, target_running: int,
+                          stable_polls: int, poll_s: float,
+                          timeout_s: float = 60) -> bool:
+    """Wait until (1) running count == target_running for stable_polls
+    consecutive polls AND (2) generation_tokens_total is strictly
+    increasing between the last two polls — meaning all backgrounds
+    are past prefill and actively decoding.
+
+    This replaces v1's `time.sleep(3.0)` dwell with a phase-aware
+    condition. v1's magic 3s was SEMANTIC (ensure bg are in decode
+    so measurement TTFT reflects pure IPC, not IPC + prefill contention);
+    we reproduce that semantic via /metrics polling, not timing."""
+    start = time.time()
+    stable_ct = 0
+    prev_tok = -1.0
+    while time.time() - start < timeout_s:
+        running = get_running_count(base_url)
+        tok = get_generation_tokens_total(base_url)
+        tokens_advancing = prev_tok >= 0 and tok > prev_tok
+        if running == target_running and tokens_advancing:
+            stable_ct += 1
+            if stable_ct >= stable_polls:
+                return True
+        else:
+            stable_ct = 0
+        prev_tok = tok
+        time.sleep(poll_s)
+    return False
+
+
 def wait_for_running_at_least(base_url: str, target: int,
                                poll_s: float, timeout_s: float = 120) -> bool:
     """Spin until vLLM reports running >= target. Returns True on success."""
@@ -152,42 +202,76 @@ def wait_for_at_most(base_url: str, max_val: int,
 
 
 def start_bg_maintainer(base_url: str, model: str, target_count: int,
-                        stop_event, poll_s: float):
-    """Daemon that keeps vllm:num_requests_running >= target_count by
-    spawning new background requests when the count drops below target.
+                        stop_event, poll_s: float,
+                        max_spawn_cap: int | None = None):
+    """Daemon that keeps vllm:num_requests_running close to target_count by
+    spawning new background requests when count drops below target, with
+    two backpressure safeguards to prevent thread leaks when target is
+    unachievable (e.g. KV-cache saturation below target concurrency):
 
-    All spawned threads are `daemon=True` so they die on process exit and
-    never block Python shutdown. Used to keep IPC overhead measurements
-    at the intended N even when a specific bg request expires mid-sweep.
+      1. Waiting-queue gate: if vllm:num_requests_waiting > 0, the server
+         cannot admit more — stop spawning and let existing bg drain or
+         the queue clear. This is a SERVER-SIDE signal, not a timing guess.
+
+      2. Hard spawn cap: never spawn more than max_spawn_cap total bg
+         requests for a single N (default: 2 * target_count + 20, a safety
+         bound not a performance-tuned knob). Prevents thread accumulation
+         when running stays pinned below target for structural reasons.
+
+    All spawned threads are daemon=True so they die on process exit.
+    Returns the maintainer thread (also a daemon).
     """
+    if max_spawn_cap is None:
+        max_spawn_cap = target_count * 2 + 20
+
     def _loop():
+        spawned = 0
         while not stop_event.is_set():
             try:
                 c = get_running_count(base_url)
+                w = get_waiting_count(base_url)
             except Exception:
-                c = -1
-            if 0 <= c < target_count:
+                c, w = -1, -1
+
+            # Spawn only when: server isn't backpressured AND we haven't
+            # hit the safety cap AND we're below target running count.
+            if (0 <= c < target_count
+                    and w <= 0
+                    and spawned < max_spawn_cap):
                 t = threading.Thread(
                     target=send_background_request,
                     args=(base_url, model),
                     daemon=True,
                 )
                 t.start()
-                # brief admission wait so we don't flood
-                wait_for_running_at_least(base_url, c + 1, poll_s,
-                                           timeout_s=5)
+                spawned += 1
+                # Best-effort admission wait so the next tick sees the
+                # updated running count. Bounded by caller's poll cadence.
+                wait_for_running_at_least(base_url, int(c) + 1, poll_s,
+                                           timeout_s=2)
             time.sleep(poll_s)
     mt = threading.Thread(target=_loop, daemon=True)
     mt.start()
     return mt
 
 
-def send_background_request(base_url: str, model: str):
+def send_background_request(base_url: str, model: str,
+                             max_tokens: int = 4096):
+    """Spawn a background decode request.
+
+    max_tokens=4096 + ignore_eos=True: bg stays in decode for the
+    entire measurement window (typically ~30s). This matches v1's
+    semantic intent without v1's magic 3s dwell — instead of timing,
+    we choose bg duration long enough to span any measurement budget.
+    The caller is responsible for closing/awaiting these at sweep end.
+    """
     try:
         requests.post(
             f"{base_url}/v1/completions",
             json={"model": model, "prompt": "background " * 40,
-                  "max_tokens": 128, "temperature": 0},
+                  "max_tokens": max_tokens,
+                  "ignore_eos": True,
+                  "temperature": 0},
             timeout=300,
         )
     except Exception:
@@ -278,18 +362,33 @@ def main():
             cur = get_running_count(base_url)
             print(f"  WARN: server not quiet before N={n} (running={cur})")
 
-        # Start a bg maintainer daemon: it keeps running count >= N-1 by
-        # spawning fresh bg requests whenever older ones expire. This removes
-        # the brittle dependency on max_tokens being "large enough" — we
-        # don't tune max_tokens per hardware; the maintainer refills instead.
-        stop_event = threading.Event()
-        bg_threads = []  # kept for compatibility with post-sweep drain
+        # Spawn N-1 long-lived backgrounds (max_tokens=4096 + ignore_eos)
+        # once, rather than continuously maintaining. This matches v1's
+        # semantic (static decode-heavy bg pool during measurement) but
+        # replaces v1's magic 3s dwell with phase-aware /metrics polling.
+        stop_event = threading.Event()  # unused; kept for downstream API
+        bg_threads = []
         if n > 1:
-            start_bg_maintainer(base_url, args.model, n - 1, stop_event, poll_s)
-            # Wait until maintainer has brought running up to N-1.
-            if not wait_for_running_at_least(base_url, n - 1, poll_s, timeout_s=60):
+            for i in range(n - 1):
+                t = threading.Thread(
+                    target=send_background_request,
+                    args=(base_url, args.model),
+                    daemon=True,
+                )
+                t.start()
+                bg_threads.append(t)
+                # Short wait for admission; short timeout so we don't stall
+                # forever when KV cache saturates and requests queue.
+                if not wait_for_running_at_least(base_url, min(i + 1, int(get_running_count(base_url)) + 1),
+                                                  poll_s, timeout_s=3):
+                    pass
+            # Wait for scheduler to stabilise at achievable concurrency AND
+            # for bg to transition into decode phase (generation_tokens_total
+            # actively increasing). Replaces v1's time.sleep(3.0) dwell.
+            if not wait_for_decode_phase(base_url, int(get_running_count(base_url)),
+                                          args.stable_polls, poll_s, timeout_s=30):
                 cur = get_running_count(base_url)
-                print(f"  WARN: maintainer didn't reach {n-1} (running={cur}) for N={n}")
+                print(f"  WARN: did not observe decode phase at N={n} (running={cur})")
 
         # Measurement samples for each burst-k.
         for k in BURST_KS:
@@ -319,10 +418,19 @@ def main():
                 mean_all = sum(all_ttfts) / len(all_ttfts)
                 oh_med = max(0.0, median_all - prefill_step_us)
                 oh_mean = max(0.0, mean_all - prefill_step_us)
+                # Record effective running count at measurement (may be <
+                # labeled N when maintainer couldn't reach target — tells
+                # downstream "labeled N=100 was actually N_eff=23").
+                effective_running = int(get_running_count(base_url))
                 results.append({
                     "num_reqs": n,
+                    "effective_num_reqs": effective_running,
                     "burst_k": k,
                     "samples": cell_samples,
+                    # Primary lookup key 'overhead_us' = median (canonical
+                    # choice matching v1 schema). median + mean retained
+                    # for downstream aggregation switching.
+                    "overhead_us": round(oh_med, 0),
                     "overhead_median_us": round(oh_med, 0),
                     "overhead_mean_us": round(oh_mean, 0),
                     "median_ttft_us": round(median_all, 0),
@@ -331,6 +439,7 @@ def main():
                     "prefill_step_us": round(prefill_step_us, 0),
                 })
                 print(f"  N={n:4d} k={k:2d}: n={len(all_ttfts):3d} "
+                      f"running_eff={effective_running} "
                       f"median={median_all/1000:5.1f}ms "
                       f"oh_med={oh_med/1000:5.1f}ms")
 
