@@ -76,10 +76,19 @@ class ProfileNetworkCostOracle(BaseNetworkCostOracle):
             
         Returns:
             Interpolated latency in microseconds.
+
+        Raises:
+            RuntimeError: if `samples` is empty. Callers must provide profiled
+                samples; no silent-zero fallback.
         """
         if not samples:
-            return 0.0
-        
+            raise RuntimeError(
+                f"ProfileNetworkCostOracle._interpolate called with empty samples "
+                f"for key '{x_key}'. Profile pack is missing required network "
+                f"measurements for the requested topology/operation. Refusing to "
+                f"fabricate a zero-latency fallback."
+            )
+
         # Extract x values
         x_values = [s[x_key] for s in samples]
         
@@ -116,10 +125,18 @@ class ProfileNetworkCostOracle(BaseNetworkCostOracle):
             
         Returns:
             Interpolated latency in microseconds.
+
+        Raises:
+            RuntimeError: if `samples` is empty.
         """
         if not samples:
-            return 0.0
-        
+            raise RuntimeError(
+                f"ProfileNetworkCostOracle._interpolate_2d called with empty "
+                f"samples for keys '{x_key}', '{y_key}'. Profile pack is missing "
+                f"required all-reduce measurements. Refusing to fabricate a "
+                f"zero-latency fallback."
+            )
+
         # Group by x (bytes)
         by_bytes: dict[int, list[dict]] = {}
         for s in samples:
@@ -155,28 +172,22 @@ class ProfileNetworkCostOracle(BaseNetworkCostOracle):
         world_size: int,
         topology: NetworkTopology,
     ) -> float:
-        """Estimate all-reduce latency via interpolation."""
+        """Estimate all-reduce latency via interpolation.
+
+        Raises RuntimeError if the profile pack has no samples for the
+        requested topology — no magic-bandwidth fallbacks.
+        """
         samples = self._all_reduce_samples.get(topology, [])
-        
+
         if not samples:
-            # Default estimates based on typical GPU interconnect bandwidths
-            if topology == NetworkTopology.NVLINK:
-                # ~900 GB/s per link, ~600 GB/s aggregate
-                base_latency = 5.0  # us fixed overhead
-                bw_latency = (num_bytes / (600 * 1e9)) * 1e6
-            elif topology == NetworkTopology.INFINIBAND:
-                # ~400 GB/s HDR
-                base_latency = 10.0
-                bw_latency = (num_bytes / (400 * 1e9)) * 1e6
-            else:  # PCIe
-                # ~32 GB/s Gen4 x16
-                base_latency = 15.0
-                bw_latency = (num_bytes / (32 * 1e9)) * 1e6
-            
-            # Scale with world_size (log2 reduction tree depth)
-            scale = (world_size - 1).bit_length()
-            return base_latency + bw_latency * scale
-        
+            raise RuntimeError(
+                f"ProfileNetworkCostOracle.get_all_reduce_latency_us called but "
+                f"profile pack has no 'all_reduce.{topology.name.lower()}' "
+                f"samples. Capture all-reduce profile data for this topology "
+                f"before enabling multi-GPU emulation, or disable it. Refusing "
+                f"to fabricate a bandwidth-model fallback."
+            )
+
         return self._interpolate_2d(samples, "bytes", "world_size", float(num_bytes), float(world_size))
 
     def get_send_latency_us(
@@ -186,11 +197,15 @@ class ProfileNetworkCostOracle(BaseNetworkCostOracle):
     ) -> float:
         """Estimate send latency via interpolation."""
         samples = self._send_samples.get(topology, [])
-        
+
         if not samples:
-            # Default: bandwidth-based estimate with overhead
-            return self._default_p2p_latency(num_bytes, topology)
-        
+            raise RuntimeError(
+                f"ProfileNetworkCostOracle.get_send_latency_us called but "
+                f"profile pack has no 'send_recv.{topology.name.lower()}' "
+                f"samples. Capture P2P send profile data for this topology "
+                f"before enabling multi-GPU emulation, or disable it."
+            )
+
         return self._interpolate(samples, "bytes", float(num_bytes))
 
     def get_recv_latency_us(
@@ -200,10 +215,15 @@ class ProfileNetworkCostOracle(BaseNetworkCostOracle):
     ) -> float:
         """Estimate receive latency via interpolation."""
         samples = self._recv_samples.get(topology, [])
-        
+
         if not samples:
-            return self._default_p2p_latency(num_bytes, topology)
-        
+            raise RuntimeError(
+                f"ProfileNetworkCostOracle.get_recv_latency_us called but "
+                f"profile pack has no 'send_recv.{topology.name.lower()}' "
+                f"samples. Capture P2P recv profile data for this topology "
+                f"before enabling multi-GPU emulation, or disable it."
+            )
+
         return self._interpolate(samples, "bytes", float(num_bytes))
 
     def get_kv_transfer_latency_us(
@@ -219,33 +239,23 @@ class ProfileNetworkCostOracle(BaseNetworkCostOracle):
         are active (bandwidth contention).
         """
         samples = self._kv_transfer_samples.get(topology, [])
-        
+
         if not samples:
-            base_latency = self._default_p2p_latency(num_bytes, topology)
-        else:
-            base_latency = self._interpolate(samples, "bytes", float(num_bytes))
-        
+            raise RuntimeError(
+                f"ProfileNetworkCostOracle.get_kv_transfer_latency_us called but "
+                f"profile pack has no 'kv_transfer.{topology.name.lower()}' "
+                f"samples. Capture KV-transfer profile data for this topology "
+                f"before enabling multi-GPU emulation, or disable it."
+            )
+
+        base_latency = self._interpolate(samples, "bytes", float(num_bytes))
+
         # Scale for concurrency (bandwidth contention model)
         if concurrency > 1:
             scale_factor = (concurrency ** 0.5)
             base_latency *= scale_factor
-        
-        return base_latency
 
-    def _default_p2p_latency(self, num_bytes: int, topology: NetworkTopology) -> float:
-        """Default P2P latency estimate based on interconnect bandwidth."""
-        if topology == NetworkTopology.NVLINK:
-            bw_gbps = 900  # per link
-            overhead_us = 2.0
-        elif topology == NetworkTopology.INFINIBAND:
-            bw_gbps = 400
-            overhead_us = 5.0
-        else:  # PCIe
-            bw_gbps = 32
-            overhead_us = 8.0
-        
-        bw_latency = (num_bytes / (bw_gbps * 1e9)) * 1e6
-        return overhead_us + bw_latency
+        return base_latency
 
 
 def create_network_oracle_from_profile_pack(profile_pack: dict[str, Any]) -> ProfileNetworkCostOracle:

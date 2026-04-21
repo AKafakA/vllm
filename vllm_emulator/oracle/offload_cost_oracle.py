@@ -32,13 +32,22 @@ class ProfileOffloadCostOracle(BaseOffloadCostOracle):
         self._evict_samples = profile_pack.get("evict", [])
 
     def get_lookup_latency_us(self, num_blocks: int) -> float:
-        """Estimate latency for looking up offloaded blocks via interpolation."""
+        """Estimate latency for looking up offloaded blocks via interpolation.
+
+        Raises RuntimeError if the profile pack has no `lookup` samples — the
+        emulator must refuse to predict rather than silently return a fabricated
+        latency (see project rule: no magic numbers, no silent degradation).
+        """
         samples = self._lookup_samples
-        
+
         if not samples:
-            # Default: ~10us per block
-            return num_blocks * 10.0
-        
+            raise RuntimeError(
+                "ProfileOffloadCostOracle.get_lookup_latency_us called but profile "
+                "pack has no 'lookup' samples. Capture offload lookup profile data "
+                "before enabling this oracle, or disable it. Refusing to fabricate "
+                "a fallback latency."
+            )
+
         block_counts = [s["num_blocks"] for s in samples]
         
         if num_blocks <= block_counts[0]:
@@ -69,13 +78,19 @@ class ProfileOffloadCostOracle(BaseOffloadCostOracle):
         """
         if direction == TransferDirection.CPU_TO_GPU:
             samples = self._cpu_to_gpu_samples
+            direction_name = "cpu_to_gpu"
         else:
             samples = self._gpu_to_cpu_samples
-        
+            direction_name = "gpu_to_cpu"
+
         if not samples:
-            # Default: ~100us per MB
-            return (num_bytes / 1_048_576) * 100.0
-        
+            raise RuntimeError(
+                f"ProfileOffloadCostOracle.get_transfer_latency_us called but "
+                f"profile pack has no 'transfer.{direction_name}' samples. "
+                f"Capture offload transfer profile data before enabling this "
+                f"oracle, or disable it. Refusing to fabricate a fallback."
+            )
+
         byte_counts = [s["bytes"] for s in samples]
         
         if num_bytes <= byte_counts[0]:
@@ -103,13 +118,19 @@ class ProfileOffloadCostOracle(BaseOffloadCostOracle):
         return base_latency
 
     def get_evict_latency_us(self, num_blocks: int) -> float:
-        """Estimate eviction latency via interpolation."""
+        """Estimate eviction latency via interpolation.
+
+        Raises RuntimeError if the profile pack has no `evict` samples.
+        """
         samples = self._evict_samples
-        
+
         if not samples:
-            # Default: ~5us per block
-            return num_blocks * 5.0
-        
+            raise RuntimeError(
+                "ProfileOffloadCostOracle.get_evict_latency_us called but profile "
+                "pack has no 'evict' samples. Capture offload evict profile data "
+                "before enabling this oracle, or disable it."
+            )
+
         block_counts = [s["num_blocks"] for s in samples]
         
         if num_blocks <= block_counts[0]:

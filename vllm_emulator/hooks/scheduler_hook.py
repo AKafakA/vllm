@@ -30,7 +30,15 @@ if TYPE_CHECKING:
 
 SCHEDULER_HOOK_ENV = "VLLM_EMULATOR_SCHEDULER_HOOK"
 PROFILE_PACK_ENV = "VLLM_EMULATOR_PROFILE_PACK"
-IPC_OVERHEAD_AGG_ENV = "VLLM_IPC_OVERHEAD_AGG"  # "median"|"mean"|"sample"|"2d-burst"
+IPC_OVERHEAD_AGG_ENV = "VLLM_IPC_OVERHEAD_AGG"  # "median"|"mean"|"sample"|"2d-burst"|"2d-burst-tight"
+
+# Tight burst window is derived from the profile's measured prefill step
+# duration: arrivals that land within one scheduler iteration worth of
+# each other are co-batched by the real engine, hence share one IPC
+# setup cycle. Using the prefill_step_us from sched_overhead_table (per-N
+# baseline recorded at sweep time) keeps this profile-driven — no magic
+# number. At install time, the hook reads the min prefill_step_us across
+# N entries and uses it as the window (conservative / tight).
 
 
 def _load_overhead_table() -> list[dict[str, Any]]:
@@ -58,12 +66,12 @@ def _load_overhead_table() -> list[dict[str, Any]]:
         with open(path) as f:
             pack = json.load(f)
         agg = os.environ.get(IPC_OVERHEAD_AGG_ENV, "median").lower()
-        if agg not in ("median", "mean", "sample", "2d-burst"):
+        if agg not in ("median", "mean", "sample", "2d-burst", "2d-burst-tight"):
             raise ValueError(
                 f"{IPC_OVERHEAD_AGG_ENV} must be one of "
-                f"median|mean|sample|2d-burst, got {agg!r}")
+                f"median|mean|sample|2d-burst|2d-burst-tight, got {agg!r}")
 
-        if agg == "2d-burst":
+        if agg in ("2d-burst", "2d-burst-tight"):
             raw_v2 = pack.get("sched_overhead_table_v2") or []
             if not raw_v2:
                 raise ValueError(
@@ -201,17 +209,63 @@ def install_arrival_delay(scheduler: "Scheduler") -> bool:
     if os.environ.get(SCHEDULER_HOOK_ENV, "").lower() not in ("1", "true", "yes"):
         return False
 
+    # Gate: scheduler arrival-delay path only installs when IPC_POSITION
+    # is "arrival" (default). When set to "response", the oracle handles
+    # IPC overhead as an additive on prefill-step latency instead, and
+    # the scheduler hook would double-count. When "disabled", no IPC.
+    ipc_position = os.environ.get(
+        "VLLM_EMULATOR_IPC_POSITION", "arrival").lower()
+    if ipc_position != "arrival":
+        print(f"[SchedulerHook] VLLM_EMULATOR_IPC_POSITION={ipc_position} — "
+              f"skipping arrival-delay install. Oracle handles IPC instead.")
+        return False
+
     table = _load_overhead_table()
     if not table:
         print(f"[SchedulerHook] {SCHEDULER_HOOK_ENV}=1 but profile pack has no "
               f"sched_overhead_table — no-op.")
         return False
 
-    # Pending arrivals: list of (admission_time_s, Request).
-    scheduler._emu_pending_arrivals: list[tuple[float, Any]] = []  # type: ignore[attr-defined]
+    # Pending arrivals: list of (admission_time_s, Request, arrival_time_s).
+    scheduler._emu_pending_arrivals: list[tuple] = []  # type: ignore[attr-defined]
     scheduler._emu_overhead_table = table  # type: ignore[attr-defined]
     agg = os.environ.get(IPC_OVERHEAD_AGG_ENV, "median").lower()
     scheduler._emu_overhead_agg = agg  # type: ignore[attr-defined]
+
+    # Burst window for 2d-burst-tight: one prefill-step duration.
+    # Read prefill_step_us from the profile pack's original v1 table
+    # (saved per-entry by profile_ipc_overhead.py). No magic constants.
+    prefill_step_us = 0
+    if agg == "2d-burst-tight":
+        profile_path = os.environ.get(PROFILE_PACK_ENV, "")
+        try:
+            with open(profile_path) as f:
+                pack = json.load(f)
+            for e in pack.get("sched_overhead_table") or []:
+                if e.get("prefill_step_us"):
+                    prefill_step_us = float(e["prefill_step_us"])
+                    break
+        except Exception as exc:
+            # Loud failure: 2d-burst-tight needs prefill_step_us to define
+            # its burst window. Silently falling back to zero turns this
+            # mode into plain 2d-burst without the user noticing.
+            raise RuntimeError(
+                f"scheduler_hook: VLLM_IPC_OVERHEAD_AGG=2d-burst-tight "
+                f"requires a profile pack at VLLM_EMULATOR_PROFILE_PACK with "
+                f"sched_overhead_table containing prefill_step_us; could not "
+                f"load '{profile_path}': {type(exc).__name__}: {exc}"
+            ) from exc
+        if prefill_step_us <= 0:
+            raise RuntimeError(
+                f"scheduler_hook: 2d-burst-tight requires a non-zero "
+                f"prefill_step_us from the profile pack's sched_overhead_table "
+                f"(checked '{profile_path}'); found zero or missing. Rebuild "
+                f"the profile or switch VLLM_IPC_OVERHEAD_AGG away from "
+                f"2d-burst-tight."
+            )
+    scheduler._emu_burst_window_s = (  # type: ignore[attr-defined]
+        prefill_step_us / 1e6 if prefill_step_us > 0 else 0.0
+    )
     # Deterministic RNG seeded by env so runs are reproducible.
     scheduler._emu_overhead_rng = (  # type: ignore[attr-defined]
         random.Random(42) if agg == "sample" else None
@@ -236,20 +290,42 @@ def install_arrival_delay(scheduler: "Scheduler") -> bool:
                 + len(self.skipped_waiting)
                 + len(self._emu_pending_arrivals))
         if self._emu_overhead_agg == "2d-burst":
-            # burst_k = pending arrivals already waiting PLUS this new one.
-            # Models the clustered-burst IPC contention effect that v1 sweep
-            # could not measure (it only injected 1 new request at a time).
+            # burst_k = ALL pending arrivals (pipelined count).
             k_burst = len(self._emu_pending_arrivals) + 1
             overhead_us = _lookup_overhead_us_2d(
                 self._emu_overhead_table, max(conc, 1), max(k_burst, 1),
+            )
+        elif self._emu_overhead_agg == "2d-burst-tight":
+            # burst_k = only pending arrivals whose ARRIVAL was within
+            # BURST_WINDOW_S of now. Matches the sweep's semantics of
+            # k simultaneous new arrivals contending for one IPC cycle.
+            # pending_arrivals stores (admission_time, request, arrival_time)
+            # in this mode.
+            now_ts = time.perf_counter()
+            window_s = self._emu_burst_window_s
+            if window_s <= 0:
+                # No profile-derived window available — fall back to
+                # behaviour identical to 2d-burst (pipelined count).
+                k_burst_tight = len(self._emu_pending_arrivals) + 1
+            else:
+                k_burst_tight = sum(
+                    1 for entry in self._emu_pending_arrivals
+                    if len(entry) >= 3 and (now_ts - entry[2]) <= window_s
+                ) + 1
+            overhead_us = _lookup_overhead_us_2d(
+                self._emu_overhead_table, max(conc, 1), max(k_burst_tight, 1),
             )
         else:
             overhead_us = _lookup_overhead_us(
                 self._emu_overhead_table, max(conc, 1),
                 rng=self._emu_overhead_rng,
             )
-        admission_time = time.perf_counter() + overhead_us / 1e6
-        self._emu_pending_arrivals.append((admission_time, request))
+        arrival_ts = time.perf_counter()
+        admission_time = arrival_ts + overhead_us / 1e6
+        # Store (admission_time, request, arrival_time) for tight-burst
+        # mode. Drain logic reads admission_time from index 0, request from
+        # index 1 — third element is mode-specific.
+        self._emu_pending_arrivals.append((admission_time, request, arrival_ts))
 
     def _drain_pending(self) -> None:
         """Move requests whose admission time has passed into waiting."""
@@ -257,11 +333,13 @@ def install_arrival_delay(scheduler: "Scheduler") -> bool:
             return
         now = time.perf_counter()
         remaining = []
-        for admission_time, request in self._emu_pending_arrivals:
+        for entry in self._emu_pending_arrivals:
+            admission_time = entry[0]
+            request = entry[1]
             if admission_time <= now:
                 orig_add_request(self, request)
             else:
-                remaining.append((admission_time, request))
+                remaining.append(entry)
         self._emu_pending_arrivals = remaining
 
     def _patched_schedule(self, *args, **kwargs):
@@ -282,9 +360,14 @@ def install_arrival_delay(scheduler: "Scheduler") -> bool:
         _patched_get_num_unfinished, scheduler)
 
 
-    agg = os.environ.get(IPC_OVERHEAD_AGG_ENV, "median").lower()
+    agg_printed = os.environ.get(IPC_OVERHEAD_AGG_ENV, "median").lower()
+    window_msg = ""
+    if agg_printed == "2d-burst-tight":
+        w_ms = scheduler._emu_burst_window_s * 1000
+        window_msg = f", burst_window={w_ms:.1f}ms (= profile prefill_step_us)"
     print(f"[SchedulerHook] arrival-delay installed "
-          f"({len(table)} overhead-table entries, agg={agg}, "
+          f"({len(table)} overhead-table entries, agg={agg_printed}, "
           f"min={table[0].get('overhead_us', 0)/1000:.1f}ms, "
-          f"max={table[-1].get('overhead_us', 0)/1000:.1f}ms)")
+          f"max={table[-1].get('overhead_us', 0)/1000:.1f}ms"
+          f"{window_msg})")
     return True

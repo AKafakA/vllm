@@ -81,6 +81,7 @@ class ExecutorEmulatorHook:
         self._last_surrogate_time_s = 0.0  # Surrogate wall-clock from latest step
         self._sample_tokens_delay_s = 0.0  # F3: profiled sample-tokens time (default off)
         self._parallel_surrogate_enabled = False  # F2: default off, bit-identical off-path
+        self._surrogate_fail_count = 0  # cumulative; logged when non-zero
 
         # Fake output generation
         self._rng = __import__("random").Random(42)
@@ -302,6 +303,29 @@ class ExecutorEmulatorHook:
                                       total_tokens, scheduler_output,
                                       surr_fut=surr_fut)
 
+    def _join_surrogate_future(self, surr_fut) -> None:
+        """Join the F2 parallel-surrogate Future and update persistence state.
+
+        Loud-failure policy: if the surrogate raises, log the event, increment
+        the fail counter, and keep the prior `_last_surrogate_time_s` — the
+        persistence forecast still works but operators see the degradation
+        rather than it being silently swallowed.
+        """
+        try:
+            measured = surr_fut.result()
+            if measured is not None:
+                self._last_surrogate_time_s = float(measured)
+        except Exception as e:
+            self._surrogate_fail_count += 1
+            print(
+                f"[ExecutorEmulatorHook] surrogate Future raised "
+                f"(fail_count={self._surrogate_fail_count}): "
+                f"{type(e).__name__}: {e}; "
+                f"keeping prior _last_surrogate_time_s="
+                f"{self._last_surrogate_time_s:.6f}s. Persistence forecast "
+                f"will degrade if this continues."
+            )
+
     def _handle_sync(self, latency_s: float, fake_output) -> None:
         """Sync engine: blocking sleep + direct output."""
         if self._emulator_mode == EMULATOR_MODE_REALTIME and latency_s >= 0.001:
@@ -341,14 +365,7 @@ class ExecutorEmulatorHook:
                         # Join surrogate Future, update persistence state,
                         # then resolve sample Future. Ordering invariant:
                         # sample Future never resolves before surrogate.
-                        try:
-                            measured = surr_fut.result()
-                            if measured is not None:
-                                self._last_surrogate_time_s = float(measured)
-                        except Exception:
-                            # If surrogate raised, keep prior prediction
-                            # (persistence forecast degrades gracefully).
-                            pass
+                        self._join_surrogate_future(surr_fut)
                         sample_fut.set_result(fake_output)
                     timer = threading.Timer(delay, _resolve_parallel)
                 else:
@@ -360,22 +377,12 @@ class ExecutorEmulatorHook:
                 # Below timer granularity: resolve immediately but still
                 # honour the ordering invariant when parallel.
                 if surr_fut is not None:
-                    try:
-                        measured = surr_fut.result()
-                        if measured is not None:
-                            self._last_surrogate_time_s = float(measured)
-                    except Exception:
-                        pass
+                    self._join_surrogate_future(surr_fut)
                 sample_fut.set_result(fake_output)
         else:
             # accelerated mode: resolve instantly (still honour ordering)
             if surr_fut is not None:
-                try:
-                    measured = surr_fut.result()
-                    if measured is not None:
-                        self._last_surrogate_time_s = float(measured)
-                except Exception:
-                    pass
+                self._join_surrogate_future(surr_fut)
             sample_fut.set_result(fake_output)
 
         self._sample_future = sample_fut

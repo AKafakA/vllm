@@ -141,7 +141,13 @@ class WorkerPrepSurrogate:
                 "seq_len": int(seq_lens[i]),
             }
 
-        _logprob_placeholder = np.random.random(num_reqs).astype(np.float32)
+        # Placeholder logprobs — the model doesn't read these, they exist only
+        # to match the output tensor shape/dtype profile. Use a deterministic
+        # numpy Generator seeded from the step counter so runs are bit-identical
+        # across reproductions (process-global np.random would otherwise diverge).
+        if not hasattr(self, "_logprob_rng"):
+            self._logprob_rng = np.random.default_rng(seed=0xC0FFEE)
+        _logprob_placeholder = self._logprob_rng.random(num_reqs, dtype=np.float32)
         _top_k = np.argsort(_logprob_placeholder)
 
         # Retire finished requests.

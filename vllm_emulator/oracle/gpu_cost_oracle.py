@@ -62,15 +62,55 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         # F5: kNN conditioning. K=1 (default) keeps the current nearest-
         # neighbor code path byte-identical. K>1 uses Shepard (1968) p=2
         # inverse-distance weighting over range-normalised (tt, conc) axes.
+        #
+        # "auto" mode: expand neighbour set per query until the cumulative
+        # sample count across included buckets reaches the statistical
+        # reliability floor M. This removes the K knob — sparse buckets
+        # pull from neighbours, dense buckets stay at K=1. M defaults to
+        # 30 (standard CLT-based aggregation reliability threshold), not
+        # tuned to data.
         k_env = os.environ.get("VLLM_EMULATOR_ORACLE_K", "1")
-        try:
-            self._oracle_k = int(k_env)
-        except (TypeError, ValueError):
+        self._oracle_k_mode = "fixed"
+        self._oracle_k_min_samples = 0
+        if k_env.lower() in ("auto", "adaptive"):
+            self._oracle_k_mode = "auto"
+            self._oracle_k = 1  # starting K; grows per query
+            m_env = os.environ.get("VLLM_EMULATOR_ORACLE_MIN_SAMPLES", "30")
+            try:
+                self._oracle_k_min_samples = int(m_env)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"VLLM_EMULATOR_ORACLE_MIN_SAMPLES must be an integer, "
+                    f"got {m_env!r}")
+            if self._oracle_k_min_samples < 1:
+                raise ValueError(
+                    f"VLLM_EMULATOR_ORACLE_MIN_SAMPLES must be >= 1, "
+                    f"got {self._oracle_k_min_samples}")
+        else:
+            try:
+                self._oracle_k = int(k_env)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"VLLM_EMULATOR_ORACLE_K must be an integer or "
+                    f"'auto'/'adaptive', got {k_env!r}")
+            if self._oracle_k < 1:
+                raise ValueError(
+                    f"VLLM_EMULATOR_ORACLE_K must be >= 1, got {self._oracle_k}")
+
+        # Response-side IPC injection: when set to "response", the oracle
+        # adds sched_overhead_table[num_requests] to any prefill-containing
+        # step's latency. This emulates the scheduler→worker IPC round-trip
+        # as a per-step cost (bookended by the prefill that first produces
+        # the token), rather than as an arrival-admission delay. Effect:
+        # queue dynamics match real vLLM (requests admitted immediately),
+        # TTFT is preserved in magnitude. Default "arrival" preserves the
+        # Apr-19 arrival-delay-hook behaviour in scheduler_hook.py.
+        self._ipc_position = os.environ.get(
+            "VLLM_EMULATOR_IPC_POSITION", "arrival").lower()
+        if self._ipc_position not in ("arrival", "response", "disabled"):
             raise ValueError(
-                f"VLLM_EMULATOR_ORACLE_K must be an integer, got {k_env!r}")
-        if self._oracle_k < 1:
-            raise ValueError(
-                f"VLLM_EMULATOR_ORACLE_K must be >= 1, got {self._oracle_k}")
+                f"VLLM_EMULATOR_IPC_POSITION must be 'arrival', 'response', "
+                f"or 'disabled'; got {self._ipc_position!r}")
 
         # User-configurable percentile trim on raw samples.
         # Format: "lo,hi" e.g. "2,98" trims bottom 2% and top 2%.
@@ -179,25 +219,37 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         table = self._sched_overhead_table
         if not table:
             return 0.0
+
+        # Validate required keys present in every entry — no magic defaults.
+        # A missing key means the profile pack is malformed and should be
+        # rebuilt, not silently treated as "N=256" or "overhead=0".
+        for idx, e in enumerate(table):
+            if "num_reqs" not in e or "overhead_us" not in e:
+                raise RuntimeError(
+                    f"sched_overhead_table entry {idx} missing required "
+                    f"keys 'num_reqs' / 'overhead_us'; got {list(e.keys())}. "
+                    f"Rebuild the profile pack via profile_ipc_overhead.py."
+                )
+
         # Exact match first.
         for e in table:
-            if e.get("num_reqs") == num_reqs:
-                return float(e.get("overhead_us", 0))
+            if e["num_reqs"] == num_reqs:
+                return float(e["overhead_us"])
         # Clamp below/above table range.
-        if num_reqs <= table[0].get("num_reqs", 1):
-            return float(table[0].get("overhead_us", 0))
-        if num_reqs >= table[-1].get("num_reqs", 256):
-            return float(table[-1].get("overhead_us", 0))
+        if num_reqs <= table[0]["num_reqs"]:
+            return float(table[0]["overhead_us"])
+        if num_reqs >= table[-1]["num_reqs"]:
+            return float(table[-1]["overhead_us"])
         # Linear interpolation between neighbouring table entries.
         for i in range(len(table) - 1):
-            n_lo = table[i].get("num_reqs", 0)
-            n_hi = table[i + 1].get("num_reqs", 0)
+            n_lo = table[i]["num_reqs"]
+            n_hi = table[i + 1]["num_reqs"]
             if n_lo <= num_reqs <= n_hi and n_hi > n_lo:
                 ratio = (num_reqs - n_lo) / (n_hi - n_lo)
-                o_lo = float(table[i].get("overhead_us", 0))
-                o_hi = float(table[i + 1].get("overhead_us", 0))
+                o_lo = float(table[i]["overhead_us"])
+                o_hi = float(table[i + 1]["overhead_us"])
                 return o_lo + ratio * (o_hi - o_lo)
-        return float(table[-1].get("overhead_us", 0))
+        return float(table[-1]["overhead_us"])
 
     def _aggregate(self, samples):
         """Return scalar latency for a sample array per the oracle agg mode.
@@ -242,6 +294,12 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             table = self._combined_2d_distribution
         else:
             return None
+
+        if self._oracle_k_mode == "auto":
+            return self._sample_knn_adaptive_2d(
+                table, total_tokens, num_requests,
+                min_samples=self._oracle_k_min_samples,
+            )
 
         if self._oracle_k > 1:
             return self._sample_knn_2d(table, total_tokens, num_requests)
@@ -312,6 +370,73 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         if raw:
             return self._aggregate(raw)
         return None
+
+    def _sample_knn_adaptive_2d(self, table, total_tokens, num_requests,
+                                 min_samples: int):
+        """Adaptive-K kNN: expand K until cumulative sample count across
+        included buckets reaches `min_samples`, then Shepard-weighted sample.
+
+        Sparse queries grow the neighbour set; dense queries hit their floor
+        immediately (K=1). No fixed-K knob; K derives from local density.
+
+        Returns None only if no bucket in `table` contains any samples.
+        """
+        keys = list(table.keys())
+        if not keys:
+            return None
+
+        tts = [k[0] for k in keys]
+        concs = [k[1] for k in keys]
+        tt_range = (max(tts) - min(tts)) or 1
+        conc_range = (max(concs) - min(concs)) or 1
+
+        def _dist(k):
+            dt = (k[0] - total_tokens) / tt_range
+            dc = (k[1] - num_requests) / conc_range
+            return (dt * dt + dc * dc) ** 0.5
+
+        ranked = sorted(((_dist(k), k) for k in keys), key=lambda x: x[0])
+
+        chosen = []
+        cum_samples = 0
+        for d, k in ranked:
+            n = len(table[k].get("samples") or [])
+            if n == 0:
+                continue
+            chosen.append((d, k))
+            cum_samples += n
+            if cum_samples >= min_samples:
+                break
+
+        if not chosen:
+            return None
+
+        # Exact-match hit — don't pool; return closest bucket's aggregate.
+        if chosen[0][0] == 0.0:
+            samples = table[chosen[0][1]].get("samples") or []
+            return self._aggregate(samples) if samples else None
+
+        # K=1 path when the nearest bucket already satisfies the floor:
+        # preserves byte-identical behaviour for dense queries.
+        if len(chosen) == 1:
+            samples = table[chosen[0][1]].get("samples") or []
+            return self._aggregate(samples) if samples else None
+
+        # Shepard p=2 inverse-distance-weighted draw among the collected buckets.
+        weights = [1.0 / (d * d) for d, _ in chosen]
+        total_w = sum(weights)
+        if total_w == 0:
+            return None
+        r = self._rng.random() * total_w
+        cum_w = 0.0
+        chosen_k = chosen[-1][1]
+        for (d, k), w in zip(chosen, weights):
+            cum_w += w
+            if r <= cum_w:
+                chosen_k = k
+                break
+        samples = table[chosen_k].get("samples") or []
+        return self._aggregate(samples) if samples else None
 
     def _sample_knn_2d(self, table, total_tokens, num_requests):
         """F5: K>1 Shepard p=2 kNN sampler over range-normalised (tt, conc)."""
@@ -404,11 +529,19 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             tt_query, max(num_requests, 1),
             has_prefill=has_prefill,
         )
-        if result is not None:
-            return result
+        if result is None:
+            result = 0.0
 
-        # No distribution data at all -- return 0 and let caller handle.
-        return 0.0
+        # Response-side IPC: when enabled, add sched_overhead_table lookup
+        # to prefill-containing steps. This is the IPC round-trip charged
+        # as a per-step cost instead of an arrival-admission delay. Only
+        # applied when has_prefill=True (the step that produces a new
+        # request's first token).
+        if self._ipc_position == "response" and has_prefill:
+            overhead_us = self._lookup_sched_overhead_us(max(num_requests, 1))
+            result = result + overhead_us
+
+        return result
 
 
 def create_oracle_from_profile_pack(

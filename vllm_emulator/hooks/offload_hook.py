@@ -29,20 +29,28 @@ EMULATOR_MODE_ACCELERATED = "accelerated"  # No blocking (virtual time)
 _MODE_ALIASES = {"online": EMULATOR_MODE_REALTIME, "offline": EMULATOR_MODE_ACCELERATED}
 
 
-# Default bytes per KV block (assuming block_size=16, num_kv_heads=8, head_size=128)
-DEFAULT_BYTES_PER_BLOCK = 16 * 8 * 128 * 2  # ~16KB per block (fp16)
-
-
 class OffloadWorkerHook:
     """Hook that intercepts offload worker execution for emulator cost estimation.
-    
+
     When enabled (via environment variables), this hook:
     1. Loads a profile pack from disk
     2. Creates an offload cost oracle
     3. Intercepts transfer_async() calls to estimate costs instead of running real transfers
+
+    `bytes_per_block` MUST be supplied by the caller — computed from the actual
+    model's block_size × num_kv_heads × head_size × dtype_bytes. There is no
+    default: a hardcoded default would silently mispredict transfer latency
+    whenever the model config differs from the hardcoded assumption.
     """
 
-    def __init__(self, worker: "OffloadingWorker", bytes_per_block: int = DEFAULT_BYTES_PER_BLOCK):
+    def __init__(self, worker: "OffloadingWorker", bytes_per_block: int):
+        if bytes_per_block is None or bytes_per_block <= 0:
+            raise ValueError(
+                "OffloadWorkerHook requires a positive bytes_per_block derived "
+                "from the running model's KV config (block_size × num_kv_heads "
+                "× head_size × dtype_bytes). A hardcoded default would silently "
+                "mispredict transfer latency."
+            )
         self._worker = worker
         self._bytes_per_block = bytes_per_block
         self._oracle: BaseOffloadCostOracle | None = None
@@ -193,15 +201,18 @@ class OffloadWorkerHook:
 
 
 def install_offload_worker_hook(
-    worker: "OffloadingWorker", 
-    bytes_per_block: int = DEFAULT_BYTES_PER_BLOCK
+    worker: "OffloadingWorker",
+    bytes_per_block: int,
 ) -> OffloadWorkerHook:
     """Install the offload worker hook onto an OffloadingWorker instance.
-    
+
     Args:
         worker: The OffloadingWorker to hook.
-        bytes_per_block: Number of bytes per KV block (default: ~16KB).
-        
+        bytes_per_block: Number of bytes per KV block, computed from the
+            running model's config (block_size × num_kv_heads × head_size ×
+            dtype_bytes). Required; no default, because a hardcoded default
+            silently mispredicts for models whose KV config differs.
+
     Returns:
         The installed hook instance.
     """
