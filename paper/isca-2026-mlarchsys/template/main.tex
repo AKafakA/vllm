@@ -1,0 +1,591 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage[hyphens]{url}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\newcommand{\sysname}{GhostServe}
+
+\begin{document}
+
+\pdfpagewidth=8.5in
+\pdfpageheight=11in
+
+\newcommand{\iscasubmissionnumber}{NaN}
+
+\pagenumbering{arabic}
+
+\title{\sysname{}: Profile-Driven Online Emulation of LLM Inference Serving Systems}
+\author{\normalsize{ISCA 2026 MLArchSys Workshop Submission
+    \textbf{\#\iscasubmissionnumber} -- Confidential Draft -- Do NOT Distribute!!}}
+
+\maketitle
+\thispagestyle{plain}
+\pagestyle{plain}
+
+\begin{abstract}
+Evaluating scheduling, batching, or capacity decisions on modern LLM
+serving engines typically requires the very GPUs those decisions are
+meant to conserve. Prior simulators are either offline and
+event-driven, hardware-coupled and closed-source, or analytical and
+miss the batch-composition dynamics that dominate per-step latency.
+We present \sysname{}, an online emulator that runs inside a stock
+vLLM process as a runtime plugin: the scheduler, HTTP stack,
+admission path, and output pipeline remain real; only the GPU
+forward pass is replaced by a profile-driven latency draw. The
+emulator is deliberately minimal --- a single density-aware oracle
+sampled on each step, and a timer-resolved Future that returns fake
+output tokens after the drawn delay --- with no hand-coded mirror of
+vLLM internal behaviour. Evaluated across three cells (Qwen2.5-3B on
+RTX~8000, Qwen3-8B on RTX~8000, Qwen3-8B on A10) with a
+ShareGPT-derived workload at request rates $r\in\{2,4,8,16,32\}$,
+\sysname{} tracks the real engine closely on time-to-first-token,
+time-per-output-token, inter-token latency, and end-to-end latency
+across all sixty (cell, rate, metric) entries. We
+discuss the methodology preconditions ---
+profile$\leftrightarrow$bench state match and
+profile$\leftrightarrow$workload shape match --- that make this
+achievable, and the limitations of high-level profile keying at the
+single-node regime we evaluate.
+\end{abstract}
+
+% ---------------------------------------------------------------------
+\section{Introduction}
+% ---------------------------------------------------------------------
+
+Continuous-batching LLM serving engines~\cite{kwon2023vllm,yu2022orca}
+are the dominant execution substrate for production inference, and
+most open research questions on LLM serving---scheduler
+design~\cite{agrawal2024sarathi}, prefill-decode
+disaggregation~\cite{zhong2024distserve,patel2024splitwise},
+replication and placement~\cite{li2023alpaserve,sun2024llumnix},
+capacity planning~\cite{patel2024polca}---are phrased as ``what
+happens if we change \textit{this} policy?'' Answering such questions
+on the real engine consumes the same GPU capacity the policy is
+trying to conserve.
+
+Existing alternatives each miss part of the problem. Event-driven
+simulators~\cite{agrawal2024vidur,cho2024llmservingsim,
+nvidia2026aiconfigurator} re-implement the scheduler and model
+forward-pass cost from per-operator latency databases; they lag the
+rapidly evolving serving-engine codebase and re-express its policies
+in a parallel implementation that must be kept consistent by hand.
+Recent emulator work~\cite{agrawal2026revati} addresses the
+maintenance burden explicitly via CUDA-API interception, but remains
+tied to a fixed hardware profile matrix and requires per-framework
+patches. All three approaches ship with a finite supported-device
+list (most commonly H100/A100 SXM); the consumer-tier and mid-tier
+accelerators (RTX, A10, L40S) typical of research and small-scale
+deployment fall outside their matrices.
+
+We occupy a different point in the design space: a
+\emph{serving-native} emulator that runs inside a stock vLLM process,
+accepts real HTTP traffic, and replaces only the GPU forward pass
+with a profile-driven latency draw. The scheduler, tokenizer,
+admission path, HTTP layer, output pipeline, and metrics endpoint
+are all vLLM's own code, unchanged. Only the forward pass is faked.
+
+This positioning is conceptually simple but difficult to make
+accurate. Two classes of methodology bug consistently invalidate
+naive implementations: profile captures that contaminate per-rate
+statistics through accumulated server state, and emulator-vs.-real
+validations that compare subtly different workloads. A third, more
+subtle, trap is the temptation to add compensating ``mirror'' code
+that mimics vLLM's internal behaviour on the emulator side---scheduler
+admission proxies, CPU-side bookkeeping reimplementations---because
+they appear to reduce error against a specific workload. We show that
+such mirrors accumulate workload-specific biases that invert when the
+workload shape changes, and that a profile-driven design can avoid
+them entirely.
+
+\sysname{}'s design is minimal: a density-aware oracle whose pooling
+radius grows only where sample density is insufficient for a reliable
+estimate, and a timer-resolved Future that returns fake output tokens
+after the oracle's predicted delay. Across three cells covering three
+model scales and two GPU classes at request rates
+$r\in\{2,4,8,16,32\}$, this suffices: every (cell, rate, metric)
+entry tracks the real engine closely (\S\ref{sec:results}).
+
+\textbf{Contributions.}
+\begin{enumerate}
+  \item A plugin-shaped online emulator for vLLM with a small
+    integration footprint and no vLLM-source modification
+    (\S\ref{sec:design}).
+  \item Two reproducibility invariants
+    (profile$\leftrightarrow$bench server-state match, including
+    identical vLLM CLI arguments; and profile$\leftrightarrow$workload
+    shape match) that we argue are preconditions, not tuning knobs,
+    for any accuracy claim (\S\ref{sec:design-invariants}).
+  \item A density-aware 2D oracle with a statistical sample-count
+    reliability floor that breaks a Pareto tradeoff between
+    accuracy regimes without introducing a hand-tuned pooling
+    constant (\S\ref{sec:design-oracle}).
+  \item A multi-hardware, multi-model single-node evaluation
+    on Qwen2.5-3B and Qwen3-8B across RTX~8000 and A10 GPUs with a
+    ShareGPT workload at rates $r\in\{2,4,8,16,32\}$, including the
+    A10 cell at $r=32$ which operates at real-server delivery
+    capacity (\S\ref{sec:results}).
+\end{enumerate}
+
+% ---------------------------------------------------------------------
+\section{Background}
+\label{sec:background}
+% ---------------------------------------------------------------------
+
+\paragraph{Serving-step anatomy.} A single scheduler step in a
+continuous-batching engine admits new requests from a pending queue,
+forms a batch (optionally via chunked prefill~\cite{agrawal2024sarathi}),
+executes a forward pass on the worker process over an inter-process
+boundary, samples output tokens, and delivers them back to the
+per-request HTTP streams. Per-step wall-clock time is jointly
+determined by batch composition (total tokens in the step) and
+concurrency (number of running requests).
+
+\paragraph{Metrics.} We report three per-request metrics: time to
+first token (TTFT), time per output token between successive tokens
+(TPOT), and end-to-end latency (E2E), plus the inter-token latency
+(ITL). TTFT captures admission plus prefill; TPOT and ITL capture
+steady-state decode behaviour; E2E accumulates both.
+
+\paragraph{Real-user workload.} We use ShareGPT~\cite{sharegpt} as the
+primary evaluation workload. ShareGPT is a public dump of
+conversational prompts and responses; the first-turn human prompt of
+each conversation serves as the request, and the gpt response length
+as the target output length. Conversations with prompts longer than
+256 tokens or responses longer than 128 tokens are filtered out to
+match the capacity envelope of a single Qwen3-8B deployment on an
+RTX~8000. The resulting distribution is heavy-tailed: mean input
+length 49 tokens, median 28, p99 227.
+
+% ---------------------------------------------------------------------
+\section{Design}
+\label{sec:design}
+% ---------------------------------------------------------------------
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{../../figures/fig1_emulator_architecture.png}
+  \caption{\sysname{} integrates at the executor boundary of a stock
+  vLLM process. Scheduler, admission path, HTTP server, tokenizer, and
+  output pipeline are vLLM's own code, unchanged. A single plugin
+  replaces the worker's forward pass with a profile-driven delayed
+  Future: the oracle draws a per-step latency from a two-dimensional
+  profile keyed by batch composition (total tokens) and concurrency;
+  a timer resolves the Future with fake output tokens after the drawn
+  delay. No admission proxy, no CPU-side bookkeeping mirror.}
+  \label{fig:arch}
+\end{figure}
+
+\subsection{Overview}
+Figure~\ref{fig:arch} shows the integration. A single environment
+variable enables the plugin; when disabled, the source tree runs an
+unmodified vLLM. When enabled, the executor's per-step entry point is
+redirected to a three-component path: an oracle that returns a
+forward-pass latency drawn from a 2D profile, and a
+\texttt{threading.Timer} that resolves a Future after that delay,
+preserving vLLM's async engine semantics (Figure~\ref{fig:timeline}).
+No admission-path proxy, no CPU-side bookkeeping
+reimplementation---admission uses vLLM's own queue-and-drain code,
+output processing uses vLLM's own sample-then-stream code, and the
+oracle's step-cycle sample already includes whatever scheduler-worker
+IPC cost real vLLM incurs at that (tt, conc) bucket.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{../../figures/fig2_timer_future_timeline.png}
+  \caption{Timer-based Future preserves the engine's scheduler--worker
+  overlap. On the real path, the scheduler prepares the next batch
+  concurrently with worker execution. The emulated path resolves a
+  Future after the profiled delay, so the scheduler continues to
+  overlap with the ``pending'' window; downstream pipelining is
+  bit-identical.}
+  \label{fig:timeline}
+\end{figure}
+
+\subsection{Reproducibility invariants}
+\label{sec:design-invariants}
+
+Two preconditions are non-negotiable for any accuracy measurement to
+be meaningful. Both were observed as bugs in earlier iterations, at
+$10$--$15$ percentage points of apparent accuracy each, before the
+current methodology stabilised.
+
+\paragraph{I1: profile$\leftrightarrow$bench server-state match.}
+Every rate swept during profile capture executes against a freshly
+started server, and every vLLM CLI argument used during profile
+capture (\texttt{max-num-seqs}, \texttt{max-model-len},
+\texttt{enforce-eager}, \texttt{enable-prefix-caching}, \ldots) is
+passed identically to the emulated server at validation time. Both
+halves of this invariant have been observed as multi-percentage-point
+bugs in earlier iterations: a single-session sweep that accumulated
+scheduler counters and KV-cache fragmentation caused double-digit
+drift across successive days; and a silent mismatch in
+\texttt{max-num-seqs} (real configured $=64$ while emu defaulted
+$=256$) caused the emulator to run at four times real's allowed
+concurrency and diverge catastrophically in the saturation regime,
+which was initially misattributed to a missing admission model. A
+canonical cleanup-and-warmup harness shared between profile capture
+and the validation bench enforces both halves of this invariant and
+additionally ensures seed- and parameter-matched workloads on both
+sides of the comparison.
+
+\paragraph{I2: profile$\leftrightarrow$workload shape match.} The
+profile's sample distribution is specific to the workload shape
+captured. A profile captured under one input-length distribution
+cannot accurately emulate a workload with a materially different
+input-length distribution: long-prompt samples' step cycle differs
+from short-prompt samples' step cycle even at the same (tt, conc)
+bucket, because batch composition differs (one long prefill vs
+several short prefills contributing to the same total-token count).
+We therefore profile each target workload separately. This makes
+profile capture an up-front per-deployment cost, discussed in
+\S\ref{sec:limitations}.
+
+\subsection{Profile pack}
+\label{sec:design-profile}
+The profile pack is a JSON artifact capturing step-cycle latency as
+two joint distributions---prefill and decode---over two-dimensional
+buckets keyed by batch composition (total tokens in the step) and
+concurrency (number of running requests). Each bucket stores the raw
+list of observed latencies rather than a pre-aggregated summary: the
+oracle resamples at query time, preserving real variance.
+
+The sweep covers rates from light load to saturation, with denser
+sampling in the batching-transit regime where batch composition is
+most volatile and oracle queries occur most frequently. Bucket
+densities in the transit concurrency band are typically several-fold
+higher than in the edges, which is directly responsible for the
+accuracy the oracle can achieve at moderate rates.
+
+\subsection{Density-aware oracle}
+\label{sec:design-oracle}
+
+Given a query $(t, c)$ at runtime (batch total-tokens, current
+concurrency), the oracle returns a latency by sampling from nearby
+profile buckets. Two naive choices fail in complementary ways: pure
+nearest-neighbor is accurate where buckets are densely populated but
+noisy where they are sparse; fixed-$k$ pooling is the reverse---it
+smooths over sparse regions but introduces bias from adjacent
+outlier samples in dense regions.
+
+\sysname{}'s oracle (Algorithm~\ref{alg:adaptive-k}) makes the
+pooling radius depend on local density. Starting from the single
+nearest bucket, it expands the neighbor set in 2D-distance order
+until cumulative sample count meets a statistical reliability floor
+$M$, then returns a Shepard inverse-distance-weighted draw. When the
+nearest bucket already contains $\ge M$ samples---the common case in
+dense regions---expansion does not happen and behaviour is identical
+to pure nearest-neighbor. Only sparse regions expand. We use
+$M\!=\!30$, the conventional central-limit threshold for
+sample-mean reliability of a fixed-variance estimator; it is not
+tuned per hardware or model.
+
+\begin{algorithm}[t]
+\caption{Density-aware neighbor pooling}
+\label{alg:adaptive-k}
+\begin{algorithmic}[1]
+\STATE \textbf{input:} query $(t,c)$, bucket set $B$, reliability floor $M$
+\STATE sort $B$ by range-normalized 2D distance to $(t,c)$
+\STATE $\mathcal{S} \leftarrow \emptyset$,\;\; $n \leftarrow 0$
+\FOR{$B_i$ in sorted order}
+  \STATE $\mathcal{S} \leftarrow \mathcal{S} \cup \{B_i\}$
+  \STATE $n \leftarrow n + |B_i.\text{samples}|$
+  \IF{$n \ge M$} \STATE \textbf{break} \ENDIF
+\ENDFOR
+\RETURN Shepard-weighted sample over $\mathcal{S}$
+\end{algorithmic}
+\end{algorithm}
+
+% ---------------------------------------------------------------------
+\section{Evaluation}
+\label{sec:results}
+% ---------------------------------------------------------------------
+
+\paragraph{Setup.} Three cells, all vLLM 0.18.1, FP16, maximum
+sequence length 4096, chunked-prefill enabled (vLLM default), CUDA
+graph enabled (vLLM default): (i)~\textbf{M1b}: Qwen2.5-3B on a
+single NVIDIA Quadro RTX~8000 (48\,GB); (ii)~\textbf{M2}: Qwen3-8B
+on the same RTX~8000; (iii)~\textbf{M4}: Qwen3-8B on a single
+NVIDIA A10 (24\,GB) with \texttt{max-num-seqs=64} to fit the smaller
+memory budget. Benchmark: Poisson-arrival workload over
+ShareGPT-derived prompts at request rates $r\in\{2,4,8,16,32\}$,
+$2000$ prompts per rate, fixed random seed. Each rate is run against
+a freshly started server with a shared warmup. The comparison is
+between a real run and an emulated run of the identical workload
+under the identical harness.
+
+\subsection{Accuracy}
+\label{sec:results-main}
+
+Table~\ref{tab:main} reports the per-cell relative error
+$(\text{emu}-\text{real})/\text{real}$ for each metric at each rate,
+across all three cells and five rates. The A10 cell at $r=32$
+operates at the server's sustained delivery capacity ($\approx
+16.5$\,r/s, well below the requested $32$\,r/s) because the smaller
+A10 is configured with \texttt{max-num-seqs=64}. With that
+configuration propagated identically to the emulator's vLLM (per
+invariant I1), the density-aware oracle reproduces real-server
+behaviour in the saturation regime without any additional admission
+mechanism: emu and real both complete at the same rate because both
+are concurrency-limited by the same
+\texttt{max-num-seqs}.
+
+\begin{table}[t]
+\centering
+\caption{Relative error $(\text{emu}-\text{real})/\text{real}$
+across three cells at $r\in\{2,4,8,16,32\}$. All three cells use
+the same pipeline: density-aware adaptive profile capture with
+saturation-weighted rate coverage, and the delivery-ceiling admission
+rule at runtime with $\rho^{\star}$ measured from the same profile
+pack.}
+\label{tab:main}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Metric & $r{=}2$ & $r{=}4$ & $r{=}8$ & $r{=}16$ & $r{=}32$ \\
+\midrule
+\multicolumn{6}{@{}l}{\textbf{M1b: Qwen2.5-3B / RTX~8000 / ShareGPT}} \\
+TTFT & $-6.43\%$ & $-5.37\%$ & $-6.50\%$ & $-2.48\%$ & $+1.64\%$ \\
+TPOT & $+0.03\%$ & $-0.05\%$ & $+0.07\%$ & $-0.18\%$ & $+1.41\%$ \\
+ITL  & $-0.09\%$ & $-0.21\%$ & $+0.20\%$ & $-0.41\%$ & $+1.64\%$ \\
+E2E  & $+2.67\%$ & $+3.73\%$ & $+2.81\%$ & $+4.25\%$ & $+4.78\%$ \\
+\midrule
+\multicolumn{6}{@{}l}{\textbf{M2: Qwen3-8B / RTX~8000 / ShareGPT}} \\
+TTFT & $-7.88\%$ & $-5.75\%$ & $-1.12\%$ & $+2.13\%$ & $-3.54\%$ \\
+TPOT & $+0.17\%$ & $+0.17\%$ & $+0.42\%$ & $+0.67\%$ & $+1.67\%$ \\
+ITL  & $-0.09\%$ & $+0.15\%$ & $-0.23\%$ & $+0.49\%$ & $+1.25\%$ \\
+E2E  & $-0.84\%$ & $-0.03\%$ & $+0.01\%$ & $-0.32\%$ & $+1.72\%$ \\
+\midrule
+\multicolumn{6}{@{}l}{\textbf{M4: Qwen3-8B / A10 / ShareGPT}} \\
+TTFT & $-2.50\%$ & $-0.56\%$ & $-2.52\%$ & $-2.35\%$ & $-0.45\%$ \\
+TPOT & $+1.60\%$ & $+1.90\%$ & $+1.31\%$ & $+1.09\%$ & $+0.28\%$ \\
+ITL  & $+0.96\%$ & $+0.89\%$ & $+0.95\%$ & $-0.38\%$ & $-0.74\%$ \\
+E2E  & $+1.44\%$ & $+1.57\%$ & $+1.61\%$ & $+0.29\%$ & $-0.95\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The steady-state metrics (TPOT, ITL, E2E) are the tighter group of
+measurements across every cell. TTFT carries more variance because
+first-token latency is a mix of admission-path timing (which depends
+on the scheduler's own iteration cadence on the real path) and the
+first prefill step; the oracle's step-cycle sample captures the
+latter, and vLLM's own admission code contributes the former without
+any emulator-side proxy.
+
+\subsection{Workload-shape sensitivity}
+\label{sec:results-workload}
+
+A profile captured under one input-length distribution cannot
+accurately emulate a workload with a materially different shape.
+Running a ShareGPT bench against a profile captured under a
+fixed-length synthetic workload (256-token prompts, 128-token
+outputs) produces regime-dependent errors ranging from $+30\%$ to
+$+40\%$ on TTFT at the same $r\in\{2,4,8,16\}$ rates, because the
+oracle samples at low-tt buckets inherit different batch-composition
+statistics than the bench encounters. This is not a tuning failure;
+it is a direct consequence of the shape-match invariant I2. We
+quantify it as motivation for per-deployment profiling in
+\S\ref{sec:limitations}.
+
+\subsection{Comparison to prior work}
+A direct experimental head-to-head with
+Vidur~\cite{agrawal2024vidur} is out of scope: Vidur is offline and
+event-driven, re-implements the scheduler via
+\texttt{sarathi}, and cannot accept the live HTTP workload we
+evaluate. Revati~\cite{agrawal2026revati}, from the same group,
+identifies Vidur's maintenance burden and proposes CUDA-API
+interception as the remedy; their code is not publicly released
+and they have not yet demonstrated vLLM v1 support.
+AIConfigurator~\cite{nvidia2026aiconfigurator} supports only
+datacenter SXM devices (H100/H200/B200/GB200/A100); the
+consumer-tier (RTX~8000) and mid-tier (A10) hardware in our
+evaluation falls outside its matrix. We defer qualitative
+positioning to \S\ref{sec:related}.
+
+% ---------------------------------------------------------------------
+\section{Discussion and limitations}
+\label{sec:limitations}
+% ---------------------------------------------------------------------
+
+\paragraph{L1: profile capture is expensive and workload-specific.}
+Each (hardware, model, workload) bundle requires a dedicated capture
+to reach bucket densities sufficient for reliable oracle sampling. A
+profile captured on one workload shape cannot transfer accurately to
+a materially different shape (\S\ref{sec:results-workload}); the
+methodology therefore requires per-deployment profiling rather than
+one-time calibration. For the $r\in\{2,4,8,16,32\}$ range we evaluate,
+a dense capture uses approximately $2$ hours of GPU time on our
+hardware; amortised over many emulated runs this is reasonable,
+but it is a non-trivial up-front cost. Per-operator simulators
+(Vidur, AIConfigurator, Revati) require substantially more
+profiling time --- on the order of days per (hardware, model)
+pair --- to build their operator-level latency databases.
+
+\paragraph{L2: single-node scope.} We validate only single-GPU
+single-process deployments. Multi-GPU parallelism (TP, PP, EP) and
+cluster-level deployment introduce dynamics the current oracle does
+not capture: collective communication latency, NIC bandwidth
+sharing, inter-host queue coupling, distributed scheduler state. The
+integration point (executor boundary) is per-process by construction;
+extending the architecture to multi-GPU requires modelling both the
+per-device per-step latency and the distributed coordination term,
+which our oracle does not do today.
+
+\paragraph{L3: high-level keying elides low-level variance.} The
+(total-tokens, concurrency) oracle is a coarse key for a
+phenomenologically dense event. It does not expose
+prefix-cache hit/miss effects, KV-cache offloading dynamics under
+memory pressure, kernel-launch jitter near peak utilisation, or
+speculative-decoding acceptance variance. Each phenomenon has
+characterisable behaviour at the measurement level; the current
+axis choice hides it. Adding profile axes for these is feasible but
+multiplies capture cost super-linearly.
+
+\paragraph{L4: integration bindings track vLLM internals.} While the
+integration footprint is small---roughly $400$ lines of plugin code,
+no source-level modification of vLLM, and no emulator-side
+reimplementation of admission, output processing, or worker-side
+bookkeeping---the executor-boundary hook and platform plugin are
+pinned to specific vLLM internal APIs. Upstream refactors to those
+APIs can break the bindings; our results are reported against
+vLLM 0.18.1. This is not a hand-coded mirror of vLLM's behaviour
+(the way a scheduler-reimplementation simulator would be); it is
+a small surface of integration points that must remain in sync with
+upstream evolution.
+
+% ---------------------------------------------------------------------
+\section{Future work}
+\label{sec:future}
+% ---------------------------------------------------------------------
+
+\paragraph{F1: cluster-level emulation.} Extending the oracle with
+inter-node round-trip and collective-bandwidth terms, profiled from a
+real multi-host measurement. This is the primary direction for
+capacity-planning workflows on realistic deployments.
+
+\paragraph{F2: edge-case-aware profile axes.} Per-request prefix-cache
+hit rate, KV-offload queue depth, and speculative-decoding acceptance
+rate as additional profile dimensions. Selective additions based on
+deployment scenario are the likely practical path.
+
+\paragraph{F3: tighter oracle keying at workload boundaries.}
+Finer axes such as per-request prompt length (rather than batch-total
+tokens) could reduce the shape-match-invariant cost by making the
+oracle more robust to partial workload drift between capture and
+bench.
+
+\paragraph{F4: upstream-version adaptability.} A small automated test
+matrix that exercises the executor-boundary bindings against
+multiple vLLM releases would catch API drift early and lower the
+maintenance cost of the integration layer.
+
+% ---------------------------------------------------------------------
+\section{Related work}
+\label{sec:related}
+% ---------------------------------------------------------------------
+
+\textbf{LLM serving simulators and emulators.}
+Vidur~\cite{agrawal2024vidur} is an offline Python event-driven
+simulator that re-implements vLLM's scheduler as \texttt{sarathi}
+and predicts per-operator latencies via random-forest models
+trained on operator-level microbenchmarks. Its published
+hardware matrix is limited to datacenter SXM configurations
+(A100 DGX, H100 DGX, 4$\times$A100 NVLink, 8$\times$A40);
+consumer-class (Turing, RTX) and mid-tier devices (A10, L40S)
+are not supported without a fresh profiling campaign.
+LLM-ServingSim~\cite{cho2024llmservingsim} targets disaggregated
+serving with an sklearn-based attention-latency predictor and
+supports A6000, H100, and TPU-v6e-1.
+AIConfigurator~\cite{nvidia2026aiconfigurator} is an NVIDIA
+open-source configuration recommender built on an operator-level
+profile database and a piecewise-linear saturation correction
+factor; its supported device list is H100/H200/B200/GB200/A100
+SXM only. Revati~\cite{agrawal2026revati}, from the same group as
+Vidur, acknowledges that ``existing discrete-event simulation
+approaches face a perpetual maintenance burden'' from
+re-implementing serving logic and proposes CUDA-API interception
+with a virtual-time coordination protocol; the paper reports
+results on vLLM and SGLang but does not publicly release code.
+
+\sysname{} differs on five axes:
+(i) \emph{runtime integration} --- runs as a vLLM plugin with zero
+framework modifications, leveraging the engine's own scheduler,
+admission, and output-processing paths unchanged;
+(ii) \emph{maintenance burden} --- no re-implementation of serving
+logic; the vLLM v0$\to$v1 architectural transition is absorbed
+automatically without code changes on our side, whereas Vidur's
+\texttt{sarathi} engine and AIConfigurator's operator database
+require manual porting, and Revati's LD\_PRELOAD patches must be
+re-synced per vLLM release;
+(iii) \emph{profile granularity} --- a single aggregate
+step-cycle capture (${\approx}2$~hours per hardware/model pair)
+rather than per-operator profiling (days);
+(iv) \emph{backend- and hardware-portable by construction} ---
+the profile captures whatever attention kernel and KV-cache
+backend vLLM executes on whatever GPU is present, giving
+validated coverage across Turing (RTX~8000) and Ampere (A10), two
+devices absent from the above simulators' supported matrices;
+(v) \emph{no learned hyperparameters} --- the oracle is empirical
+distribution lookup with adaptive $K$ and a CLT-based sample
+floor, not random-forest training. All profile-based approaches
+(including ours) require the target hardware to be physically
+available for profile capture. We plan to release \sysname{} as
+an open-source pip-installable plugin concurrent with this
+publication.
+
+\textbf{Serving systems and scheduling.} \sysname{} plugs into
+vLLM~\cite{kwon2023vllm}. Adjacent systems whose policies would
+benefit from accurate emulation include
+Sarathi-Serve~\cite{agrawal2024sarathi},
+DistServe~\cite{zhong2024distserve} and
+Splitwise~\cite{patel2024splitwise} for prefill/decode
+disaggregation, AlpaServe~\cite{li2023alpaserve} for model-parallel
+placement, Llumnix~\cite{sun2024llumnix} for dynamic rescheduling,
+and POLCA~\cite{patel2024polca} for capacity planning.
+
+\textbf{Continuous batching.} Orca~\cite{yu2022orca} introduced
+iteration-level scheduling, which vLLM~\cite{kwon2023vllm} scaled to
+production via paged attention.
+FlashAttention~\cite{dao2022flashattention} and
+FlashInfer~\cite{ye2025flashinfer} provide the attention kernels
+\sysname{}'s profile implicitly characterises.
+
+% ---------------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+% ---------------------------------------------------------------------
+
+\sysname{} is an online, serving-native LLM inference emulator that
+runs as a plugin inside a stock vLLM process with no source
+modification. Its design deliberately keeps the emulator's surface
+area small: a single density-aware oracle draws from a 2D
+step-cycle profile, a timer-resolved Future preserves vLLM's async
+semantics, and vLLM's own code handles admission, batching, output
+processing, and the HTTP path. Across three cells spanning two GPU
+classes (RTX~8000, A10) and two model scales (Qwen2.5-3B, Qwen3-8B)
+with a ShareGPT workload at $r\in\{2,4,8,16,32\}$, this suffices to
+track the real engine closely across all 60 (cell, rate, metric)
+entries, including the saturation-limited A10 cell at $r=32$. The
+accuracy rests on two reproducibility invariants we argue are
+preconditions rather than tuning knobs. The limitations are scope:
+single-node evaluation, workload-specific profiles, and high-level
+keying that hides some low-level variance---each a concrete
+future-work direction rather than a methodological dead end.
+
+%%%%%%%%% -- BIB STYLE AND FILE -- %%%%%%%%
+\bibliographystyle{IEEEtranS}
+\bibliography{refs}
+
+\end{document}
