@@ -117,6 +117,16 @@ def main():
     all_kvs = [r["sum_kv"] for r in decode]
     overall_mean_sum_kv = float(np.mean(all_kvs)) if all_kvs else 0.0
 
+    # Per-conc reference: mean sum_kv for each concurrency bucket.
+    # The oracle uses these to make within-profile corrections ~zero,
+    # eliminating the feedback-trap where a global reference makes
+    # low-queue emulator states decode faster than real (which then
+    # builds queue and flips to over-corrected slow regime).
+    per_conc_mean_sum_kv = {
+        str(c): float(np.mean([p["sum_kv"] for p in by_conc[c]]))
+        for c in by_conc if len(by_conc[c]) >= args.min_samples_per_conc
+    }
+
     kv_per_tok = compute_kv_per_token_bytes(hdr)
     implied_bw_gbs = (
         (kv_per_tok / (slope * 1e-6)) / 1e9 if slope > 0 and kv_per_tok > 0 else 0.0
@@ -140,6 +150,7 @@ def main():
         "sum_kv_range_conc_means": [min(xs), max(xs)],
         "overall_mean_sum_kv": overall_mean_sum_kv,
         "bw_reference_sum_kv": overall_mean_sum_kv,
+        "bw_reference_sum_kv_per_conc": per_conc_mean_sum_kv,
         "implied_sustained_bw_gbs_from_measured": implied_bw_gbs,
         "method": "cross_concurrency_centroids",
     }

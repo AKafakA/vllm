@@ -164,10 +164,37 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             self._bw_slope_us_per_token = 0.0
         self._bw_reference_sum_kv = float(
             profile_pack.get("bw_reference_sum_kv") or 0.0)
+
+        # Per-conc reference: when present, oracle uses per-conc means
+        # instead of the global reference. Avoids the feedback trap
+        # where low-queue states (sum_kv < global_ref) get NEGATIVE
+        # correction → too-fast decode → queue fills → flip to POSITIVE
+        # correction over-slow → etc. Per-conc reference keeps
+        # within-profile correction ≈ 0 at every concurrency.
+        # Selected via VLLM_EMULATOR_BW_REF_MODE env var:
+        #   "global"   (default): single overall mean sum_kv reference
+        #   "per_conc"          : use per-conc means from profile pack
+        self._bw_ref_mode = os.environ.get(
+            "VLLM_EMULATOR_BW_REF_MODE", "global").lower()
+        if self._bw_ref_mode not in ("global", "per_conc"):
+            raise ValueError(
+                f"VLLM_EMULATOR_BW_REF_MODE must be 'global' or 'per_conc'; "
+                f"got {self._bw_ref_mode!r}")
+        per_conc_raw = profile_pack.get("bw_reference_sum_kv_per_conc") or {}
+        self._bw_reference_sum_kv_per_conc = {
+            int(k): float(v) for k, v in per_conc_raw.items()
+        }
+
         if self._bw_slope_us_per_token > 0:
+            ref_desc = (
+                f"per_conc (N={len(self._bw_reference_sum_kv_per_conc)})"
+                if self._bw_ref_mode == "per_conc"
+                and self._bw_reference_sum_kv_per_conc
+                else f"global={self._bw_reference_sum_kv:.0f}"
+            )
             print(f"[ProfileGpuCostOracle] roofline correction ENABLED: "
                   f"source={source} slope={self._bw_slope_us_per_token:.4f} "
-                  f"us/tok ref_sum_kv={self._bw_reference_sum_kv:.0f}")
+                  f"us/tok ref={ref_desc}")
 
         # 2D distribution: (tt, conc) -> bucket with raw samples list.
         # Separated by step type: decode (CUDA graph) vs prefill (eager).
@@ -585,9 +612,23 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
             and not has_prefill
             and sum_kv > 0
         ):
-            result = result + self._bw_slope_us_per_token * (
-                sum_kv - self._bw_reference_sum_kv
-            )
+            # Pick reference: per-conc (if available and mode selected)
+            # or global fallback. Per-conc reference keeps within-profile
+            # corrections near zero and avoids feedback instability.
+            if (
+                self._bw_ref_mode == "per_conc"
+                and self._bw_reference_sum_kv_per_conc
+            ):
+                c = max(num_requests, 1)
+                ref = self._bw_reference_sum_kv_per_conc.get(c)
+                if ref is None:
+                    # No exact match — use nearest conc with data.
+                    known = sorted(self._bw_reference_sum_kv_per_conc)
+                    nearest = min(known, key=lambda k: abs(k - c))
+                    ref = self._bw_reference_sum_kv_per_conc[nearest]
+            else:
+                ref = self._bw_reference_sum_kv
+            result = result + self._bw_slope_us_per_token * (sum_kv - ref)
 
         return result
 

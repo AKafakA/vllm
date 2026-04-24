@@ -71,6 +71,10 @@ def main():
         lo, hi = calib.get("sum_kv_range_conc_means") or calib.get("sum_kv_range", [0, 0])
         ref = (lo + hi) / 2.0 if (lo or hi) else 0.0
     profile["bw_reference_sum_kv"] = ref
+    # If the fit tool emitted per-conc references, pass them through.
+    # Oracle uses them when VLLM_EMULATOR_BW_REF_MODE=per_conc.
+    if "bw_reference_sum_kv_per_conc" in calib:
+        profile["bw_reference_sum_kv_per_conc"] = calib["bw_reference_sum_kv_per_conc"]
 
     out_path.write_text(json.dumps(profile, indent=2))
     print(f"merged calibration into {out_path}")
