@@ -128,25 +128,19 @@ $r\in\{2,4,8,16,32\}$, this suffices: every (cell, rate, metric)
 entry tracks the real engine closely (\S\ref{sec:results}).
 
 \textbf{Contributions.}
-\begin{enumerate}
-  \item A plugin-shaped online emulator for vLLM with a small
-    integration footprint and no vLLM-source modification
-    (\S\ref{sec:design}).
-  \item Two reproducibility invariants
-    (profile$\leftrightarrow$bench server-state match, including
-    identical vLLM CLI arguments; and profile$\leftrightarrow$workload
-    shape match) that we argue are preconditions, not tuning knobs,
-    for any accuracy claim (\S\ref{sec:design-invariants}).
-  \item A density-aware 2D oracle with a statistical sample-count
-    reliability floor that breaks a Pareto tradeoff between
-    accuracy regimes without introducing a hand-tuned pooling
-    constant (\S\ref{sec:design-oracle}).
-  \item A multi-hardware, multi-model single-node evaluation
-    on Qwen2.5-3B and Qwen3-8B across RTX~8000 and A10 GPUs with a
-    ShareGPT workload at rates $r\in\{2,4,8,16,32\}$, including the
-    A10 cell at $r=32$ which operates at real-server delivery
-    capacity (\S\ref{sec:results}).
-\end{enumerate}
+(i)~A plugin-shaped online emulator for vLLM with no source
+modification (\S\ref{sec:design});
+(ii)~two reproducibility invariants --- profile$\leftrightarrow$bench
+server-state match and profile$\leftrightarrow$workload shape match
+--- that we argue are preconditions rather than tuning knobs
+(\S\ref{sec:design-invariants});
+(iii)~a density-aware 2D oracle with a statistical sample-count
+reliability floor, trading no hand-tuned pooling constant
+(\S\ref{sec:design-oracle});
+(iv)~a multi-hardware, multi-model single-node evaluation on
+Qwen2.5-3B and Qwen3-8B across RTX~8000 and A10 at
+$r\in\{2,4,8,16,32\}$ plus a prefix-cache-OFF ablation
+(\S\ref{sec:results}).
 
 % ---------------------------------------------------------------------
 \section{Background}
@@ -470,29 +464,22 @@ addresses this by intercepting CUDA API calls via
 \texttt{LD\_PRELOAD}, but the interception layer is
 framework-specific and code has not been publicly released.
 
-\sysname{} differs in four ways that matter in practice.
-\emph{(a) Runtime integration}: a vLLM plugin with no source
-modification, using the engine's own scheduler and admission
-path. \emph{(b) One implementation, two modes}: a
-\texttt{realtime} mode for online serving research (live HTTP,
-real queueing) and an \texttt{accelerated} time-skip mode for
-offline sweeps (analogous to Revati's time warp). Prior systems
-offer at most one of these.
-\emph{(c) Coarse-grained empirical profile}: a single
+\sysname{} differs in four practically relevant ways: (a) it
+runs as a vLLM plugin with no source modification, using the
+engine's own scheduler; (b) one implementation supports both
+\texttt{realtime} (online serving research) and
+\texttt{accelerated} time-skip modes (offline sweeps,
+analogous to Revati's time warp); (c) profiling is a single
 step-cycle capture (${\approx}2$ hours per hardware/model)
-captures whatever attention kernel vLLM actually runs,
-hardware-agnostic by construction. Per-operator approaches
-need days of profiling and are tied to the specific kernel
-that was profiled.
-\emph{(d) No learned model, no hyperparameters}: the oracle
-is empirical distribution lookup with CLT-based sample floor;
-no training, no feature engineering, no re-training when the
-backend changes.
-We plan to release \sysname{} as an open-source plugin
-concurrent with this publication; all four systems above
-require physical access to the target hardware for profile
-capture, and the vLLM-plugin form factor inherits vLLM's own
-hardware portability.
+rather than per-operator micro-benchmarks (days); (d) the
+oracle is empirical distribution lookup with no learned model,
+no hyperparameters, no re-training when the backend changes.
+The step-cycle profile captures whatever attention kernel
+vLLM actually executes, inheriting vLLM's own hardware
+portability --- we validate on RTX~8000 (Turing) and A10
+(Ampere). All profile-based approaches including ours
+require physical access to target hardware. We plan to
+open-source \sysname{} concurrent with publication.
 
 \textbf{Serving systems and scheduling.} \sysname{} plugs into
 vLLM~\cite{kwon2023vllm}. Adjacent systems whose policies would
@@ -516,22 +503,14 @@ FlashInfer~\cite{ye2025flashinfer} provide the attention kernels
 \label{sec:conclusion}
 % ---------------------------------------------------------------------
 
-\sysname{} is an online, serving-native LLM inference emulator that
-runs as a plugin inside a stock vLLM process with no source
-modification. Its design deliberately keeps the emulator's surface
-area small: a single density-aware oracle draws from a 2D
-step-cycle profile, a timer-resolved Future preserves vLLM's async
-semantics, and vLLM's own code handles admission, batching, output
-processing, and the HTTP path. Across three cells spanning two GPU
-classes (RTX~8000, A10) and two model scales (Qwen2.5-3B, Qwen3-8B)
-with a ShareGPT workload at $r\in\{2,4,8,16,32\}$, this suffices to
-track the real engine closely across all 60 (cell, rate, metric)
-entries, including the saturation-limited A10 cell at $r=32$. The
-accuracy rests on two reproducibility invariants we argue are
-preconditions rather than tuning knobs. The limitations are scope:
-single-node evaluation, workload-specific profiles, and high-level
-keying that hides some low-level variance---each a concrete
-future-work direction rather than a methodological dead end.
+\sysname{} shows that an online, serving-native LLM emulator
+can be both minimal --- a vLLM plugin with a density-aware 2D
+oracle and a timer-resolved Future, no source modification, no
+tuned constants --- and accurate across three cells, a
+prefix-cache-OFF ablation, and the full $r\in\{2,4,8,16,32\}$
+sweep, conditional on two reproducibility invariants stated
+in \S\ref{sec:design}. Open-sourcing the plugin, long-context
+extension, and multi-node support are the natural next steps.
 
 %%%%%%%%% -- BIB STYLE AND FILE -- %%%%%%%%
 \bibliographystyle{IEEEtranS}
