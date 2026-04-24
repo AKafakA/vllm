@@ -140,18 +140,19 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         #   step_us += bw_slope_us_per_token * (sum_kv - bw_reference_sum_kv)
         # Calibration is produced by tools/profile_bw_calibration.py.
         #
-        # Two slope variants may be present:
-        #   bw_slope_measured_us_per_token: fit from a long-sequence trace
+        # Three slope variants may be present:
+        #   bw_slope_measured_us_per_token: naive fit (cross-conc centroids)
         #   bw_slope_constant_us_per_token: computed from HW-spec BW
+        #   bw_slope_multivariate_us_per_token: fit that controls for conc
         # Selected by VLLM_EMULATOR_BW_SLOPE_SOURCE in
-        # {"disabled", "measured", "constant"}. Default "disabled" keeps
-        # behaviour byte-identical to pre-branch oracle.
+        # {"disabled","measured","constant","multivariate"}. Default
+        # "disabled" keeps behaviour byte-identical to pre-branch oracle.
         source = os.environ.get(
             "VLLM_EMULATOR_BW_SLOPE_SOURCE", "disabled").lower()
-        if source not in ("disabled", "measured", "constant"):
+        if source not in ("disabled", "measured", "constant", "multivariate"):
             raise ValueError(
                 f"VLLM_EMULATOR_BW_SLOPE_SOURCE must be 'disabled', "
-                f"'measured', or 'constant'; got {source!r}")
+                f"'measured', 'constant', or 'multivariate'; got {source!r}")
         self._bw_slope_source = source
         calib = profile_pack.get("bw_calibration") or {}
         if source == "measured":
@@ -160,8 +161,27 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         elif source == "constant":
             self._bw_slope_us_per_token = float(
                 calib.get("bw_slope_constant_us_per_token") or 0.0)
+        elif source == "multivariate":
+            self._bw_slope_us_per_token = float(
+                calib.get("bw_slope_multivariate_us_per_token") or 0.0)
         else:
             self._bw_slope_us_per_token = 0.0
+
+        # How to combine base profile lookup with roofline correction:
+        #   "additive"     (default): result += slope*(sum_kv - ref).
+        #                  Produces NEGATIVE correction when sum_kv < ref.
+        #                  Can cause feedback at saturation knee.
+        #   "max_roofline" (ReLU): result += max(0, slope*(sum_kv - ref)).
+        #                  One-sided; only corrects upward when sum_kv
+        #                  exceeds reference. Eliminates negative-correction
+        #                  feedback and matches "data movement overlapped
+        #                  with compute below some threshold" physics.
+        self._bw_combine_mode = os.environ.get(
+            "VLLM_EMULATOR_BW_COMBINE_MODE", "additive").lower()
+        if self._bw_combine_mode not in ("additive", "max_roofline"):
+            raise ValueError(
+                f"VLLM_EMULATOR_BW_COMBINE_MODE must be 'additive' or "
+                f"'max_roofline'; got {self._bw_combine_mode!r}")
         self._bw_reference_sum_kv = float(
             profile_pack.get("bw_reference_sum_kv") or 0.0)
 
@@ -628,7 +648,13 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
                     ref = self._bw_reference_sum_kv_per_conc[nearest]
             else:
                 ref = self._bw_reference_sum_kv
-            result = result + self._bw_slope_us_per_token * (sum_kv - ref)
+            delta = self._bw_slope_us_per_token * (sum_kv - ref)
+            if self._bw_combine_mode == "max_roofline":
+                # One-sided: only correct upward. Below reference, profile
+                # already captures the compute-bound regime where memory is
+                # hidden by overlap; no negative correction needed.
+                delta = max(0.0, delta)
+            result = result + delta
 
         return result
 

@@ -41,6 +41,32 @@ def load(trace_path):
     return hdr, rows
 
 
+def fit_multivariate(decode_samples):
+    """step_us ~ a + b*conc + c*sum_kv + d*conc*sum_kv. Return c."""
+    if len(decode_samples) < 100:
+        return None
+    n = len(decode_samples)
+    X = np.zeros((n, 4))
+    y = np.zeros(n)
+    for i, r in enumerate(decode_samples):
+        c = r["num_decode_seqs"]
+        k = r["sum_kv"]
+        X[i] = [1.0, c, k, c * k]
+        y[i] = r["step_cycle_us"]
+    coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+    y_pred = X @ coef
+    ss_res = float(np.sum((y - y_pred) ** 2))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    return {
+        "intercept_us": float(coef[0]),
+        "conc_slope_us_per_conc": float(coef[1]),
+        "sum_kv_slope_us_per_token": float(coef[2]),
+        "interaction_us_per_conc_per_token": float(coef[3]),
+        "r_squared": float(r2),
+    }
+
+
 def fit_linear(xs, ys):
     x = np.asarray(xs, dtype=float)
     y = np.asarray(ys, dtype=float)
@@ -136,12 +162,21 @@ def main():
     if args.hw_bw_gbs and kv_per_tok > 0:
         slope_constant = kv_per_tok / (args.hw_bw_gbs * 1e9) * 1e6
 
+    # Multivariate fit: step_us ~ a + b*conc + c*sum_kv + d*conc*sum_kv.
+    # The c coefficient is the sum_kv slope AFTER controlling for conc;
+    # captures the pure KV effect net of scheduler overhead that grows
+    # with conc. Typically 2-5x smaller than the naive measured slope.
+    mv = fit_multivariate(decode)
+    slope_multivariate = mv["sum_kv_slope_us_per_token"] if mv else None
+
     result = {
         "gpu_name": hdr.get("gpu_name", "unknown"),
         "model_name": hdr.get("model_name", "unknown"),
         "kv_per_token_bytes": kv_per_tok,
         "bw_slope_measured_us_per_token": slope,
         "bw_slope_constant_us_per_token": slope_constant,
+        "bw_slope_multivariate_us_per_token": slope_multivariate,
+        "multivariate_fit": mv,
         "hw_bw_gbs_input": args.hw_bw_gbs,
         "bw_intercept_us": intercept,
         "bw_r_squared": r2,
@@ -163,6 +198,9 @@ def main():
     if slope_constant is not None:
         print(f"[fit] slope_constant (from HW {args.hw_bw_gbs} GB/s) "
               f"= {slope_constant:.4f} us/tok")
+    if slope_multivariate is not None:
+        print(f"[fit] slope_multivariate (c after controlling for conc) "
+              f"= {slope_multivariate:.4f} us/tok  (R²={mv['r_squared']:.3f})")
     print(f"[fit] wrote {args.out_json}")
     return 0
 
