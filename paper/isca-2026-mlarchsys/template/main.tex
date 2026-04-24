@@ -95,6 +95,16 @@ accepts real HTTP traffic, and replaces only the GPU forward pass
 with a profile-driven latency draw. The scheduler, tokenizer,
 admission path, HTTP layer, output pipeline, and metrics endpoint
 are all vLLM's own code, unchanged. Only the forward pass is faked.
+The emulator supports two execution modes from the same plugin: a
+\emph{realtime} mode that blocks for the drawn latency so online
+workloads (live HTTP traffic, dynamic arrival patterns, queueing
+under saturation) behave exactly as on real hardware --- our
+primary target for \emph{dynamic} serving-system
+research~\cite{sun2024llumnix,patel2024polca} --- and an
+\emph{accelerated} mode that time-skips (virtual time advances
+by the drawn latency without wall-clock blocking, analogous to
+Revati~\cite{agrawal2026revati}), enabling offline
+configuration-sweep simulation at many-times-real-time speed.
 
 This positioning is conceptually simple but difficult to make
 accurate. Two classes of methodology bug consistently invalidate
@@ -519,25 +529,33 @@ re-implementing serving logic and proposes CUDA-API interception
 with a virtual-time coordination protocol; the paper reports
 results on vLLM and SGLang but does not publicly release code.
 
-\sysname{} differs on five axes:
+\sysname{} differs on six axes:
 (i) \emph{runtime integration} --- runs as a vLLM plugin with zero
 framework modifications, leveraging the engine's own scheduler,
 admission, and output-processing paths unchanged;
-(ii) \emph{maintenance burden} --- no re-implementation of serving
-logic; the vLLM v0$\to$v1 architectural transition is absorbed
-automatically without code changes on our side, whereas Vidur's
-\texttt{sarathi} engine and AIConfigurator's operator database
-require manual porting, and Revati's LD\_PRELOAD patches must be
-re-synced per vLLM release;
-(iii) \emph{profile granularity} --- a single aggregate
+(ii) \emph{dual execution modes from one plugin} --- the same
+profile-driven oracle supports both a \emph{realtime} mode for
+online/dynamic serving study (live HTTP, genuine queueing, SLA
+measurement under load) and an \emph{accelerated} time-skip mode
+for offline configuration-sweep simulation (as in Vidur and
+Revati). Vidur, AIConfigurator, and LLM-ServingSim offer only the
+offline path; Revati is emulator-only. \sysname{} covers both
+from a single implementation;
+(iii) \emph{maintenance burden} --- no re-implementation of
+serving logic; the vLLM v0$\to$v1 architectural transition is
+absorbed automatically without code changes on our side, whereas
+Vidur's \texttt{sarathi} engine and AIConfigurator's operator
+database require manual porting, and Revati's LD\_PRELOAD patches
+must be re-synced per vLLM release;
+(iv) \emph{profile granularity} --- a single aggregate
 step-cycle capture (${\approx}2$~hours per hardware/model pair)
 rather than per-operator profiling (days);
-(iv) \emph{backend- and hardware-portable by construction} ---
+(v) \emph{backend- and hardware-portable by construction} ---
 the profile captures whatever attention kernel and KV-cache
 backend vLLM executes on whatever GPU is present, giving
 validated coverage across Turing (RTX~8000) and Ampere (A10), two
 devices absent from the above simulators' supported matrices;
-(v) \emph{no learned hyperparameters} --- the oracle is empirical
+(vi) \emph{no learned hyperparameters} --- the oracle is empirical
 distribution lookup with adaptive $K$ and a CLT-based sample
 floor, not random-forest training. All profile-based approaches
 (including ours) require the target hardware to be physically
