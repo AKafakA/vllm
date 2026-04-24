@@ -310,20 +310,25 @@ tuned per hardware or model.
 
 \paragraph{Setup.} Four cells, all vLLM 0.18.1, FP16,
 maximum sequence length 4096, chunked-prefill and CUDA-graph
-enabled (vLLM defaults). The \emph{Main} cell is Qwen3-8B on
-NVIDIA Quadro RTX~8000 (48\,GB); we then vary one axis at a
-time to test emulator generality:
-(i)~\emph{Model-scale} substitutes Qwen2.5-3B on the same
-RTX~8000, checking that accuracy holds when the forward-pass
-cost changes;
-(ii)~\emph{Hardware} moves the Main cell to an A10 GPU
-(24\,GB, \texttt{max-num-seqs=64} to fit the smaller memory
-budget), checking that the pipeline ports across GPU
-generations without code change;
-(iii)~\emph{Config} disables vLLM's prefix cache
-(\texttt{--no-enable-prefix-caching}) on the Main setup,
-checking that a non-default engine configuration does not
-break the profile-driven oracle.
+enabled (vLLM defaults). Two environments:
+(A)~\emph{local workstation}: NVIDIA Quadro RTX~8000 (48\,GB
+HBM, Turing, CC 7.5) on an Intel Xeon Gold~5218
+(8~cores) / 62\,GB host running Ubuntu 24.04, CUDA driver
+590.48. Used for the Main, Model-scale, and Config cells.
+(B)~\emph{Vast.ai rental}~\cite{vastai}: NVIDIA A10 (24\,GB
+GDDR6, Ampere, CC 8.6) on an AMD EPYC 128-core / 503\,GB host
+(containerised Ubuntu 24.04, CUDA driver 570.86).
+Used for the Hardware cell only.
+The Main cell is Qwen3-8B on environment~A. Variations:
+(i)~\emph{Model-scale} substitutes Qwen2.5-3B on env~A,
+checking accuracy when forward-pass cost changes;
+(ii)~\emph{Hardware} moves to env~B with
+\texttt{max-num-seqs=64} (to fit A10's 24\,GB),
+checking portability across GPU generations
+(Turing\,$\to$\,Ampere, local\,$\to$\,rented);
+(iii)~\emph{Config} disables vLLM's prefix cache on env~A
+(\texttt{--no-enable-prefix-caching}), checking a non-default
+engine flag.
 Benchmark: Poisson arrivals over ShareGPT-derived prompts at
 $r\in\{2,4,8,16,32\}$, $2000$ prompts per rate, fixed random
 seed. Each rate runs against a freshly started server with
