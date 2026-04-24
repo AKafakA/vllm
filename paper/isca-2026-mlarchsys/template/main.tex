@@ -508,10 +508,10 @@ portability --- we validate on RTX~8000 (Turing) and A10
 require physical access to target hardware.
 
 The implementation is correspondingly compact. The
-open-source release of \sysname{} is 2.9K lines of Python
+open-source release of \sysname{} is 2.8K lines of Python
 split across four parts: oracle (density-aware step-latency,
-828~lines), vLLM integration (platform plugin, executor
-hook, GPU cost path, and mocks; 1048~lines), profile
+713~lines), vLLM integration (platform plugin, executor
+hook, GPU cost path, and mocks; 1048~lines (of which 251 is GPU mocking: CUDA API stubs + fake model-runner output)), profile
 pipeline (builder, loader, validator; 642~lines), and
 orchestration scripts for profile capture and validation
 (422~lines). By comparison, the public Python source of
