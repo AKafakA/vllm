@@ -354,11 +354,11 @@ are concurrency-limited by the same
 \begin{table}[t]
 \centering
 \caption{Relative error $(\text{emu}-\text{real})/\text{real}$
-across three cells at $r\in\{2,4,8,16,32\}$. All three cells use
-the same pipeline: density-aware adaptive profile capture with
-saturation-weighted rate coverage, and the delivery-ceiling admission
-rule at runtime with $\rho^{\star}$ measured from the same profile
-pack.}
+across four cells at $r\in\{2,4,8,16,32\}$. M1b/M2/M4 are the main
+accuracy claims (default configuration); R3 is an ablation with
+vLLM's prefix-cache disabled. All use the same pipeline:
+density-aware adaptive profile capture with saturation-weighted
+rate coverage, dense profile, hook OFF, surrogate OFF.}
 \label{tab:main}
 \small
 \begin{tabular}{@{}lrrrrr@{}}
@@ -382,6 +382,12 @@ TTFT & $-2.50\%$ & $-0.56\%$ & $-2.52\%$ & $-2.35\%$ & $-0.45\%$ \\
 TPOT & $+1.60\%$ & $+1.90\%$ & $+1.31\%$ & $+1.09\%$ & $+0.28\%$ \\
 ITL  & $+0.96\%$ & $+0.89\%$ & $+0.95\%$ & $-0.38\%$ & $-0.74\%$ \\
 E2E  & $+1.44\%$ & $+1.57\%$ & $+1.61\%$ & $+0.29\%$ & $-0.95\%$ \\
+\midrule
+\multicolumn{6}{@{}l}{\textbf{R3: Qwen3-8B / RTX~8000 / ShareGPT, prefix-cache OFF}} \\
+TTFT & $-9.01\%$ & $-7.37\%$ & $-4.29\%$ & $-2.83\%$ & $-3.76\%$ \\
+TPOT & $+0.05\%$ & $+0.16\%$ & $+0.13\%$ & $+0.81\%$ & $+1.13\%$ \\
+ITL  & $-0.14\%$ & $+0.11\%$ & $-0.06\%$ & $+0.46\%$ & $+0.63\%$ \\
+E2E  & $-0.43\%$ & $-0.66\%$ & $-0.43\%$ & $-0.72\%$ & $+3.73\%$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -409,97 +415,51 @@ it is a direct consequence of the shape-match invariant I2. We
 quantify it as motivation for per-deployment profiling in
 \S\ref{sec:limitations}.
 
-\subsection{Comparison to prior work}
-A direct experimental head-to-head with
-Vidur~\cite{agrawal2024vidur} is out of scope: Vidur is offline and
-event-driven, re-implements the scheduler via
-\texttt{sarathi}, and cannot accept the live HTTP workload we
-evaluate. Revati~\cite{agrawal2026revati}, from the same group,
-identifies Vidur's maintenance burden and proposes CUDA-API
-interception as the remedy; their code is not publicly released
-and they have not yet demonstrated vLLM v1 support.
-AIConfigurator~\cite{nvidia2026aiconfigurator} supports only
-datacenter SXM devices (H100/H200/B200/GB200/A100); the
-consumer-tier (RTX~8000) and mid-tier (A10) hardware in our
-evaluation falls outside its matrix. We defer qualitative
-positioning to \S\ref{sec:related}.
-
 % ---------------------------------------------------------------------
-\section{Discussion and limitations}
+\section{Limitations and future work}
 \label{sec:limitations}
 % ---------------------------------------------------------------------
 
-\paragraph{L1: profile capture is expensive and workload-specific.}
-Each (hardware, model, workload) bundle requires a dedicated capture
-to reach bucket densities sufficient for reliable oracle sampling. A
-profile captured on one workload shape cannot transfer accurately to
-a materially different shape (\S\ref{sec:results-workload}); the
-methodology therefore requires per-deployment profiling rather than
-one-time calibration. For the $r\in\{2,4,8,16,32\}$ range we evaluate,
-a dense capture uses approximately $2$ hours of GPU time on our
-hardware; amortised over many emulated runs this is reasonable,
-but it is a non-trivial up-front cost. Per-operator simulators
-(Vidur, AIConfigurator, Revati) require substantially more
-profiling time --- on the order of days per (hardware, model)
-pair --- to build their operator-level latency databases.
+\paragraph{Profile capture is per-deployment.}
+Each (hardware, model, workload) bundle requires a dedicated
+capture; a profile captured on one workload shape does not
+transfer to a materially different shape
+(\S\ref{sec:results-workload}). A dense capture takes
+${\approx}2$~hours of GPU time for $r\in\{2,4,8,16,32\}$, versus
+days for per-operator databases (Vidur, AIConfigurator, Revati).
+The cost is acceptable when amortised over many emulated runs
+but remains a non-trivial up-front commitment; finer oracle axes
+(per-request prompt length rather than batch-total tokens) could
+reduce the shape-match cost, a natural next step.
 
-\paragraph{L2: single-node scope.} We validate only single-GPU
-single-process deployments. Multi-GPU parallelism (TP, PP, EP) and
-cluster-level deployment introduce dynamics the current oracle does
-not capture: collective communication latency, NIC bandwidth
-sharing, inter-host queue coupling, distributed scheduler state. The
-integration point (executor boundary) is per-process by construction;
-extending the architecture to multi-GPU requires modelling both the
-per-device per-step latency and the distributed coordination term,
-which our oracle does not do today.
+\paragraph{Single-node scope.} We validate single-GPU
+single-process deployments. Multi-GPU parallelism (TP, PP, EP)
+and cluster-level placement introduce dynamics the current
+oracle does not capture: collective communication latency, NIC
+bandwidth sharing, inter-host queue coupling. Extending the
+oracle with inter-node round-trip and collective-bandwidth
+terms, profiled from a real multi-host measurement, is the
+primary direction for capacity-planning workflows.
 
-\paragraph{L3: high-level keying elides low-level variance.} The
-(total-tokens, concurrency) oracle is a coarse key for a
-phenomenologically dense event. It does not expose
-prefix-cache hit/miss effects, KV-cache offloading dynamics under
-memory pressure, kernel-launch jitter near peak utilisation, or
-speculative-decoding acceptance variance. Each phenomenon has
-characterisable behaviour at the measurement level; the current
-axis choice hides it. Adding profile axes for these is feasible but
-multiplies capture cost super-linearly.
+\paragraph{High-level keying elides low-level variance.} The
+(total-tokens, concurrency) oracle does not expose prefix-cache
+hit/miss effects, KV-cache offloading under memory pressure,
+kernel-launch jitter near peak utilisation, or
+speculative-decoding acceptance variance. Per-phenomenon profile
+axes are feasible but multiply capture cost super-linearly;
+selective additions tied to deployment scenarios are the
+practical path.
 
-\paragraph{L4: integration bindings track vLLM internals.} While the
-integration footprint is small---roughly $400$ lines of plugin code,
-no source-level modification of vLLM, and no emulator-side
-reimplementation of admission, output processing, or worker-side
-bookkeeping---the executor-boundary hook and platform plugin are
-pinned to specific vLLM internal APIs. Upstream refactors to those
-APIs can break the bindings; our results are reported against
-vLLM 0.18.1. This is not a hand-coded mirror of vLLM's behaviour
-(the way a scheduler-reimplementation simulator would be); it is
-a small surface of integration points that must remain in sync with
-upstream evolution.
-
-% ---------------------------------------------------------------------
-\section{Future work}
-\label{sec:future}
-% ---------------------------------------------------------------------
-
-\paragraph{F1: cluster-level emulation.} Extending the oracle with
-inter-node round-trip and collective-bandwidth terms, profiled from a
-real multi-host measurement. This is the primary direction for
-capacity-planning workflows on realistic deployments.
-
-\paragraph{F2: edge-case-aware profile axes.} Per-request prefix-cache
-hit rate, KV-offload queue depth, and speculative-decoding acceptance
-rate as additional profile dimensions. Selective additions based on
-deployment scenario are the likely practical path.
-
-\paragraph{F3: tighter oracle keying at workload boundaries.}
-Finer axes such as per-request prompt length (rather than batch-total
-tokens) could reduce the shape-match-invariant cost by making the
-oracle more robust to partial workload drift between capture and
-bench.
-
-\paragraph{F4: upstream-version adaptability.} A small automated test
-matrix that exercises the executor-boundary bindings against
-multiple vLLM releases would catch API drift early and lower the
-maintenance cost of the integration layer.
+\paragraph{Integration bindings track vLLM internals.} The
+footprint is small ($\sim$400~lines of plugin code, no
+source-level modification of vLLM, no reimplementation of
+admission, output processing, or worker-side bookkeeping), but
+the executor-boundary hook and platform plugin are pinned to
+specific vLLM internal APIs; results here are against vLLM
+0.18.1. Unlike a scheduler-reimplementation simulator, this is a
+small surface of integration points that must stay in sync with
+upstream; an automated test matrix across vLLM releases would
+catch API drift early.
 
 % ---------------------------------------------------------------------
 \section{Related work}
