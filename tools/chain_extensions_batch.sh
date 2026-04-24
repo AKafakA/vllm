@@ -11,8 +11,9 @@ touch "${MASTER_MARKER}.started"
 echo "=== extensions batch start $(date -u) ===" > "$MASTER_LOG"
 
 for CELL_SCRIPT in \
-    tools/chain_redo_dense_m5.sh \
-    tools/chain_bursty_m2.sh; do
+    tools/chain_config_triton_m2.sh \
+    tools/chain_bursty_m2.sh \
+    tools/chain_redo_dense_m5.sh; do
     CELL_NAME=$(basename "$CELL_SCRIPT" .sh)
     echo "" >> "$MASTER_LOG"
     echo "[$(date +%T)] --> $CELL_NAME" >> "$MASTER_LOG"
