@@ -134,6 +134,41 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
                   f"{self._trim_lo},{self._trim_hi} — this removes tail samples "
                   f"and can shift accuracy by 10-18pp. Verify this is intentional. ***")
 
+        # Roofline correction for out-of-domain sum_kv extrapolation.
+        # When a BW calibration has been merged into the profile pack, the
+        # oracle applies a linear per-token correction on decode steps:
+        #   step_us += bw_slope_us_per_token * (sum_kv - bw_reference_sum_kv)
+        # Calibration is produced by tools/profile_bw_calibration.py.
+        #
+        # Two slope variants may be present:
+        #   bw_slope_measured_us_per_token: fit from a long-sequence trace
+        #   bw_slope_constant_us_per_token: computed from HW-spec BW
+        # Selected by VLLM_EMULATOR_BW_SLOPE_SOURCE in
+        # {"disabled", "measured", "constant"}. Default "disabled" keeps
+        # behaviour byte-identical to pre-branch oracle.
+        source = os.environ.get(
+            "VLLM_EMULATOR_BW_SLOPE_SOURCE", "disabled").lower()
+        if source not in ("disabled", "measured", "constant"):
+            raise ValueError(
+                f"VLLM_EMULATOR_BW_SLOPE_SOURCE must be 'disabled', "
+                f"'measured', or 'constant'; got {source!r}")
+        self._bw_slope_source = source
+        calib = profile_pack.get("bw_calibration") or {}
+        if source == "measured":
+            self._bw_slope_us_per_token = float(
+                calib.get("bw_slope_measured_us_per_token") or 0.0)
+        elif source == "constant":
+            self._bw_slope_us_per_token = float(
+                calib.get("bw_slope_constant_us_per_token") or 0.0)
+        else:
+            self._bw_slope_us_per_token = 0.0
+        self._bw_reference_sum_kv = float(
+            profile_pack.get("bw_reference_sum_kv") or 0.0)
+        if self._bw_slope_us_per_token > 0:
+            print(f"[ProfileGpuCostOracle] roofline correction ENABLED: "
+                  f"source={source} slope={self._bw_slope_us_per_token:.4f} "
+                  f"us/tok ref_sum_kv={self._bw_reference_sum_kv:.0f}")
+
         # 2D distribution: (tt, conc) -> bucket with raw samples list.
         # Separated by step type: decode (CUDA graph) vs prefill (eager).
         # Combined distribution is the fallback.
@@ -540,6 +575,19 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         if self._ipc_position == "response" and has_prefill:
             overhead_us = self._lookup_sched_overhead_us(max(num_requests, 1))
             result = result + overhead_us
+
+        # Roofline correction: extend the empirical profile along the
+        # sum_kv axis using a calibrated per-token slope. Only applied
+        # to decode-only steps — prefill compute scales quadratically
+        # with prompt length, which this linear model does not capture.
+        if (
+            self._bw_slope_us_per_token > 0
+            and not has_prefill
+            and sum_kv > 0
+        ):
+            result = result + self._bw_slope_us_per_token * (
+                sum_kv - self._bw_reference_sum_kv
+            )
 
         return result
 
