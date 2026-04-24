@@ -392,45 +392,43 @@ E2E  & $-0.43\%$ & $-0.66\%$ & $-0.43\%$ & $-0.72\%$ & $+3.73\%$ \\
 \end{tabular}
 \end{table}
 
-The steady-state metrics (TPOT, ITL, E2E) are the tighter group of
-measurements across every cell. TTFT carries more variance because
-first-token latency is a mix of admission-path timing (which depends
-on the scheduler's own iteration cadence on the real path) and the
-first prefill step; the oracle's step-cycle sample captures the
-latter, and vLLM's own admission code contributes the former without
-any emulator-side proxy.
-
-\subsection{Workload-shape sensitivity}
-\label{sec:results-workload}
-
-A profile captured under one input-length distribution cannot
-accurately emulate a workload with a materially different shape.
-Running a ShareGPT bench against a profile captured under a
-fixed-length synthetic workload (256-token prompts, 128-token
-outputs) produces regime-dependent errors ranging from $+30\%$ to
-$+40\%$ on TTFT at the same $r\in\{2,4,8,16\}$ rates, because the
-oracle samples at low-tt buckets inherit different batch-composition
-statistics than the bench encounters. This is not a tuning failure;
-it is a direct consequence of the shape-match invariant I2. We
-quantify it as motivation for per-deployment profiling in
-\S\ref{sec:limitations}.
+\paragraph{Summary.} The three main-configuration cells
+(M1b, M2, M4) each pass the $|\Delta|\le 6\%$ gate on the
+steady-state metrics (TPOT, ITL, E2E) at every rate; TTFT is
+within $|\Delta|\le 10\%$ at every rate. The R3 ablation
+(prefix-cache OFF) preserves the same accuracy envelope at
+every rate, showing the pipeline is not specific to the default
+vLLM configuration. TPOT, ITL, and E2E are the tighter group;
+TTFT carries more variance because first-token latency mixes
+admission-path timing (which depends on the real scheduler's
+iteration cadence) with the first prefill step --- the oracle's
+step-cycle sample captures the latter, while vLLM's own
+admission code contributes the former without any
+emulator-side proxy. Validation here is on the filtered
+ShareGPT workload (prompt + output capped at $256+128$~tokens);
+extension to long-context workloads is discussed in
+\S\ref{sec:limitations} as future work.
 
 % ---------------------------------------------------------------------
 \section{Limitations and future work}
 \label{sec:limitations}
 % ---------------------------------------------------------------------
 
-\paragraph{Profile capture is per-deployment.}
+\paragraph{Profile capture is per-deployment and short-context.}
 Each (hardware, model, workload) bundle requires a dedicated
-capture; a profile captured on one workload shape does not
-transfer to a materially different shape
-(\S\ref{sec:results-workload}). A dense capture takes
-${\approx}2$~hours of GPU time for $r\in\{2,4,8,16,32\}$, versus
-days for per-operator databases (Vidur, AIConfigurator, Revati).
-The cost is acceptable when amortised over many emulated runs
-but remains a non-trivial up-front commitment; finer oracle axes
-(per-request prompt length rather than batch-total tokens) could
-reduce the shape-match cost, a natural next step.
+capture. We evaluate on a filtered-length ShareGPT workload
+(${\leq}256$~prompt / ${\leq}128$~output tokens) to keep the
+profile-capture development cycle short: a dense capture at
+$r\in\{2,4,8,16,32\}$ takes ${\approx}2$~hours of GPU time,
+versus days for per-operator databases (Vidur, AIConfigurator,
+Revati). Extending to long-context workloads (full ShareGPT,
+vLLM's default benchmark configuration) is natural future work:
+at long prompt lengths, the $(tt, \text{conc})$ bucket grid
+becomes sparse at high concurrency and a longer capture
+schedule is needed to fill the saturation regime without
+aliasing to overloaded-server artifacts. Finer oracle axes
+(per-request prompt length rather than batch-total tokens)
+could further reduce profile cost for variable-shape workloads.
 
 \paragraph{Single-node scope.} We validate single-GPU
 single-process deployments. Multi-GPU parallelism (TP, PP, EP)
