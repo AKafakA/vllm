@@ -64,8 +64,11 @@ def main():
 
     if args.reference_sum_kv is not None:
         ref = float(args.reference_sum_kv)
+    elif "bw_reference_sum_kv" in calib and calib["bw_reference_sum_kv"]:
+        # Preferred: fit-emitted reference (overall mean sum_kv in profile).
+        ref = float(calib["bw_reference_sum_kv"])
     else:
-        lo, hi = calib.get("sum_kv_range", [0, 0])
+        lo, hi = calib.get("sum_kv_range_conc_means") or calib.get("sum_kv_range", [0, 0])
         ref = (lo + hi) / 2.0 if (lo or hi) else 0.0
     profile["bw_reference_sum_kv"] = ref
 

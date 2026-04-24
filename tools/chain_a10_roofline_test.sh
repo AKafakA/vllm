@@ -38,47 +38,23 @@ touch "${MARKER}.started"
 echo "=== ${TAG} start $(date -u) ===" > "$LOG"
 
 # ------------------------------------------------------------------
-# Stage 1: start server with trace on, run calibration.
+# Stage 1: fit BW slope from the EXISTING profile's trace.
+# No separate GPU run needed — regresses step_cycle_us across the
+# profile's conc buckets, using each bucket's mean sum_kv as the x
+# axis. The profile already spans sum_kv ≈ 400 → 21 000, which
+# dwarfs what a single-sequence synthetic request can sweep.
 # ------------------------------------------------------------------
-echo "[$(date +%T)] STAGE 1: BW calibration" >> "$LOG"
-
-# Kill any stale server/bench first.
-pkill -9 -f 'vllm.entrypoints' 2>/dev/null || true
-pkill -9 -f 'bench serve' 2>/dev/null || true
-sleep 2
-
-env \
-    VLLM_EMULATOR_TRACE_STEP_CYCLE=1 \
-    VLLM_EMULATOR_STEP_TRACE_OUTPUT="$TRACE" \
-python3 -m vllm.entrypoints.openai.api_server \
-    --model "$BENCH_MODEL" --max-model-len "$BENCH_MAX_MODEL_LEN" \
-    --port "$BENCH_PORT" --trust-remote-code $EXTRA_SERVER_ARGS \
-    >> "$LOG" 2>&1 &
-SERVER_PID=$!
-echo "  server pid=$SERVER_PID" >> "$LOG"
-
-# Wait for /health.
-for i in $(seq 1 60); do
-    if curl -sf "http://localhost:${BENCH_PORT}/health" >/dev/null 2>&1; then
-        echo "  server healthy at t=$i" >> "$LOG"
-        break
-    fi
-    sleep 2
-done
-
-python3 "$REPO/tools/profile_bw_calibration.py" \
-    --model "$BENCH_MODEL" \
-    --base-url "http://localhost:${BENCH_PORT}" \
-    --trace-path "$TRACE" \
-    --prompt-len 3500 --output-len 500 \
+echo "[$(date +%T)] STAGE 1: fit BW slope from profile trace" >> "$LOG"
+PROFILE_TRACE="$REPO/results/A10-adaptive-apr24-a10-sat-band/step_cycle_trace.jsonl"
+if [ ! -f "$PROFILE_TRACE" ]; then
+    echo "profile trace missing at $PROFILE_TRACE — aborting" >> "$LOG"
+    touch "${MARKER}.done"; exit 1
+fi
+python3 "$REPO/tools/fit_bw_slope_from_profile.py" \
+    --trace-path "$PROFILE_TRACE" \
     --out-json "$CALIB" \
     --hw-bw-gbs 480 \
-    >> "$LOG" 2>&1 || echo "  calib FAIL" >> "$LOG"
-
-# Stop server.
-kill -9 "$SERVER_PID" 2>/dev/null || true
-pkill -9 -f 'vllm.entrypoints' 2>/dev/null || true
-sleep 3
+    >> "$LOG" 2>&1 || echo "  fit FAIL" >> "$LOG"
 
 if [ ! -f "$CALIB" ] || grep -q '"error"' "$CALIB"; then
     echo "calibration did not produce valid JSON — aborting" >> "$LOG"
@@ -116,7 +92,8 @@ run_validate () {
         bash "$REPO/tools/chain_validate_sharegpt.sh" >> "$LOG" 2>&1
 }
 
-run_validate "disabled" "$BASE_PROFILE" "validate-${TAG}-off"
+# Skip "off" — Test A earlier this session already produced it
+# (validate-apr24-a10-sat-band-sample). Run measured + constant only.
 run_validate "measured" "$MEASURED_PROFILE" "validate-${TAG}-measured"
 run_validate "constant" "$CONSTANT_PROFILE" "validate-${TAG}-constant"
 
