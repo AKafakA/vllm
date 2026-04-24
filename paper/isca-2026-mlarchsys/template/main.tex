@@ -455,7 +455,7 @@ selective additions tied to deployment scenarios are the
 practical path.
 
 \paragraph{Integration bindings track vLLM internals.} The
-footprint is small ($\sim$400~lines of plugin code, no
+footprint is small (${\approx}3.3$K lines of Python total, no
 source-level modification of vLLM, no reimplementation of
 admission, output processing, or worker-side bookkeeping), but
 the executor-boundary hook and platform plugin are pinned to
@@ -505,8 +505,29 @@ The step-cycle profile captures whatever attention kernel
 vLLM actually executes, inheriting vLLM's own hardware
 portability --- we validate on RTX~8000 (Turing) and A10
 (Ampere). All profile-based approaches including ours
-require physical access to target hardware. We plan to
-open-source \sysname{} concurrent with publication.
+require physical access to target hardware.
+
+The implementation is correspondingly compact. The
+open-source release of \sysname{} is 3.3K lines of Python
+split across four parts: oracle (density-aware step-latency,
+828~lines), vLLM integration (platform plugin, executor
+hook, GPU cost path, and mocks; 1429~lines), profile
+pipeline (builder, loader, validator; 642~lines), and
+orchestration scripts for profile capture and validation
+(422~lines). By comparison, the public Python source of
+Vidur~\cite{agrawal2024vidur} is ${\approx}11$K lines,
+LLM-ServingSim~\cite{cho2024llmservingsim} ${\approx}15$K,
+and AIConfigurator~\cite{nvidia2026aiconfigurator} larger
+still (its source bytes include pre-collected
+hardware-latency tables embedded in Python modules, not
+only implementation code). Revati~\cite{agrawal2026revati}
+reports ${\approx}800$~lines of C++ for the Timekeeper plus
+${\approx}6000$~lines for the Device Emulation Layer, with
+${\leq}50$~per-framework patch lines for vLLM and SGLang.
+The gap reflects \sysname{}'s re-implementation-free
+design: the scheduler, admission path, and output pipeline
+are vLLM's own code. We plan to open-source \sysname{} as
+a pip-installable plugin concurrent with this publication.
 
 \textbf{Serving systems and scheduling.} \sysname{} plugs into
 vLLM~\cite{kwon2023vllm}. Adjacent systems whose policies would
