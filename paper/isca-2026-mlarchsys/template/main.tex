@@ -264,7 +264,11 @@ sampling in the batching-transit regime where batch composition is
 most volatile and oracle queries occur most frequently. Bucket
 densities in the transit concurrency band are typically several-fold
 higher than in the edges, which is directly responsible for the
-accuracy the oracle can achieve at moderate rates.
+accuracy the oracle can achieve at moderate rates. A representative
+profile (Qwen3-8B on RTX~8000, filtered ShareGPT) is
+$1.8$\,MB of JSON containing ${\approx}143$K step-cycle samples
+across ${\approx}7.2$K buckets, captured in ${\approx}2.4$ hours of
+GPU wall-clock time.
 
 \subsection{Density-aware oracle}
 \label{sec:design-oracle}
