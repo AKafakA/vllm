@@ -509,27 +509,27 @@ portability --- we validate on RTX~8000 (Turing) and A10
 (Ampere). All profile-based approaches including ours
 require physical access to target hardware.
 
-The implementation is correspondingly compact. The
-open-source release of \sysname{} is 2.9K lines of Python (plus a 62-line patch to vLLM's gpu_worker.py to wire the hook)
-split across four parts: oracle (density-aware step-latency,
-713~lines), vLLM integration (platform plugin, executor
-hook, GPU cost path, and mocks; 1048~lines (of which 251 is GPU mocking: CUDA API stubs + fake model-runner output)), profile
-pipeline (builder, loader, validator; 642~lines), and
-orchestration scripts for profile capture and validation
-(422~lines). By comparison, the public Python source of
-Vidur~\cite{agrawal2024vidur} is ${\approx}11$K lines,
-LLM-ServingSim~\cite{cho2024llmservingsim} ${\approx}15$K,
-and AIConfigurator~\cite{nvidia2026aiconfigurator} larger
-still (its source bytes include pre-collected
-hardware-latency tables embedded in Python modules, not
-only implementation code). Revati~\cite{agrawal2026revati}
-reports ${\approx}800$~lines of C++ for the Timekeeper plus
-${\approx}6000$~lines for the Device Emulation Layer, with
-${\leq}50$~per-framework patch lines for vLLM and SGLang.
-The gap reflects \sysname{}'s re-implementation-free
+The implementation is correspondingly compact. \sysname{}
+ships as a patch over vLLM that adds an emulator backend: a
+62-line lazy-import hook in \texttt{vllm/v1/worker/gpu\_worker.py}
+plus a \texttt{vllm\_emulator/} package. The total delta
+against upstream vLLM is ${\approx}2.9$K lines of Python; of
+these, the core runtime emulator path (the code that executes
+during inference) is ${\approx}1.2$K lines: the worker hook
+and oracle (${\approx}1$K), the 62-line wire-in, and the
+CUDA/model mocks used in CPU-only mode (${\approx}0.25$K).
+The remaining ${\approx}1.7$K lines are offline tooling
+(profile builder and orchestration scripts). Compared with
+Vidur~\cite{agrawal2024vidur} (${\approx}11$K lines of
+Python), LLM-ServingSim~\cite{cho2024llmservingsim}
+(${\approx}15$K), AIConfigurator~\cite{nvidia2026aiconfigurator}
+(larger still, with embedded hardware-latency tables), and
+Revati~\cite{agrawal2026revati}
+(${\approx}6.9$K of C++ CUDA interception plus per-framework
+patches), the gap reflects \sysname{}'s re-implementation-free
 design: the scheduler, admission path, and output pipeline
-are vLLM's own code. \sysname{} is available as an open-source
-pip-installable plugin.
+are vLLM's own code. The anonymous release contains all
+profile-capture and validation scripts.
 
 \textbf{Serving systems and scheduling.} \sysname{} plugs into
 vLLM~\cite{kwon2023vllm}. Adjacent systems whose policies would
