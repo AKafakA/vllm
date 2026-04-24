@@ -21,6 +21,12 @@ export VLLM_EMULATOR_IPC_POSITION=disabled
 export VLLM_EMULATOR_PREP_SURROGATE=0
 export VLLM_EMULATOR_ORACLE_AGG=sample
 
+# A10 delivery ceiling is ~3.5 r/s. Rates past 4 converge to the
+# same delivered ~3.5 r/s with only the queue depth differing, so
+# they measure queue-wait not real throughput. Use rates that
+# exercise the envelope meaningfully: sub-ceiling + just past.
+export RATES="1 2 3 4 8"
+
 TAG="apr24-a10-roofline-per_conc"
 MARKER="/tmp/vllm_${TAG}"
 LOG="/tmp/vllm_${TAG}.log"

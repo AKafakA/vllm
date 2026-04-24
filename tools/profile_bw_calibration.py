@@ -68,11 +68,17 @@ def send_one_long_request(base_url: str, model: str,
     return {"elapsed_s": time.time() - t0, "response": r.json()}
 
 
-def parse_decode_steps(trace_path: str):
-    """Return list of (step_cycle_us, sum_kv) for decode-only steps."""
+def parse_decode_steps(trace_path: str, start_offset: int = 0):
+    """Return (header, [(step_cycle_us, sum_kv)]) for decode-only steps.
+
+    Header is parsed from the whole file (it's at the top).  Points
+    are parsed only from lines written AFTER start_offset so we
+    isolate this calibration request from warmup/profile records.
+    """
     points = []
     header = None
     with open(trace_path) as f:
+        # Header from top of file.
         for line in f:
             try:
                 d = json.loads(line)
@@ -80,8 +86,15 @@ def parse_decode_steps(trace_path: str):
                 continue
             if d.get("_header"):
                 header = d
+                break
+        # Restart from start_offset for records.
+        f.seek(start_offset)
+        for line in f:
+            try:
+                d = json.loads(line)
+            except Exception:
                 continue
-            if d.get("__marker__"):
+            if d.get("_header") or d.get("__marker__"):
                 continue
             if (
                 d.get("num_new_reqs", 0) == 0
@@ -135,8 +148,12 @@ def main():
     out_json = Path(args.out_json)
     out_json.parent.mkdir(parents=True, exist_ok=True)
 
-    # Clear trace file so we only see this request's steps.
-    trace_path.write_text("")
+    # Record where the trace ends right now so we parse only lines
+    # written after our request is sent. Do NOT truncate — the
+    # server wrote its header at startup and we need it.
+    pre_size = trace_path.stat().st_size if trace_path.exists() else 0
+    print(f"[calib] trace pre-size = {pre_size} bytes "
+          f"(will parse only records written after this point)", flush=True)
 
     print(f"[calib] sending long request: prompt_len≈{args.prompt_len} "
           f"output_len={args.output_len}", flush=True)
@@ -147,8 +164,9 @@ def main():
     # Small grace period for server to flush remaining trace lines.
     time.sleep(2)
 
-    header, points = parse_decode_steps(str(trace_path))
-    print(f"[calib] parsed {len(points)} decode-only steps", flush=True)
+    header, points = parse_decode_steps(str(trace_path), start_offset=pre_size)
+    print(f"[calib] parsed {len(points)} decode-only steps "
+          f"(from file offset {pre_size})", flush=True)
 
     if len(points) < args.min_samples:
         print(
