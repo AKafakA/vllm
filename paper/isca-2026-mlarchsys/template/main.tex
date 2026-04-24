@@ -455,7 +455,7 @@ selective additions tied to deployment scenarios are the
 practical path.
 
 \paragraph{Integration bindings track vLLM internals.} The
-footprint is small (${\approx}3.3$K lines of Python total, no
+footprint is small (${\approx}2.9$K lines of Python total, no
 source-level modification of vLLM, no reimplementation of
 admission, output processing, or worker-side bookkeeping), but
 the executor-boundary hook and platform plugin are pinned to
@@ -508,10 +508,10 @@ portability --- we validate on RTX~8000 (Turing) and A10
 require physical access to target hardware.
 
 The implementation is correspondingly compact. The
-open-source release of \sysname{} is 3.3K lines of Python
+open-source release of \sysname{} is 2.9K lines of Python
 split across four parts: oracle (density-aware step-latency,
 828~lines), vLLM integration (platform plugin, executor
-hook, GPU cost path, and mocks; 1429~lines), profile
+hook, GPU cost path, and mocks; 1048~lines), profile
 pipeline (builder, loader, validator; 642~lines), and
 orchestration scripts for profile capture and validation
 (422~lines). By comparison, the public Python source of
