@@ -60,6 +60,8 @@ profile$\leftrightarrow$bench state match and
 profile$\leftrightarrow$workload shape match --- that make this
 achievable, and the limitations of high-level profile keying at the
 single-node regime we evaluate.
+\sysname{} has been open-sourced at
+\textcolor{blue}{\url{https://anonymous.4open.science/r/vllm-E671/README_EMULATOR.md}}.
 \end{abstract}
 
 % ---------------------------------------------------------------------
@@ -526,8 +528,8 @@ ${\approx}6000$~lines for the Device Emulation Layer, with
 ${\leq}50$~per-framework patch lines for vLLM and SGLang.
 The gap reflects \sysname{}'s re-implementation-free
 design: the scheduler, admission path, and output pipeline
-are vLLM's own code. We plan to open-source \sysname{} as
-a pip-installable plugin concurrent with this publication.
+are vLLM's own code. \sysname{} is available as an open-source
+pip-installable plugin.
 
 \textbf{Serving systems and scheduling.} \sysname{} plugs into
 vLLM~\cite{kwon2023vllm}. Adjacent systems whose policies would
