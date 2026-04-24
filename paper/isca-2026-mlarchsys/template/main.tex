@@ -186,14 +186,8 @@ length 49 tokens, median 28, p99 227.
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{../../figures/fig1_emulator_architecture.png}
-  \caption{\sysname{} integrates at the executor boundary of a stock
-  vLLM process. Scheduler, admission path, HTTP server, tokenizer, and
-  output pipeline are vLLM's own code, unchanged. A single plugin
-  replaces the worker's forward pass with a profile-driven delayed
-  Future: the oracle draws a per-step latency from a two-dimensional
-  profile keyed by batch composition (total tokens) and concurrency;
-  a timer resolves the Future with fake output tokens after the drawn
-  delay. No admission proxy, no CPU-side bookkeeping mirror.}
+  \caption{\sysname{} plugs in at the executor boundary; everything
+  else is vLLM's own code.}
   \label{fig:arch}
 \end{figure}
 
@@ -214,12 +208,7 @@ IPC cost real vLLM incurs at that (tt, conc) bucket.
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{../../figures/fig2_timer_future_timeline.png}
-  \caption{Timer-based Future preserves the engine's scheduler--worker
-  overlap. On the real path, the scheduler prepares the next batch
-  concurrently with worker execution. The emulated path resolves a
-  Future after the profiled delay, so the scheduler continues to
-  overlap with the ``pending'' window; downstream pipelining is
-  bit-identical.}
+  \caption{Timer-based Future preserves scheduler--worker overlap.}
   \label{fig:timeline}
 \end{figure}
 
@@ -353,12 +342,8 @@ are concurrency-limited by the same
 
 \begin{table}[t]
 \centering
-\caption{Relative error $(\text{emu}-\text{real})/\text{real}$
-across four cells at $r\in\{2,4,8,16,32\}$. M1b/M2/M4 are the main
-accuracy claims (default configuration); R3 is an ablation with
-vLLM's prefix-cache disabled. All use the same pipeline:
-density-aware adaptive profile capture with saturation-weighted
-rate coverage, dense profile, hook OFF, surrogate OFF.}
+\caption{Relative error (emu$-$real)/real across four cells.
+M1b/M2/M4 are main; R3 is the prefix-cache-OFF ablation.}
 \label{tab:main}
 \small
 \begin{tabular}{@{}lrrrrr@{}}
@@ -465,61 +450,49 @@ catch API drift early.
 % ---------------------------------------------------------------------
 
 \textbf{LLM serving simulators and emulators.}
-Vidur~\cite{agrawal2024vidur} is an offline Python event-driven
-simulator that re-implements vLLM's scheduler as \texttt{sarathi}
-and predicts per-operator latencies via random-forest models
-trained on operator-level microbenchmarks. Its published
-hardware matrix is limited to datacenter SXM configurations
-(A100 DGX, H100 DGX, 4$\times$A100 NVLink, 8$\times$A40);
-consumer-class (Turing, RTX) and mid-tier devices (A10, L40S)
-are not supported without a fresh profiling campaign.
-LLM-ServingSim~\cite{cho2024llmservingsim} targets disaggregated
-serving with an sklearn-based attention-latency predictor and
-supports A6000, H100, and TPU-v6e-1.
-AIConfigurator~\cite{nvidia2026aiconfigurator} is an NVIDIA
-open-source configuration recommender built on an operator-level
-profile database and a piecewise-linear saturation correction
-factor; its supported device list is H100/H200/B200/GB200/A100
-SXM only. Revati~\cite{agrawal2026revati}, from the same group as
-Vidur, acknowledges that ``existing discrete-event simulation
-approaches face a perpetual maintenance burden'' from
-re-implementing serving logic and proposes CUDA-API interception
-with a virtual-time coordination protocol; the paper reports
-results on vLLM and SGLang but does not publicly release code.
+Prior work is dominated by offline event-driven simulators that
+re-implement the serving engine's scheduler and predict
+forward-pass cost from per-operator latency databases. Vidur
+~\cite{agrawal2024vidur} uses learned random-forest predictors
+per operator; AIConfigurator~\cite{nvidia2026aiconfigurator}
+uses a profiled operator table with a piecewise-linear
+saturation correction; LLM-ServingSim~\cite{cho2024llmservingsim}
+targets disaggregated serving with an sklearn attention
+predictor. All three ship with a fixed supported-device matrix
+(e.g., datacenter SXM configurations) and require a fresh
+per-operator profiling campaign to extend to new hardware,
+which in practice excludes consumer-tier and mid-tier devices
+such as our RTX~8000 and A10 targets.
+Revati~\cite{agrawal2026revati} is a recent online emulator
+from the Vidur group, which acknowledges that re-implementing
+serving logic incurs ``a perpetual maintenance burden''; it
+addresses this by intercepting CUDA API calls via
+\texttt{LD\_PRELOAD}, but the interception layer is
+framework-specific and code has not been publicly released.
 
-\sysname{} differs on six axes:
-(i) \emph{runtime integration} --- runs as a vLLM plugin with zero
-framework modifications, leveraging the engine's own scheduler,
-admission, and output-processing paths unchanged;
-(ii) \emph{dual execution modes from one plugin} --- the same
-profile-driven oracle supports both a \emph{realtime} mode for
-online/dynamic serving study (live HTTP, genuine queueing, SLA
-measurement under load) and an \emph{accelerated} time-skip mode
-for offline configuration-sweep simulation (as in Vidur and
-Revati). Vidur, AIConfigurator, and LLM-ServingSim offer only the
-offline path; Revati is emulator-only. \sysname{} covers both
-from a single implementation;
-(iii) \emph{maintenance burden} --- no re-implementation of
-serving logic; the vLLM v0$\to$v1 architectural transition is
-absorbed automatically without code changes on our side, whereas
-Vidur's \texttt{sarathi} engine and AIConfigurator's operator
-database require manual porting, and Revati's LD\_PRELOAD patches
-must be re-synced per vLLM release;
-(iv) \emph{profile granularity} --- a single aggregate
-step-cycle capture (${\approx}2$~hours per hardware/model pair)
-rather than per-operator profiling (days);
-(v) \emph{backend- and hardware-portable by construction} ---
-the profile captures whatever attention kernel and KV-cache
-backend vLLM executes on whatever GPU is present, giving
-validated coverage across Turing (RTX~8000) and Ampere (A10), two
-devices absent from the above simulators' supported matrices;
-(vi) \emph{no learned hyperparameters} --- the oracle is empirical
-distribution lookup with adaptive $K$ and a CLT-based sample
-floor, not random-forest training. All profile-based approaches
-(including ours) require the target hardware to be physically
-available for profile capture. We plan to release \sysname{} as
-an open-source pip-installable plugin concurrent with this
-publication.
+\sysname{} differs in four ways that matter in practice.
+\emph{(a) Runtime integration}: a vLLM plugin with no source
+modification, using the engine's own scheduler and admission
+path. \emph{(b) One implementation, two modes}: a
+\texttt{realtime} mode for online serving research (live HTTP,
+real queueing) and an \texttt{accelerated} time-skip mode for
+offline sweeps (analogous to Revati's time warp). Prior systems
+offer at most one of these.
+\emph{(c) Coarse-grained empirical profile}: a single
+step-cycle capture (${\approx}2$ hours per hardware/model)
+captures whatever attention kernel vLLM actually runs,
+hardware-agnostic by construction. Per-operator approaches
+need days of profiling and are tied to the specific kernel
+that was profiled.
+\emph{(d) No learned model, no hyperparameters}: the oracle
+is empirical distribution lookup with CLT-based sample floor;
+no training, no feature engineering, no re-training when the
+backend changes.
+We plan to release \sysname{} as an open-source plugin
+concurrent with this publication; all four systems above
+require physical access to the target hardware for profile
+capture, and the vLLM-plugin form factor inherits vLLM's own
+hardware portability.
 
 \textbf{Serving systems and scheduling.} \sysname{} plugs into
 vLLM~\cite{kwon2023vllm}. Adjacent systems whose policies would
