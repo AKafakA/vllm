@@ -8,6 +8,13 @@
 #   Relies on env vars BENCH_PORT, BENCH_MODEL being set by the caller
 #   (defaults provided here if unset).
 
+# CRITICAL: bench client opens 1 socket per concurrent request. At r>=8
+# with 2000 prompts under saturation, default 1024 fd limit triggers
+# `aiohttp.ClientConnectorError: Too many open files` and silently marks
+# tail requests as Failed → biased mean_ttft_ms / mean_e2el_ms. Always
+# raise this BEFORE any bench command. See feedback_bench_ulimit.md.
+ulimit -n 65536 2>/dev/null || true
+
 BENCH_PORT="${BENCH_PORT:-8100}"
 BENCH_MODEL="${BENCH_MODEL:-Qwen/Qwen3-8B}"
 BENCH_MAX_MODEL_LEN="${BENCH_MAX_MODEL_LEN:-4096}"
