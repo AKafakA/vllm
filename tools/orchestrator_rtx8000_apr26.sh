@@ -130,11 +130,12 @@ if [ -f "$TRITON_PROFILE" ]; then
 fi
 run_cell "${TAG_PREFIX}-triton" Qwen/Qwen3-8B "--attention-backend TRITON_ATTN" "$TRITON_REUSE"
 
-# ---------------- 4. Burstiness γ=0.25 (reuse M2 profile) ----------------
-# Burstiness is set via bench --burstiness flag, not server args. We pass it
-# through the bench loop; for now, reuse M2 profile + standard bench.
-# TODO: extend run_v4_cell.sh to accept --burstiness.
-run_cell "${TAG_PREFIX}-burstiness-g25" Qwen/Qwen3-8B "" "$M2_PROFILE"
+# ---------------- 4. Burstiness γ=0.25 (DEFERRED) ----------------
+# Burstiness sets the bench client's --burstiness flag (Poisson γ < 1
+# clusters arrivals). run_one_full_sharegpt_cell.sh doesn't yet pass
+# this through. Defer until after Phase 3 mainline; document as
+# §4.2 ablation candidate if time permits.
+echo "[$(date -u +%T)] CELL burstiness-g25 DEFERRED (needs --burstiness flag wiring)" >> "$LOG"
 
 # ---------------- 5. Qwen3-4B (NEW; clean HF cache first) ----------------
 echo "" >> "$LOG"
