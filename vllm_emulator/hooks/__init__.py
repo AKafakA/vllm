@@ -1,15 +1,10 @@
-"""Hook system for vLLM emulator worker interception."""
+"""Hook system for vLLM emulator.
 
-from .gpu_hook import GpuWorkerHook, install_worker_hook
-from .network_hook import NetworkHook, get_network_hook, install_network_hook
-from .offload_hook import OffloadWorkerHook, install_offload_worker_hook
+The executor-level hook is the only supported hook in the v4 (CUDA-invisible)
+path. Worker/scheduler/network/offload hooks were removed in the Apr 25 cleanup
+since their concrete implementations are out of scope for the paper artifact.
+"""
 
-__all__ = [
-    "GpuWorkerHook",
-    "install_worker_hook",
-    "OffloadWorkerHook",
-    "install_offload_worker_hook",
-    "NetworkHook",
-    "get_network_hook",
-    "install_network_hook",
-]
+from .executor_hook import ExecutorEmulatorHook, get_executor_hook
+
+__all__ = ["ExecutorEmulatorHook", "get_executor_hook"]

@@ -3,15 +3,28 @@
 Minimal oracle: given (total_tokens, num_requests, has_prefill), find the
 nearest populated 2D distribution bucket and sample from its raw samples.
 No magic numbers, no synthetic fallbacks, no heuristic thresholds.
+
+Debug logging: set VLLM_EMULATOR_DEBUG=1 to log every oracle call with
+inputs, selected bucket, and sampled latency. Output goes to stderr,
+prefixed with [OracleDebug].
 """
 
 from __future__ import annotations
 
 import os
 import random
+import sys
 from typing import Any
 
 from .base import BaseGpuCostOracle
+
+
+_DEBUG = os.environ.get("VLLM_EMULATOR_DEBUG", "").lower() in ("1", "true", "yes")
+
+
+def _dbg(msg: str) -> None:
+    if _DEBUG:
+        print(f"[OracleDebug] {msg}", file=sys.stderr, flush=True)
 
 
 class ProfileGpuCostOracle(BaseGpuCostOracle):
@@ -613,6 +626,11 @@ class ProfileGpuCostOracle(BaseGpuCostOracle):
         )
         if result is None:
             result = 0.0
+        _dbg(
+            f"call tt={total_tokens} conc={num_requests} sum_kv={sum_kv} "
+            f"has_prefill={has_prefill} -> tt_query={tt_query:.0f} "
+            f"sample_us={result:.1f}"
+        )
 
         # Response-side IPC: when enabled, add sched_overhead_table lookup
         # to prefill-containing steps. This is the IPC round-trip charged

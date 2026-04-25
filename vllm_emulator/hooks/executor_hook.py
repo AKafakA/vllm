@@ -243,6 +243,17 @@ class ExecutorEmulatorHook:
             sum_kv=sum_kv,
         )
         latency_s = latency_us / 1e6
+        # Hook witness log — fires only when VLLM_EMULATOR_DEBUG=1.
+        # Proves the hook intercepted execute_model AND called the oracle.
+        if os.environ.get("VLLM_EMULATOR_DEBUG", "").lower() in ("1", "true", "yes"):
+            import sys as _sys
+            print(
+                f"[HookDebug] step intercepted: tt={total_tokens} "
+                f"conc={num_total_reqs} new={num_new} sum_kv={sum_kv} "
+                f"oracle_us={latency_us:.1f} -> sleep {latency_s*1000:.2f}ms "
+                f"(no GPU forward pass)",
+                file=_sys.stderr, flush=True,
+            )
 
         # 1b. Optional: run CPU-side prep surrogate.
         #
