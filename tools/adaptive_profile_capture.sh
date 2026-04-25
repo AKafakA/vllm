@@ -1,0 +1,132 @@
+#!/bin/bash
+# Adaptive multi-rate profile capture — Stage 2 of run_one_full_sharegpt_cell.
+#
+# Sweeps a range of request rates, captures step-cycle traces with
+# VLLM_EMULATOR_TRACE_STEP_CYCLE=1, and builds the 2D (tt, conc) profile
+# pack via build_serving_profile_filtered.py.
+#
+# Coverage targets (per round, density chosen to populate both low-conc
+# and saturation buckets evenly):
+#   r=2,4   : 3000 prompts each — fixes Apr 25 r=4 sparse-bucket regression
+#   r=8,12,16,24 : 2500 prompts each — mid-conc
+#   r=32,48 : 3000 prompts each — saturation
+#   r=inf   : 4000 prompts — deep saturation
+# Total ~30k prompts/round × ROUNDS=2 = ~61k samples.
+#
+# Server config (parity-critical): DEFAULT max-num-seqs everywhere.
+# EXTRA_SERVER_ARGS flows through (e.g. --no-prefix-caching, --attention-backend).
+# DO NOT add --max-num-seqs here (run_one_full_sharegpt_cell.sh asserts).
+#
+# Required env (from caller):
+#   TAG               — cell tag, used to pick output dir
+#   BENCH_MODEL, BENCH_PORT, BENCH_MAX_MODEL_LEN  (set by _bench_common.sh)
+# Optional env:
+#   ROUNDS           — default 2
+#   SHAREGPT         — default ./results/sharegpt_filtered_256_128.json
+#   EXTRA_SERVER_ARGS — appended to api_server (default "")
+
+set -uo pipefail
+ulimit -n 65536 2>/dev/null || true
+export PATH="$HOME/.local/bin:$PATH"
+source ~/Code/llm/vllm-emulator/.venv/bin/activate
+cd ~/Code/llm/vllm-emulator
+source "$(dirname "$0")/_bench_common.sh"
+
+TAG="${TAG:?required}"
+ROUNDS="${ROUNDS:-2}"
+SHAREGPT="${SHAREGPT:-./results/sharegpt_filtered_256_128.json}"
+EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
+
+if echo "$EXTRA_SERVER_ARGS" | grep -qE '\-\-max-num-seqs|\-\-max_num_seqs'; then
+    echo "FATAL: EXTRA_SERVER_ARGS contains --max-num-seqs. Profile must be" >&2
+    echo "       captured at DEFAULT max-num-seqs to match bench config." >&2
+    exit 1
+fi
+
+# Pick HW prefix from first available GPU model (best-effort).
+HW="UNKNOWN"
+GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)"
+case "$GPU_NAME" in
+    *RTX*8000*) HW="RTX-8000" ;;
+    *A10*)      HW="A10" ;;
+    *L40S*)     HW="L40S" ;;
+    *H100*)     HW="H100" ;;
+    *)          HW="UNKNOWN" ;;
+esac
+
+OUT_DIR="./results/${HW}-adaptive-${TAG}"
+TRACE_DIR="$OUT_DIR/per_rate_traces"
+FINAL_TRACE="$OUT_DIR/step_cycle_trace.jsonl"
+PROFILE="$OUT_DIR/serving-full.json"
+LOG="$OUT_DIR/run.log"
+mkdir -p "$TRACE_DIR" "$OUT_DIR/logs"
+rm -f "$FINAL_TRACE"
+
+if [ ! -f "$SHAREGPT" ]; then
+    echo "FATAL: ShareGPT dataset missing at $SHAREGPT" >&2
+    exit 1
+fi
+
+# Balanced rate-and-prompts: dense at low conc AND saturation.
+RATES_AND_PROMPTS="2:3000 4:3000 8:2500 12:2500 16:2500 24:2500 32:3000 48:3000 inf:4000"
+
+echo "=== adaptive_profile_capture start $(date -u) ===" > "$LOG"
+echo "TAG=$TAG  HW=$HW  ROUNDS=$ROUNDS  EXTRA=$EXTRA_SERVER_ARGS" >> "$LOG"
+echo "Rate list: $RATES_AND_PROMPTS" >> "$LOG"
+
+for ROUND in $(seq 1 "$ROUNDS"); do
+    echo "" >> "$LOG"
+    echo "=== ROUND $ROUND / $ROUNDS at $(date -u +%T) ===" >> "$LOG"
+    common_cleanup
+    sleep 2
+
+    env VLLM_EMULATOR_TRACE_STEP_CYCLE=1 \
+        VLLM_EMULATOR_STEP_CYCLE_TRACE_PATH="$TRACE_DIR/round${ROUND}.jsonl" \
+        python3 -m vllm.entrypoints.openai.api_server \
+            --model "${BENCH_MODEL:-Qwen/Qwen3-8B}" \
+            --max-model-len "${BENCH_MAX_MODEL_LEN:-4096}" \
+            --port "$BENCH_PORT" --trust-remote-code \
+            $EXTRA_SERVER_ARGS \
+            > "$OUT_DIR/logs/server_round${ROUND}.log" 2>&1 &
+    if ! common_wait_server; then
+        echo "    server FAIL round $ROUND" >> "$LOG"
+        continue
+    fi
+    common_warmup
+
+    for entry in $RATES_AND_PROMPTS; do
+        RATE="${entry%%:*}"
+        PROMPTS="${entry##*:}"
+        echo "[$(date -u +%T)] round=$ROUND rate=$RATE prompts=$PROMPTS" >> "$LOG"
+        if [ "$RATE" = "inf" ]; then
+            python3 -m vllm.entrypoints.cli.main bench serve \
+                --model "${BENCH_MODEL:-Qwen/Qwen3-8B}" \
+                --base-url "http://localhost:$BENCH_PORT" \
+                --dataset-name sharegpt --dataset-path "$SHAREGPT" \
+                --num-prompts "$PROMPTS" --seed "$ROUND" \
+                > "$TRACE_DIR/round${ROUND}_r${RATE}.log" 2>&1 || true
+        else
+            python3 -m vllm.entrypoints.cli.main bench serve \
+                --model "${BENCH_MODEL:-Qwen/Qwen3-8B}" \
+                --base-url "http://localhost:$BENCH_PORT" \
+                --dataset-name sharegpt --dataset-path "$SHAREGPT" \
+                --num-prompts "$PROMPTS" --request-rate "$RATE" --seed "$ROUND" \
+                > "$TRACE_DIR/round${ROUND}_r${RATE}.log" 2>&1 || true
+        fi
+    done
+    common_cleanup
+    sleep 3
+done
+
+# Concatenate per-round traces and build the profile pack.
+cat "$TRACE_DIR"/round*.jsonl > "$FINAL_TRACE" 2>/dev/null
+echo "" >> "$LOG"
+echo "[$(date -u +%T)] building profile pack from $FINAL_TRACE" >> "$LOG"
+
+python3 vllm_emulator/profile/build_serving_profile_filtered.py \
+    "$FINAL_TRACE" "$PROFILE" \
+    --gpu-model "$HW" \
+    --model-name "${BENCH_MODEL:-Qwen/Qwen3-8B}" \
+    >> "$LOG" 2>&1 || true
+
+echo "=== adaptive_profile_capture DONE $(date -u) ===" >> "$LOG"
