@@ -166,13 +166,14 @@ class EmulatorPlatform(Platform):
 def emulator_platform_plugin() -> str | None:
     """
     Platform plugin entry point.
-    Only activates when BOTH VLLM_EMULATOR_ENABLE_ORACLE and
-    VLLM_EMULATOR_MOCK_CUDA are set. On machines with real GPU,
-    the executor hook approach uses the native CUDA platform —
-    the emulator platform is only needed for CPU-only (Path B).
+    Activates when EITHER VLLM_EMULATOR_ENABLE_ORACLE or
+    VLLM_EMULATOR_MOCK_CUDA is set. The platform plugin returns
+    device_type="cuda" + handles fallbacks via cuda_mock — required
+    on real-GPU hosts when CUDA_VISIBLE_DEVICES="" hides the GPU
+    (v4 mode) AND on no-GPU hosts (Mode B).
     """
     import os
     if (os.environ.get("VLLM_EMULATOR_ENABLE_ORACLE", "").lower() in ("1", "true", "yes")
-            and os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true", "yes")):
+            or os.environ.get("VLLM_EMULATOR_MOCK_CUDA", "").lower() in ("1", "true", "yes")):
         return "vllm_emulator.platform.EmulatorPlatform"
     return None
