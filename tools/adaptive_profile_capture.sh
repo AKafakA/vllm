@@ -75,8 +75,16 @@ echo "TAG=$TAG  HW=$HW  ROUNDS=$ROUNDS  EXTRA=$EXTRA_SERVER_ARGS" >> "$LOG"
 echo "Rate list: $RATES_AND_PROMPTS" >> "$LOG"
 
 # StepCycleTracer hardcodes /tmp/emulator_step_trace.jsonl (env var override
-# not implemented). Clear stale data from any prior cell before this capture
-# so the trace file we end up reading reflects only THIS cell.
+# not implemented). Before this capture starts:
+#   1. If /tmp has data, archive it to a tagged backup (recovery path in case
+#      the previous cell's result dir corrupted)
+#   2. Then clear /tmp so this capture's trace file contains ONLY this cell's
+#      data — no contamination from prior orchestrator runs.
+if [ -s /tmp/emulator_step_trace.jsonl ]; then
+    BACKUP="/tmp/emulator_step_trace.pre-${TAG}.$(date -u +%Y%m%d-%H%M%S).jsonl"
+    mv /tmp/emulator_step_trace.jsonl "$BACKUP" 2>/dev/null
+    echo "[$(date -u +%T)] archived prior /tmp trace to $BACKUP ($(stat -c%s "$BACKUP" 2>/dev/null) bytes)" >> "$LOG"
+fi
 rm -f /tmp/emulator_step_trace.jsonl
 echo "[$(date -u +%T)] cleared /tmp/emulator_step_trace.jsonl (StepCycleTracer hardcoded path)" >> "$LOG"
 
@@ -136,6 +144,21 @@ fi
 if [ ! -s "$FINAL_TRACE" ]; then
     cat "$TRACE_DIR"/round*.jsonl > "$FINAL_TRACE" 2>/dev/null
 fi
+
+# Sanity guard: FINAL_TRACE must be non-empty AND contain at least one
+# valid header line. If absent or empty, abort the build step — operator
+# can recover from /tmp manually if it still exists.
+if [ ! -s "$FINAL_TRACE" ]; then
+    echo "[$(date -u +%T)] FATAL: $FINAL_TRACE is empty — capture failed to produce trace data" >> "$LOG"
+    echo "  /tmp/emulator_step_trace.jsonl size: $(stat -c%s /tmp/emulator_step_trace.jsonl 2>/dev/null || echo 'absent')" >> "$LOG"
+    exit 2
+fi
+HEADER_COUNT=$(grep -c '"_header"' "$FINAL_TRACE" 2>/dev/null || echo 0)
+if [ "$HEADER_COUNT" -eq 0 ]; then
+    echo "[$(date -u +%T)] FATAL: $FINAL_TRACE has no _header line — trace is malformed" >> "$LOG"
+    exit 2
+fi
+echo "[$(date -u +%T)] FINAL_TRACE OK: $(wc -l < "$FINAL_TRACE") lines, $HEADER_COUNT headers" >> "$LOG"
 echo "" >> "$LOG"
 echo "[$(date -u +%T)] building profile pack from $FINAL_TRACE" >> "$LOG"
 
