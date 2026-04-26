@@ -54,22 +54,20 @@ run_cell "${TAG_PREFIX}-triton" Qwen/Qwen3-8B "--attention-backend TRITON_ATTN"
 # 4. Burstiness γ=0.25 (DEFERRED — needs --burstiness flag wiring)
 echo "[$(date -u +%T)] CELL burstiness-g25 DEFERRED" >> "$LOG"
 
-# 5. Qwen3-4B (clean Qwen3-8B from HF cache first)
-echo "[$(date -u +%T)] cleaning HF cache of Qwen3-8B before Qwen3-4B" >> "$LOG"
+# Qwen3-4B moved to vast A10 orchestrator (Phase 4) — runs there in parallel.
+
+# 5. Llama-3.1-8B (cross-family — high paper priority)
+echo "[$(date -u +%T)] cleaning HF cache of Qwen3-8B before Llama" >> "$LOG"
 rm -rf ~/.cache/huggingface/hub/models--Qwen--Qwen3-8B 2>/dev/null
-run_cell "${TAG_PREFIX}-m1b-qwen3-4b" Qwen/Qwen3-4B ""
-
-# 6. Qwen3-14B
-rm -rf ~/.cache/huggingface/hub/models--Qwen--Qwen3-4B 2>/dev/null
-run_cell "${TAG_PREFIX}-m5-qwen3-14b" Qwen/Qwen3-14B ""
-
-# 7. Llama-3.1-8B (preflight HF token first)
-rm -rf ~/.cache/huggingface/hub/models--Qwen--Qwen3-14B 2>/dev/null
 if bash tools/preflight_hf_token.sh meta-llama/Llama-3.1-8B 2>&1 | tee -a "$LOG" | grep -q "PREFLIGHT OK"; then
     run_cell "${TAG_PREFIX}-m3-llama31-8b" meta-llama/Llama-3.1-8B ""
 else
     echo "[$(date -u +%T)] SKIPPING Llama cell — HF preflight failed" >> "$LOG"
 fi
+
+# 6. Qwen3-14B (model-scale upper bound)
+rm -rf ~/.cache/huggingface/hub/models--meta-llama--Llama-3.1-8B 2>/dev/null
+run_cell "${TAG_PREFIX}-m5-qwen3-14b" Qwen/Qwen3-14B ""
 
 echo "" >> "$LOG"
 echo "=== orchestrator_apr26 DONE $(date -u) ===" >> "$LOG"

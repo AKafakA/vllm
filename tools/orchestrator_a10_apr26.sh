@@ -26,15 +26,23 @@ case "$GPU_NAME" in
     *) echo "FATAL: not an A10 host (got $GPU_NAME)" >> "$LOG"; exit 1 ;;
 esac
 
-# Single cell — full 3 stages at DEFAULT max-num-seqs.
-echo "" >> "$LOG"
-echo "[$(date -u +%T)] --- CELL: apr26-m4-a10-qwen3-8b ---" >> "$LOG"
-bash tools/run_v4_cell.sh apr26-m4-a10-qwen3-8b Qwen/Qwen3-8B "" 2>&1 | tee -a "$LOG"
-RC="${PIPESTATUS[0]}"
-echo "[$(date -u +%T)] CELL apr26-m4-a10-qwen3-8b done (rc=$RC)" >> "$LOG"
+run_a10_cell() {
+    local cell_tag="$1" model="$2"
+    echo "" >> "$LOG"
+    echo "[$(date -u +%T)] --- CELL: $cell_tag ($model) ---" >> "$LOG"
+    bash tools/run_v4_cell.sh "$cell_tag" "$model" "" 2>&1 | tee -a "$LOG"
+    local rc="${PIPESTATUS[0]}"
+    echo "[$(date -u +%T)] CELL $cell_tag done (rc=$rc)" >> "$LOG"
+    bash tools/correctness_cron.sh "./results/$cell_tag" >> "$LOG" 2>&1 || true
+}
 
-# Run correctness sweep on this cell.
-bash tools/correctness_cron.sh "./results/apr26-m4-a10-qwen3-8b" >> "$LOG" 2>&1 || true
+# Cell 1: M4 Qwen3-8B (the headline A10 row in paper Table 1)
+run_a10_cell apr26-m4-a10-qwen3-8b Qwen/Qwen3-8B
+
+# Cell 2: Qwen3-4B model-scale (moved from RTX 8000 to free up RTX 8000 time)
+echo "[$(date -u +%T)] cleaning HF cache of Qwen3-8B before Qwen3-4B" >> "$LOG"
+rm -rf ~/.cache/huggingface/hub/models--Qwen--Qwen3-8B 2>/dev/null
+run_a10_cell apr26-m1b-qwen3-4b-a10 Qwen/Qwen3-4B
 
 echo "" >> "$LOG"
 echo "=== orchestrator_a10_apr26 DONE $(date -u) ===" >> "$LOG"
