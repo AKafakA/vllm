@@ -45,8 +45,8 @@ run_cell() {
 # 1. M2-Main (fresh dense profile, no reuse)
 run_cell "${TAG_PREFIX}-m2-main" Qwen/Qwen3-8B ""
 
-# 2. R3 prefix-cache OFF
-run_cell "${TAG_PREFIX}-r3-prefix-off" Qwen/Qwen3-8B "--no-prefix-caching"
+# 2. R3 prefix-cache OFF (vllm 0.18 uses --no-enable-prefix-caching, NOT --no-prefix-caching)
+run_cell "${TAG_PREFIX}-r3-prefix-off" Qwen/Qwen3-8B "--no-enable-prefix-caching"
 
 # 3. TRITON
 run_cell "${TAG_PREFIX}-triton" Qwen/Qwen3-8B "--attention-backend TRITON_ATTN"
