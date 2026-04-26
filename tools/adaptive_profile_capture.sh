@@ -74,6 +74,12 @@ echo "=== adaptive_profile_capture start $(date -u) ===" > "$LOG"
 echo "TAG=$TAG  HW=$HW  ROUNDS=$ROUNDS  EXTRA=$EXTRA_SERVER_ARGS" >> "$LOG"
 echo "Rate list: $RATES_AND_PROMPTS" >> "$LOG"
 
+# StepCycleTracer hardcodes /tmp/emulator_step_trace.jsonl (env var override
+# not implemented). Clear stale data from any prior cell before this capture
+# so the trace file we end up reading reflects only THIS cell.
+rm -f /tmp/emulator_step_trace.jsonl
+echo "[$(date -u +%T)] cleared /tmp/emulator_step_trace.jsonl (StepCycleTracer hardcoded path)" >> "$LOG"
+
 for ROUND in $(seq 1 "$ROUNDS"); do
     echo "" >> "$LOG"
     echo "=== ROUND $ROUND / $ROUNDS at $(date -u +%T) ===" >> "$LOG"
@@ -119,7 +125,17 @@ for ROUND in $(seq 1 "$ROUNDS"); do
 done
 
 # Concatenate per-round traces and build the profile pack.
-cat "$TRACE_DIR"/round*.jsonl > "$FINAL_TRACE" 2>/dev/null
+# StepCycleTracer writes to hardcoded /tmp/emulator_step_trace.jsonl
+# (overrides via VLLM_EMULATOR_STEP_CYCLE_TRACE_PATH are not honored —
+# bug in trace_profiler.py StepCycleTracer.__init__). Until that's fixed,
+# read /tmp directly. The pre-capture rm above ensures freshness.
+if [ -s /tmp/emulator_step_trace.jsonl ]; then
+    cp /tmp/emulator_step_trace.jsonl "$FINAL_TRACE"
+fi
+# Fallback to legacy concat if /tmp file missing.
+if [ ! -s "$FINAL_TRACE" ]; then
+    cat "$TRACE_DIR"/round*.jsonl > "$FINAL_TRACE" 2>/dev/null
+fi
 echo "" >> "$LOG"
 echo "[$(date -u +%T)] building profile pack from $FINAL_TRACE" >> "$LOG"
 
