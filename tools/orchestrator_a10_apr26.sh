@@ -13,6 +13,12 @@
 
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
+# vast: route HF cache to /dev/shm (31G tmpfs RAM-disk; today's witness already
+# cached Qwen3-8B there). /workspace is on the 20G overlay (full).
+# Today's witness used /dev/shm/hf_home — keep using it.
+export HF_HOME="${HF_HOME:-/dev/shm/hf_home}"
+export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+mkdir -p "$HF_HOME/hub"
 source /workspace/vllm-emulator/.venv/bin/activate
 cd /workspace/vllm-emulator
 
