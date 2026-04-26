@@ -42,8 +42,24 @@ run_cell() {
     bash tools/correctness_cron.sh "./results/$cell_tag" >> "$LOG" 2>&1 || true
 }
 
-# 1. M2-Main (fresh dense profile, no reuse)
-run_cell "${TAG_PREFIX}-m2-main" Qwen/Qwen3-8B ""
+# 1. M2-Main — REUSE saved Stage 1 (real benches) + Stage 2 (recovered profile pack)
+# from the partially-recovered Apr 26 07:00 attempt. Only Stage 3 emu validate
+# needs to run here (~1.5h), saving ~6h.
+M2_REAL_DIR="./results/apr26-m2-main"
+M2_PROFILE="./results/RTX-8000-adaptive-apr26-m2-main/serving-full.json"
+if [ -f "$M2_PROFILE" ] && [ -f "$M2_REAL_DIR/real_r32.json" ]; then
+    echo "" >> "$LOG"
+    echo "[$(date -u +%T)] --- CELL: ${TAG_PREFIX}-m2-main (VALIDATE_ONLY) ---" >> "$LOG"
+    echo "    Reusing saved real_r*.json + recovered profile pack" >> "$LOG"
+    REUSE_PROFILE="$M2_PROFILE" VALIDATE_ONLY=1 REAL_BASELINE_DIR="$M2_REAL_DIR" \
+    CELL_TAG="${TAG_PREFIX}-m2-main" BENCH_MODEL=Qwen/Qwen3-8B EXTRA_SERVER_ARGS="" \
+        bash tools/run_one_full_sharegpt_cell.sh
+    echo "[$(date -u +%T)] CELL ${TAG_PREFIX}-m2-main (VALIDATE_ONLY) done (rc=$?)" >> "$LOG"
+    bash tools/correctness_cron.sh "$M2_REAL_DIR" >> "$LOG" 2>&1 || true
+else
+    echo "[$(date -u +%T)] M2 saved data missing — running full 3-stage" >> "$LOG"
+    run_cell "${TAG_PREFIX}-m2-main" Qwen/Qwen3-8B ""
+fi
 
 # 2. R3 prefix-cache OFF (vllm 0.18 uses --no-enable-prefix-caching, NOT --no-prefix-caching)
 run_cell "${TAG_PREFIX}-r3-prefix-off" Qwen/Qwen3-8B "--no-enable-prefix-caching"
