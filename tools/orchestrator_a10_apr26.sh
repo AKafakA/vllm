@@ -13,11 +13,14 @@
 
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
-# vast: route HF cache to /dev/shm (31G tmpfs RAM-disk; today's witness already
-# cached Qwen3-8B there). /workspace is on the 20G overlay (full).
-# Today's witness used /dev/shm/hf_home — keep using it.
-export HF_HOME="${HF_HOME:-/dev/shm/hf_home}"
-export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+# vast: HARD-pin HF cache to /dev/shm (31G tmpfs RAM-disk; today's witness
+# already cached Qwen3-8B there). /workspace is on the 20G overlay which
+# fills up at 8.6G partial download. Override any inherited HF_HOME from
+# .bashrc — must NOT use ${HF_HOME:-default} fallback because vast .bashrc
+# sets HF_HOME=/workspace/.hf_home which would win.
+export HF_HOME="/dev/shm/hf_home"
+export HUGGINGFACE_HUB_CACHE="/dev/shm/hf_home/hub"
+unset HF_HUB_CACHE TRANSFORMERS_CACHE 2>/dev/null
 mkdir -p "$HF_HOME/hub"
 source /workspace/vllm-emulator/.venv/bin/activate
 cd /workspace/vllm-emulator
