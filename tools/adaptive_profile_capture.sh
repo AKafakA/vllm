@@ -68,7 +68,7 @@ if [ ! -f "$SHAREGPT" ]; then
 fi
 
 # Balanced rate-and-prompts: dense at low conc AND saturation.
-RATES_AND_PROMPTS="2:3000 4:3000 8:2500 12:2500 16:2500 24:2500 32:3000 48:3000 inf:4000"
+RATES_AND_PROMPTS="1:2000 2:2000 4:2000 8:2000 12:2000 16:2000 20:2000 24:2500 28:3000 32:3000 40:3000 48:3000 inf:4000"
 
 echo "=== adaptive_profile_capture start $(date -u) ===" > "$LOG"
 echo "TAG=$TAG  HW=$HW  ROUNDS=$ROUNDS  EXTRA=$EXTRA_SERVER_ARGS" >> "$LOG"
