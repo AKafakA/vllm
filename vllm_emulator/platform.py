@@ -129,8 +129,14 @@ class EmulatorPlatform(Platform):
             vllm_config.device_config.device = "cuda"
         else:
             vllm_config.device_config.device = "cpu"
-        # Use GPU worker class (same code path as real GPU serving)
-        # The emulator hooks intercept execute_model() before any GPU work
+        # Worker selection: always use vllm's standard gpu_worker.
+        # On a real GPU host, gpu_worker drives the device directly.
+        # On a cpu_host (MOCK_CUDA=1), cuda_mock provides Python- and
+        # C-level CUDA shims that satisfy every cuda call gpu_worker
+        # makes — instantiation, Event/Stream ops, memory queries —
+        # so the same code path runs on either side. The emulator
+        # hook intercepts execute_model BEFORE any forward pass, so
+        # gpu_worker's actual compute kernels never fire.
         if vllm_config.parallel_config.worker_cls == "auto":
             vllm_config.parallel_config.worker_cls = (
                 "vllm.v1.worker.gpu_worker.Worker"
@@ -145,11 +151,32 @@ class EmulatorPlatform(Platform):
     def is_pin_memory_available(cls) -> bool:
         """Pin memory not available in emulator."""
         return False
-    
+
     @classmethod
     def use_custom_allreduce(cls) -> bool:
         """Custom allreduce not available in emulator."""
         return False
+
+    @classmethod
+    def get_attn_backend_cls(cls, backend, attn_selector_config=None,
+                             num_heads=None, **kwargs):
+        """Return a stub attention backend that passes init checks.
+
+        The emulator hook intercepts execute_model BEFORE any attention
+        kernel runs, so the backend never needs to actually compute. We
+        pick TRITON_ATTN here because it has the lightest init footprint
+        among vllm's CUDA backends and doesn't require flashinfer C++
+        extensions or specific GPU capabilities.
+
+        Without this override, vllm's CudaPlatform.get_attn_backend_cls
+        validates the GPU's compute capability against backend
+        requirements, which fails on a CPU-only host with cuda_mock —
+        none of FLASHINFER/TRITON_ATTN/FLEX_ATTENTION pass the real-GPU
+        capability check, so vllm raises 'Invalid attention backend for
+        cuda'. Returning the TRITON_ATTN class directly bypasses that
+        check.
+        """
+        return "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
     
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
@@ -165,12 +192,9 @@ class EmulatorPlatform(Platform):
 
 def emulator_platform_plugin() -> str | None:
     """
-    Platform plugin entry point.
-    Activates when EITHER VLLM_EMULATOR_ENABLE_ORACLE or
-    VLLM_EMULATOR_MOCK_CUDA is set. The platform plugin returns
-    device_type="cuda" + handles fallbacks via cuda_mock — required
-    on real-GPU hosts when CUDA_VISIBLE_DEVICES="" hides the GPU
-    (v4 mode) AND on no-GPU hosts (Mode B).
+    Platform plugin entry point. Activates whenever the emulator oracle
+    is enabled (single-path design — same plugin on cpu_host and on
+    real-GPU hosts). MOCK_CUDA env var kept as a deprecated alias.
     """
     import os
     if (os.environ.get("VLLM_EMULATOR_ENABLE_ORACLE", "").lower() in ("1", "true", "yes")
